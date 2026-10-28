@@ -1,0 +1,15 @@
+name: Sync Wiki
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/wiki/**"
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    uses: RXTX4816/cockpit-plugin-base-react/.github/workflows/sync-wiki-plugin.yml@main
+    secrets: inherit

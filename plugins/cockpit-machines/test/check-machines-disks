@@ -1,0 +1,1719 @@
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/common/pywrap", sys.argv)
+# SPDX-License-Identifier: LGPL-2.1-or-later
+#
+# Copyright (C) 2021 Red Hat, Inc.
+import os
+import time
+import xml.etree.ElementTree as ET
+
+import dialoglib
+import machineslib
+import testlib
+
+SYSTEM_LOCAL_CONF = '''<!DOCTYPE busconfig PUBLIC
+"-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN"
+"http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+<busconfig>
+    <policy user="root">
+        <allow eavesdrop="true"/>
+        <allow eavesdrop="true" send_destination="*"/>
+    </policy>
+</busconfig>'''
+
+
+def get_next_free_target(used_targets):
+    i = 0
+    while ("vd" + chr(97 + i) in used_targets):
+        i += 1
+
+    used_targets.append("vd" + chr(97 + i))
+    return used_targets
+
+
+def release_target(used_targets, target):
+    used_targets.remove(target)
+
+
+@testlib.nondestructive
+class TestMachinesDisks(machineslib.VirtualMachinesCase):
+
+    def wait_for_disk_stats(self, name, target):
+        b = self.browser
+        try:
+            with b.wait_timeout(10):
+                b.wait_visible(f"#vm-{name}-disks-{target}-used")  # wait for disk statistics to show up
+        except testlib.Error as ex:
+            if not ex.msg.startswith('timeout'):
+                raise
+            # stats did not show up, check if user message showed up
+            print("Libvirt version does not support disk statistics")
+            b.wait_visible(f"#vm-{name}-disks-notification")
+
+    def attackDisk(self, domain, source, target, bus, persistent=False, subdriver=None):
+        cmd = f"virsh attach-disk --domain {domain} --source {source} --target {target} --targetbus {bus}"
+        if subdriver:
+            cmd += f" --subdriver {subdriver}"
+        if persistent:
+            cmd += " --persistent"
+        self.machine.execute(cmd)
+
+    def testDiskEdit(self):
+        b = self.browser
+        m = self.machine
+
+        def openDialog(target, name="subVmTest1"):
+            b.click(f"#vm-{name}-disks-{target}-edit")
+            b.wait_visible(f"#vm-{name}-disks-{target}-edit-dialog")
+            return machineslib.MachinesDialogHelpers(b, f"#vm-{name}-disks-{target}-edit-dialog")
+
+        def cancel(d):
+            b.click(d.cancel_button())
+            b.wait_not_present(d.dialogSelector)
+
+        def save(d, xfail=None):
+            b.click(d.apply_button())
+            if xfail:
+                b.wait_in_text(f"{d.dialogSelector} .pf-v6-c-alert", xfail)
+            else:
+                b.wait_not_present(d.dialogSelector)
+
+        self.createVm("subVmTest1")
+
+        # prepare libvirt storage pools
+        p1 = os.path.join(self.vm_tmpdir, "vm_one")
+        m.execute(f"mkdir --mode 777 {p1}")
+        m.execute(f"virsh pool-create-as myPoolOne --type dir --target {p1}")
+        m.execute("virsh vol-create-as myPoolOne mydisk --capacity 100M --format raw")  # raw support shareable
+        m.execute("virsh vol-create-as myPoolOne mydisk2 --capacity 100M --format raw")
+        m.execute("virsh vol-create-as myPoolOne mydisk3 --capacity 100M --format qcow2")
+        m.execute("virsh vol-create-as myPoolOne mydisk4 --capacity 100M --format qcow2")
+        disks = ["mydisk", "mydisk2", "mydisk3", "mydisk4"]
+        testlib.wait(lambda: all(disk in m.execute("virsh vol-list myPoolOne") for disk in disks))
+
+        self.attackDisk("subVmTest1", f"{p1}/mydisk", "vde", "virtio", persistent=True)
+        self.attackDisk("subVmTest1", f"{p1}/mydisk2", "vdf", "virtio")
+        self.attackDisk("subVmTest1", f"{p1}/mydisk3", "vdg", "virtio", persistent=True, subdriver="qcow2")
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+        self.waitVmRow("subVmTest1")
+        b.wait_in_text("#vm-subVmTest1-system-state", "Running")
+
+        self.goToVmPage("subVmTest1")
+        self.waitDisks(["vda", "vde", "vdf", "vdg"])
+
+        # Test non-persistent disks are not configurable
+        b.wait_not_present("#vm-subVmTest1-disks-vdf-edit")
+
+        # Test close button
+        openDialog("vdg")
+        b.click("#vm-subVmTest1-disks-vdg-edit-dialog > .pf-v6-c-modal-box__close button")
+        b.wait_not_present("#vm-subVmTest1-disks-vdg-edit-dialog")
+
+        # Test qcow2 disk has both read-only and writeable configurable
+        d = openDialog("vdg")
+        b.wait_visible(d.id("access.mode", "readonly"))
+        b.wait_visible(d.id("access.mode", "writable"))
+        cancel(d)
+
+        # Test configuration of readonly and shareable attributes
+        d = openDialog("vde")
+        # Changing readonly with running VM
+        d.set_RadioSelect("access.mode", "readonly")
+
+        # Tooltip in dialog should show
+        b.wait_visible("#vm-subVmTest1-disks-vde-edit-idle-message")
+
+        # Save changes
+        save(d)
+        # See tooltip present in disk listing table
+        b.wait_visible("#vm-subVmTest1-disks-vde-access-tooltip")
+        # See label on top of VM details page is visible
+        b.wait_visible("#vm-subVmTest1-needs-shutdown")
+
+        # Shut off VM and see state has changed
+        self.performAction("subVmTest1", "forceOff")
+        # Check change has been applied after shutoff
+        self.expandDiskRow("vde")
+        b.wait_in_text("#vm-subVmTest1-disks-vde-access", "Read-only")
+        # See tooltip and label are longer present in disk listing table
+        b.wait_not_present("#vm-subVmTest1-disks-vde-access-tooltip")
+        b.wait_not_present("#vm-subVmTest1-needs-shutdown")
+
+        d = openDialog("vde")
+        # Changing to writeable
+        d.set_RadioSelect("access.mode", "writable")
+        # Tooltip in dialog should not be present
+        b.wait_not_present("#vm-subVmTest1-disks-vde-edit-idle-message")
+
+        # Close dialog
+        save(d)
+        b.wait_in_text("#vm-subVmTest1-disks-vde-access", "Writeable")
+        b.wait_not_present("#vm-subVmTest1-disks-vde-access-tooltip")
+        b.wait_not_present("#vm-subVmTest1-needs-shutdown")
+
+        # Set "shareable" attribute externally
+        m.execute("virt-xml --edit target=vde --disk shareable=on subVmTest1")
+        b.wait_in_text("#vm-subVmTest1-disks-vde-access", "Concurrently writeable")
+
+        b.wait_in_text("#vm-subVmTest1-disks-vde-bus", "virtio")
+        b.wait_in_text("#vm-subVmTest1-disks-vde-cache", "default")
+        # Change bus type to scsi and cache mode to writeback
+        d = openDialog("vde")
+        d.set_DropdownSelect("bus.type", "scsi")
+        d.set_DropdownSelect("cache", "writeback")
+
+        # Close dialog
+        save(d)
+        # Target has changed from vdX to sdX
+        self.expandDiskRow("sda")
+        b.wait_in_text("#vm-subVmTest1-disks-sda-bus", "scsi")
+        b.wait_in_text("#vm-subVmTest1-disks-sda-cache", "writeback")
+
+        # Configure readonly for the qcow2 disk
+        d = openDialog("vdg")
+        d.set_RadioSelect("access.mode", "readonly")
+
+        save(d)
+        b.wait_not_present("#vm-subVmTest1-disks-vdg-access-tooltip")
+        b.wait_not_present("#vm-subVmTest1-needs-shutdown")
+        self.expandDiskRow("vdg")
+        b.wait_in_text("#vm-subVmTest1-disks-vdg-access", "Read-only")
+
+        # Check that errors appear correctly and disappear when closing the dialog and reopening
+        self.attackDisk("subVmTest1", f"{p1}/mydisk4", "sdb", "sata", persistent=True)
+        b.reload()
+        b.enter_page('/machines')
+        # expected devices after bus type change
+        self.waitDisks(["sda", "sdb", "vda", "vdg"])
+        d = openDialog("sdb")
+        d.set_RadioSelect("access.mode", "readonly")
+        save(d, xfail="readonly sata disks are not supported")
+        cancel(d)
+        d = openDialog("sdb")
+        b.wait_not_present("#vm-subVmTest1-disks-sdb-edit-dialog .pf-v6-c-alert")
+        cancel(d)
+
+        # Virtio bus type should not be shown for CDROM devices
+        m.execute("touch /var/lib/libvirt/novell.iso")
+        m.execute("""
+            virsh attach-disk --domain subVmTest1 --source /var/lib/libvirt/novell.iso --target hda \
+                    --type cdrom --targetbus sata --mode readonly --persistent
+        """)
+        # virsh attach-disk want send an event for offline VM changes
+        b.reload()
+        b.enter_page('/machines')
+        # expected devices after bus type change
+        self.waitDisks(["hda", "sdb", "vda", "vdg"])
+
+        d = openDialog("hda")
+        b._wait_present(d.field("bus.type") + " option[value=sata]")
+        self.assertFalse(b.is_present(d.field("bus.type") + " option[value=virtio]"))
+
+        # As CDROMs are readonly access mode editing should be disabled
+        b.wait_visible(d.id("access.mode", "readonly"))
+        b.wait_not_present(d.id("access.mode", "writable"))
+        cancel(d)
+
+        # Start Vm
+        b.click("#vm-subVmTest1-system-run")
+        b.wait_in_text("#vm-subVmTest1-system-state", "Running")
+
+        # Test disk's bus cannot be changed on running VM
+        d = openDialog("sda")
+        b.wait_visible(d.field("bus.type") + ":disabled")
+        b.click("#vm-subVmTest1-disks-sda-edit-dialog button[aria-label='Close']")
+        b.wait_not_present("#vm-subVmTest1-disks-sda-edit-dialog")
+
+        # Disks on non-persistent VM cannot be edited
+        m.execute("virsh undefine subVmTest1")
+        b.wait_not_present("#vm-subVmTest1-disks-vde-edit")
+
+        self.goToMainPage()
+        self.createVm("subVmTest2", running=False, os="unknown")
+        self.goToVmPage("subVmTest2")
+        self.waitDisks(["hda"], vm="subVmTest2")
+
+        self.expandDiskRow("hda")
+        b.wait_in_text("#vm-subVmTest2-disks-hda-bus", "ide")
+
+        d = openDialog("hda", name="subVmTest2")
+        # "ide" is not among the supported bus types, but it is the
+        # current bus type, so it should be an option.
+        b._wait_present(d.field("bus.type") + " option[value=ide]")
+        d.set_DropdownSelect("bus.type", "sata")
+        save(d)
+
+        self.expandDiskRow("sda")
+        b.wait_in_text("#vm-subVmTest2-disks-sda-bus", "sata")
+        d = openDialog("sda", name="subVmTest2")
+        # Now "ide" should not be an option anymore.
+        b.wait_not_present(d.field("bus.type") + " option[value=ide]")
+
+    def testDisks(self):
+        b = self.browser
+        m = self.machine
+        prefix = "#vm-subVmTest1-disks-adddisk"
+
+        self.createVm("subVmTest1")
+        self.createVm("subVmTest2")
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+        self.waitVmRow("subVmTest1")
+
+        b.wait_in_text("#vm-subVmTest1-system-state", "Running")
+
+        self.goToVmPage("subVmTest1")
+
+        # Test basic disk properties
+        self.expandDiskRow("vda")
+        b.wait_in_text("#vm-subVmTest1-disks-vda-bus", "virtio")
+
+        b.wait_in_text("#vm-subVmTest1-disks-vda-device", "disk")
+
+        b.wait_in_text("#vm-subVmTest1-disks-vda-source-file", "/var/lib/libvirt/images/subVmTest1-2.img")
+
+        # Test domstats
+        self.wait_for_disk_stats("subVmTest1", "vda")
+        if b.is_present("#vm-subVmTest1-disks-vda-used"):
+            b.wait_in_text("#vm-subVmTest1-disks-vda-used", "GiB")
+            self.assertRegex(b.text("#vm-subVmTest1-disks-vda-used"), r"^(0|0\.0|0\.09) GiB$")
+
+        # Test add disk by external action
+        m.execute("qemu-img create -f raw /var/lib/libvirt/images/image3.img 128M")
+        # attach to the virtio bus instead of ide
+        m.execute("virsh attach-disk subVmTest1 /var/lib/libvirt/images/image3.img vdc")
+
+        b.wait_visible("#vm-subVmTest1-disks-vda-used")
+
+        b.wait_in_text("#vm-subVmTest1-disks-vda-bus", "virtio")
+
+        self.expandDiskRow("vdc")
+        b.wait_in_text("#vm-subVmTest1-disks-vdc-bus", "virtio")
+        b.wait_in_text("#vm-subVmTest1-disks-vdc-device", "disk")
+        b.wait_in_text("#vm-subVmTest1-disks-vdc-source-file", "/var/lib/libvirt/images/image3.img")
+
+        self.wait_for_disk_stats("subVmTest1", "vdc")
+        if b.is_present("#vm-subVmTest1-disks-vdc-used"):
+            b.wait_in_text("#vm-subVmTest1-disks-vdc-used", "0")
+            b.wait_in_text("#vm-subVmTest1-disks-vdc-capacity", "0.12")  # 128 MB
+
+        d = machineslib.MachinesDialogHelpers(b, f"{prefix}-dialog-modal-window")
+
+        # Check a warning message about a volume being used by another VM
+        b.click(f"{prefix}")
+        d.set_RadioSelect("mode", "use-existing")
+        d.set_DropdownSelect("use_existing.pool", "images")
+        d.set_DropdownSelect("use_existing.volume", "subVmTest2-2.img")
+        b.wait_in_text(d.helper_text("use_existing.volume"), "used by subVmTest2")
+        b.click(d.cancel_button())
+
+        # Test remove disk - by external action
+        m.execute("virsh detach-disk subVmTest1 vdc")
+        print("Restarting vm-subVmTest1, might take a while")
+        self.performAction("subVmTest1", "forceReboot")
+
+        self.waitDisks(["vda"])
+        b.wait_not_present("#vm-subVmTest1-disks-vdc-device")
+
+        # Check when no storage pool and adding existed disk
+        # delete the default pool
+        m.execute("virsh pool-destroy images; virsh pool-undefine images")
+        # Open "add disk" dialog
+        b.click(f"{prefix}")
+        # Check
+        b.wait_not_present("#navbar-oops")
+        b.wait_visible(d.id("mode", "use-existing") + ":disabled")
+
+    class VMInsertMediaDialog(dialoglib.FileChooserHelpers):
+        def __init__(
+            self, test_obj,
+            vm_name='subVmTest1',
+            mode="custom-path", target='sda',
+            pool_name=None, volume_name=None,
+            file_path=None,
+            force=False,
+            pixel_tag=None,
+        ):
+            super().__init__(test_obj.browser, ".file-chooser")
+
+            self.test_obj = test_obj
+            self.mode = mode
+            self.vm_name = vm_name
+            self.file_path = file_path
+            self.pool_name = pool_name
+            self.volume_name = volume_name
+            self.target = target
+            self.force = force
+            self.pixel_tag = pixel_tag
+
+        def _get_disks(self):
+            m = self.test_obj.machine
+
+            virsh_output = m.execute(f"virsh -c qemu:///system domblklist {self.vm_name} --details").rstrip('\n')
+            lines = virsh_output.splitlines()[2:]
+            disks = {}
+            for line in lines:
+                cells = line.split()
+                # use disk's target (3rd column in table) as key
+                disks[cells[2]] = {
+                    'type': cells[0],
+                    'device': cells[1],
+                    'source': cells[3],
+                }
+
+            return disks
+
+        def execute(self):
+            self.openDialog() \
+                .fill() \
+                .insert() \
+                .verify()
+
+            if not self.force:
+                self.eject()
+            else:
+                self.force_eject()
+            self.verify_eject()
+
+        def openDialog(self):
+            b = self.test_obj.browser
+            prefix = f"#vm-{self.vm_name}-disks-{self.target}-insert"
+            b.click(prefix)  # button
+            b.wait_in_text(".pf-v6-c-modal-box__title", "Insert media")
+
+            return self
+
+        def fill(self):
+            b = self.test_obj.browser
+            if self.mode == "custom-path":
+                # Type in file path
+                self.set_path(self.file_path)
+            elif self.mode == "use-existing":
+                # Choose storage pool
+                b.click(self.sidebar(f'Pool "{self.pool_name}"'))
+                # Select from the available volumes
+                b.click(self.file(self.volume_name))
+
+            return self
+
+        def insert(self):
+            b = self.test_obj.browser
+            b.click(self.apply_button())
+
+            return self
+
+        def verify(self):
+            b = self.test_obj.browser
+            m = self.test_obj.machine
+
+            b.wait_not_present(".pf-v6-c-modal-box")
+
+            disks = self._get_disks()
+
+            self.test_obj.expandDiskRow(self.target)
+            if self.mode == "custom-path":
+                path = self.file_path
+            else:
+                path = m.execute(f"virsh vol-path --pool {self.pool_name} {self.volume_name}").strip()
+
+            # verify UI shows correct media
+            b.wait_in_text(f'#vm-{self.vm_name}-disks-{self.target}-source-file', path)
+            # verify virsh shows correct media
+            self.test_obj.assertEqual(disks[self.target]['type'], "file")
+            self.test_obj.assertEqual(disks[self.target]['device'], "cdrom")
+            self.test_obj.assertEqual(disks[self.target]['source'], path)
+
+            return self
+
+        def eject(self):
+            b = self.test_obj.browser
+            m = self.test_obj.machine
+
+            b.click(f"#vm-{self.vm_name}-disks-{self.target}-eject-button")  # button
+            b.wait_in_text(".pf-v6-c-modal-box__title", "Eject disc from VM")
+
+            if self.pixel_tag:
+                b.assert_pixels(".pf-v6-c-modal-box", self.pixel_tag)
+
+            if self.mode == "custom-path":
+                path = self.file_path
+            else:
+                path = m.execute(f"virsh vol-path --pool {self.pool_name} {self.volume_name}").strip()
+
+            b.wait_in_text(f"#vm-{self.vm_name}-disks-{self.target}-modal-description-file", path)
+
+            b.click(".pf-v6-c-modal-box__footer button:contains(Eject)")
+
+            # Ejecting sometimes fails with "operation failed: timed out waiting for open tray of 'sda'"
+            # Instead of failing the test, try to force eject and continue.
+            try:
+                b.wait_not_present(".pf-v6-c-modal-box")
+            except testlib.Error:
+                b.wait_visible(".pf-v6-c-modal-box__footer button:contains(Force eject)")
+                b.click(".pf-v6-c-modal-box__footer button:contains(Force eject)")
+                b.wait_not_present(".pf-v6-c-modal-box")
+
+            return self
+
+        def force_eject(self):
+            b = self.test_obj.browser
+            m = self.test_obj.machine
+
+            b.click(f"#vm-{self.vm_name}-disks-{self.target}-eject-button")  # button
+            b.wait_in_text(".pf-v6-c-modal-box__title", "Eject disc from VM")
+
+            # "Force eject" button is only shown if regular ejection fail
+            # This might be a bit dirty, but one easy way to cause regular ejection to
+            # fail is to poweroff virtual machine just before "Eject" button is clicked
+            # This will return "domain is not running" failure, but that's fine, as we
+            # offer "Force eject" option after any kind of failure
+            m.execute(f"virsh destroy {self.vm_name}")
+            b.click(".pf-v6-c-modal-box__footer button:contains(Eject)")
+
+            # Check "Force eject" is present and Regular eject is disabled
+            b.wait_visible(".pf-v6-c-modal-box__footer button:contains(Eject):disabled")
+            b.wait_visible(".pf-v6-c-modal-box__footer button:contains(Force eject)")
+
+            # Start the VM again so "Force eject" will work
+            m.execute(f"virsh start {self.vm_name}")
+            # Watch D-BUS system calls
+            # https://piware.de/2013/09/how-to-watch-system-d-bus-method-calls/
+            m.write("/usr/share/dbus-1/system-local.conf", SYSTEM_LOCAL_CONF)
+            # Setup dbus monitor to watch for disk ejection call
+            interface = "\"interface='org.libvirt.Domain',member='UpdateDevice'\""
+            m.spawn(f"dbus-monitor --system {interface} > /tmp/dbus_monitor_logs", "dbusmonitor")
+
+            # Force eject the disc
+            b.click(".pf-v6-c-modal-box__footer button:contains(Force eject)")
+            b.wait_not_present(".pf-v6-c-modal-box")
+
+            # Check dbus call was called with "VIR_DOMAIN_DEVICE_MODIFY_FORCE" flag
+            # Flag 'uint32 7' is a logical OR of flags:
+            # VIR_DOMAIN_DEVICE_MODIFY_CURRENT = 0
+            # VIR_DOMAIN_DEVICE_MODIFY_LIVE = 1
+            # VIR_DOMAIN_DEVICE_MODIFY_CONFIG = 2
+            # VIR_DOMAIN_DEVICE_MODIFY_FORCE = 4 <- is only used with 'Force eject'
+            # https://libvirt.org/html/libvirt-libvirt-domain.html
+            monitor_logs = m.execute("cat /tmp/dbus_monitor_logs")
+            self.test_obj.assertIn("uint32 7", monitor_logs)
+
+            return self
+
+        def verify_eject(self):
+            b = self.test_obj.browser
+
+            if self.mode == "custom-path":
+                b.wait_not_present(f'#vm-{self.vm_name}-disks-{self.target}-source-file')
+            else:
+                b.wait_not_present(f'#vm-{self.vm_name}-disks-{self.target}-source-pool')
+                b.wait_not_present(f'#vm-{self.vm_name}-disks-{self.target}-source-volume')
+
+            disks = self._get_disks()
+
+            # Empty cdrom should have no source
+            self.test_obj.assertEqual(disks[self.target]['source'], '-')
+
+    class VMAddDiskDialog(machineslib.MachinesDialogHelpers):
+        def __init__(
+            self, test_obj, pool_name=None, volume_name=None,
+            vm_name='subVmTest1',
+            file_path=None, device=None,
+            volume_size=10, volume_size_unit='MiB',
+            mode="create-new",
+            expected_target='vda', permanent=True, cache_mode=None,
+            expected_format='raw',
+            serial=None,
+            bus_type=None, pool_type=None,
+            volume_format=None, expected_volume_format=None,
+            persistent_vm=True,
+            expected_access=None,  # options: "Read-only", "Writeable", "Writeable and shared"
+            pixel_test_tag=None,
+            xfail=False, xfail_object=None,
+            xfail_error_message=None, xfail_error_title=None,
+            xwarning_object=None, xwarning_message=None,
+            pixel_test_ignore=None,
+        ):
+            super().__init__(test_obj.browser, f"#vm-{vm_name}-disks-adddisk-dialog-modal-window")
+
+            self.test_obj = test_obj
+            self.vm_name = vm_name
+            self.file_path = file_path
+            self.device = device
+            self.pool_name = pool_name
+            self.mode = mode
+            self.volume_name = volume_name
+            self.volume_size = volume_size
+            self.volume_size_unit = volume_size_unit
+            self.expected_target = expected_target
+            self.expected_format = expected_format
+            self.permanent = permanent
+            self.cache_mode = cache_mode
+            self.bus_type = bus_type
+            self.serial = serial
+            self.pool_type = pool_type
+            self.volume_format = volume_format
+            self.expected_volume_format = expected_volume_format
+            self.persistent_vm = persistent_vm
+            self.expected_access = expected_access
+
+            self.pixel_test_tag = pixel_test_tag
+            self.pixel_test_ignore = pixel_test_ignore
+
+            self.xfail = xfail
+            self.xfail_object = xfail_object
+            self.xfail_error_message = xfail_error_message
+            self.xfail_error_title = xfail_error_title
+            self.xwarning_object = xwarning_object
+            self.xwarning_message = xwarning_message
+
+        @staticmethod
+        def getExpectedFormat(pool_type, expected_volume_format):
+            # Guess by the name of the pool it's format to avoid passing more parameters
+            if pool_type == 'iscsi':
+                return 'unknown'
+            elif pool_type == 'disk':
+                return 'none'
+            elif expected_volume_format == 'iso':
+                return 'iso'
+            else:
+                return 'qcow2'
+
+        def execute(self):
+            self.openDialog()
+            self.fill()
+            prefix = f"#vm-{self.vm_name}-disks-adddisk"
+
+            if self.pixel_test_tag:
+                self.test_obj.browser.wait_visible(self.apply_button() + ":not([aria-disabled=true])")
+                self.test_obj.browser.assert_pixels(f"{prefix}-dialog-modal-window", self.pixel_test_tag,
+                                                    ignore=[self.pixel_test_ignore] if self.pixel_test_ignore else [],
+                                                    skip_layouts=["rtl"])
+
+            self.add_disk()
+            if not self.xfail:
+                self.verify_disk_added()
+            else:
+                if self.xfail_object:
+                    self.test_obj.browser.wait_in_text(self.helper_text(self.xfail_object), self.xfail_error_message)
+                else:
+                    self.test_obj.browser.wait_in_text(self.error(), self.xfail_error_title)
+                self.test_obj.browser.click(self.cancel_button())
+                self.test_obj.browser.wait_not_present(".pf-v6-c-modal-box")
+
+        def openDialog(self):
+            b = self.test_obj.browser
+            prefix = f"#vm-{self.vm_name}-disks-adddisk"
+            b.click(prefix)  # button
+            b.wait_in_text(".pf-v6-c-modal-box__title", "Add disk")
+
+            self.set_RadioSelect("mode", self.mode)
+
+            return self
+
+        def fill(self):
+            b = self.test_obj.browser
+            if self.mode == "create-new":
+                # Choose storage pool
+                self.set_DropdownSelect("create_new.pool", self.pool_name)
+
+                # Insert name for the new volume
+                self.set_TextInput("create_new.volume.name", self.volume_name)
+                # Insert size for the new volume
+                self.set_TextInput("create_new.volume.newSize.size", str(self.volume_size))
+                self.set_DropdownSelect("create_new.volume.newSize.unit", self.volume_size_unit)
+
+                if self.volume_format:
+                    self.set_DropdownSelect("create_new.volume.format", self.volume_format)
+                else:
+                    self.wait_DropdownSelect("create_new.volume.format",
+                                         self.getExpectedFormat(self.pool_type, self.expected_volume_format))
+            elif self.mode == "custom-path":
+                b.wait_visible(self.field("custom_path.file"))
+                # Type in file path
+                self.set_FileAutoComplete("custom_path.file", self.file_path)
+                if self.device:
+                    if self.file_path.endswith(".iso"):
+                        # wait for auto-detection to finish
+                        self.wait_DropdownSelect("custom_path.device", "cdrom")
+                    self.set_DropdownSelect("custom_path.device", self.device)
+            elif self.mode == "use-existing":
+                # Choose storage pool
+                self.set_DropdownSelect("use_existing.pool", self.pool_name)
+                # Select from the available volumes
+                self.set_DropdownSelect("use_existing.volume", self.volume_name)
+
+            # Configure persistency - by default the check box is checked
+            if self.persistent_vm:
+                if not self.permanent:
+                    b.set_checked(self.field("permanent"), False)
+            else:
+                # checkbox not shown at all for transient VM
+                b.wait_not_present(self.field("permanent"))
+
+            # Expand additional options
+            if self.cache_mode or self.bus_type or self.serial:
+                b.click("div.pf-v6-c-modal-box button:contains('Show additional options')")
+                b.wait_in_text("div.pf-v6-c-modal-box button[aria-expanded=true]", "Hide additional options")
+
+                # Configure performance options
+                if self.cache_mode:
+                    self.set_DropdownSelect("additional_options.cache_mode", self.cache_mode)
+
+                # Configure bus type
+                if self.bus_type:
+                    self.set_DropdownSelect("additional_options.bus_type", self.bus_type)
+
+                # Configure serial number
+                if self.serial:
+                    self.set_TextInput("additional_options.serial", self.serial)
+            else:
+                b.wait_not_visible(self.field("additional_options.cache_mode"))
+                b.wait_not_visible(self.field("additional_options.bus_type"))
+                b.wait_not_visible(self.field("additional_options.serial"))
+
+            if self.xwarning_object:
+                b.wait_in_text(self.helper_text(self.xwarning_object),
+                               self.xwarning_message)
+
+            return self
+
+        def add_disk(self):
+            b = self.test_obj.browser
+            b.click(".pf-v6-c-modal-box__footer button:contains(Add)")
+
+            return self
+
+        def verify_disk_added(self):
+            def _get_disk_prop(target, vm_name, prop):
+                x_path = f'/domain/devices/disk[target/@dev="{target}"]/{prop}'
+                return self.test_obj.getDomainXpathValue(self.vm_name, x_path)
+
+            b = self.test_obj.browser
+            m = self.test_obj.machine
+            with b.wait_timeout(60):
+                b.wait_not_present(f"#vm-{self.vm_name}-disks-adddisk-dialog-modal-window")
+            if self.device == "cdrom" or (self.file_path and self.file_path.endswith(".iso")) \
+                    or self.expected_volume_format == "iso":
+                expected_bus_type = self.bus_type or "scsi"
+                expected_device = self.device or "cdrom"
+            else:
+                expected_bus_type = self.bus_type or "virtio"
+                expected_device = self.device or "disk"
+
+            # Check volume was added to pool's volume list
+            if self.mode == "create-new":
+                self.test_obj.goToMainPage()
+                b.click(".pf-v6-c-card .pf-v6-c-card__header button:contains(Storage pool)")
+
+                self.test_obj.waitPoolRow(self.pool_name)
+                self.test_obj.togglePoolRow(self.pool_name)
+
+                # open the "Storage volumes" subtab
+                b.click(f"tr[data-row-id=pool-{self.pool_name}-system] + tr li:contains('Storage volumes') button")
+                b.wait_visible(f"#pool-{self.pool_name}-system-volume-{self.volume_name}-name")
+
+                b.click(".machines-listing-breadcrumb li a:contains(Virtual machines)")
+                self.test_obj.goToVmPage(self.vm_name)
+
+            # Check basics
+            self.test_obj.expandDiskRow(self.expected_target)
+            b.wait_in_text(f"#vm-{self.vm_name}-disks-{self.expected_target}-bus", expected_bus_type)
+            if self.expected_access:
+                b.wait_in_text(f"#vm-{self.vm_name}-disks-{self.expected_target}-access", self.expected_access)
+            b.wait_in_text(f"#vm-{self.vm_name}-disks-{self.expected_target}-device", expected_device)
+
+            # Detect volume format
+            if self.mode != "custom-path":
+                volume_xml = m.execute(f"virsh vol-dumpxml {self.volume_name} {self.pool_name} ")
+                detect_format_cmd = "echo \"{0}\" | xmllint --xpath '{1}' -"
+
+                source = "dev" if self.pool_type in ["disk", "iscsi"] else "file"
+                path = m.execute(f"virsh vol-path --pool {self.pool_name} {self.volume_name}").strip()
+                b.wait_in_text(f'#vm-{self.vm_name}-disks-{self.expected_target}-source-{source}', path)
+
+                expected_format = self.getExpectedFormat(self.pool_type, self.expected_volume_format)
+                # Unknown pool format isn't present in xml anymore
+                if expected_format == "unknown":
+                    m.execute(detect_format_cmd.format(volume_xml, "/volume/target") + " | grep -qv format")
+                else:
+                    vol_xml = m.execute(detect_format_cmd.format(volume_xml, "/volume/target/format")).rstrip()
+                    self.test_obj.assertEqual(vol_xml, f'<format type="{self.volume_format or expected_format}"/>')
+                    if self.pool_type == "disk":
+                        # Disks of disk type pools have raw as driver.type
+                        b.wait_in_text(f"#vm-{self.vm_name}-disks-{self.expected_target}-type", "raw")
+                    elif self.expected_volume_format != "iso":
+                        # If volume is ISO file, libvirt doesn't assign drive.type to a disk
+                        b.wait_in_text(f"#vm-{self.vm_name}-disks-{self.expected_target}-type",
+                                       self.volume_format or expected_format)
+            else:
+                b.wait_in_text(f'#vm-{self.vm_name}-disks-{self.expected_target}-source-file', self.file_path)
+                domainXML = self.test_obj.machine.execute(f"virsh dumpxml {self.vm_name}")
+                root = ET.fromstring(domainXML)
+                devices = root.find('devices')
+                for disk in devices.findall('disk'):
+                    filepath = disk.find('source').get('file')
+                    if filepath == self.file_path:
+                        diskformat = disk.find('driver').get('type')
+                        self.test_obj.assertEqual(diskformat, self.expected_format)
+                        break
+
+            if self.cache_mode:
+                b.wait_in_text(f"#vm-{self.vm_name}-disks-{self.expected_target}-cache", self.cache_mode)
+
+            if self.serial:
+                b.wait_in_text(f"#vm-{self.vm_name}-disks-{self.expected_target}-serial", self.serial)
+
+            # Check we set unmap by default
+            self.test_obj.assertEqual(
+                'discard="unmap"',
+                _get_disk_prop(self.expected_target, self.vm_name, "driver/@discard")
+            )
+
+            return self
+
+    @testlib.skipImage("TODO: scsi support missing on arch image", "arch")
+    @testlib.skipImage("Debian images' -cloud kernel don't have target-cli-mod kmod", "debian*")
+    def testAddDiskSCSI(self):
+        b = self.browser
+        m = self.machine
+
+        used_targets = ['vda']
+
+        args = self.createVm("subVmTest1")
+
+        # Preparations for testing ISCSI pools
+        target_iqn = "iqn.2019-09.cockpit.lan"
+        self.prepareStorageDeviceOnISCSI(target_iqn)
+
+        m.execute(f"""
+        virsh pool-define-as iscsi-pool --type iscsi --target /dev/disk/by-id \
+                --source-host 127.0.0.1 --source-dev {target_iqn}
+        virsh pool-start iscsi-pool
+        """)
+        cmd = "virsh pool-refresh iscsi-pool; virsh vol-list iscsi-pool"
+        testlib.wait(lambda: "unit:0:0:0" in self.machine.execute(cmd), delay=3)
+
+        self.addCleanup(self.machine.execute, "virsh pool-destroy iscsi-pool; virsh pool-undefine iscsi-pool")
+
+        # Remove images pool so that we get the iscsi-pool pool first on the list
+        m.execute("virsh pool-destroy images; virsh pool-undefine images")
+
+        # Wait for the system to completely start
+        self.waitGuestBooted(args['logfile'])
+
+        self.login_and_go("/machines#/storages")
+        self.waitPageInit()
+        # Wait until we see the iscsi pool
+        b.wait_text("#pool-iscsi-pool-system-state", "active")
+
+        b.go("/machines")
+        b.wait_in_text("#vm-subVmTest1-system-state", "Running")
+        self.goToVmPage("subVmTest1")
+
+        # ISCSI driver does not support virStorageVolCreate API
+        d = self.VMAddDiskDialog(
+            self,
+            mode='use-existing',
+            pool_name='iscsi-pool',
+            pool_type='iscsi',
+        ).openDialog()
+        b.wait_visible(d.id("mode", "create-new") + ":disabled")
+        b.click(d.cancel_button())
+        b.wait_not_present(".pf-v6-c-modal-box")
+
+        self.VMAddDiskDialog(
+            self,
+            pool_name='iscsi-pool',
+            pool_type='iscsi',
+            volume_name='unit:0:0:0',
+            expected_target=get_next_free_target(used_targets)[-1],
+            mode='use-existing',
+        ).execute()
+
+        # Detach the iscsi disk before reaching teardown because shutting of the domains would sometimes hang when
+        # iscsi disks are attached.
+        m.execute("virsh detach-disk subVmTest1 --target vdb")
+
+    def testAddDiskNFS(self):
+        b = self.browser
+        m = self.machine
+
+        used_targets = ['vda']
+
+        # Start the virtual machine as creating a nfs volume is quite expensive
+        args = self.createVm("subVmTest1")
+
+        m.execute("if selinuxenabled 2>/dev/null; then setsebool -P virt_use_nfs 1; fi")
+
+        # HACK: NFS produces dozens of permissive=1 SELinux issues; setroubleshoot runs massively parallel
+        # on them, and eats up too much RAM and I/O; https://bugzilla.redhat.com/show_bug.cgi?id=2326499
+        if m.execute("systemctl list-unit-files --no-legend setroubleshootd.service", check=False).strip():
+            m.execute("systemctl mask --runtime setroubleshootd")
+            self.addCleanup(m.execute, "systemctl unmask setroubleshootd")
+
+        # Prepare a local NFS pool
+        self.restore_file("/etc/exports")
+        nfs_pool = os.path.join(self.vm_tmpdir, "nfs_pool")
+        mnt_exports = os.path.join(self.vm_tmpdir, "mnt_exports")
+        m.execute(f"mkdir {nfs_pool} {mnt_exports}")
+        m.write("/etc/exports", f"{mnt_exports} 127.0.0.1/24(rw,sync,no_root_squash,no_subtree_check,fsid=0)")
+        m.execute(f"""
+        systemctl restart nfs-server
+        # HACK: end grace period to avoid one minute timeout waiting on qemu-img to acquire a lock
+        sm-notify -f
+        virsh pool-define-as nfs-pool --type netfs --target {nfs_pool} \
+                --source-host 127.0.0.1 --source-path {mnt_exports}
+        virsh pool-start nfs-pool
+        """)
+        # And create a volume on it in order to test use existing volume dialog
+        m.execute("virsh vol-create-as --pool nfs-pool --name nfs-volume-0 --capacity 1M --format qcow2")
+
+        # Wait for the system to completely start
+        self.waitGuestBooted(args['logfile'])
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+
+        b.wait_in_text("#vm-subVmTest1-system-state", "Running")
+        self.goToVmPage("subVmTest1")
+
+        self.VMAddDiskDialog(
+            self,
+            pool_name='nfs-pool',
+            volume_name='nfs-volume-0',
+            mode='use-existing',
+            volume_size=1,
+            volume_size_unit='MiB',
+            expected_target=get_next_free_target(used_targets)[-1],
+            pixel_test_tag='vm-add-disk-modal-nfs',
+            # FIXME: The buttons size seems to change undeterministically
+            pixel_test_ignore='.pf-v6-c-modal-box__footer',
+        ).execute()
+
+        self.VMAddDiskDialog(
+            self,
+            pool_name='nfs-pool',
+            volume_name='nfs-volume-1',
+            volume_size=1,
+            volume_size_unit='MiB',
+            expected_target=get_next_free_target(used_targets)[-1],
+        ).execute()
+
+    def testAddDiskPool(self):
+        b = self.browser
+        m = self.machine
+
+        dev = self.add_ram_disk(2)
+        used_targets = ['vda']
+
+        self.machine.execute(f"""
+            virsh pool-define-as pool-disk disk - - {dev} - {os.path.join(self.vm_tmpdir, 'poolDiskImages')}
+            virsh pool-build pool-disk --overwrite
+            virsh pool-start pool-disk""")
+
+        loop_dev = self.add_loopback_disk()
+        existing_disk = os.path.basename(loop_dev) + "p1"
+        existing_disk2 = os.path.basename(loop_dev) + "p2"
+        self.machine.execute(f"""
+            virsh pool-define-as loop-disk disk - - {loop_dev} - {os.path.join(self.vm_tmpdir, 'poolLoopImages')}
+            virsh pool-build loop-disk --overwrite
+            virsh pool-start loop-disk
+            virsh vol-create-as loop-disk {existing_disk} 1M
+            virsh vol-create-as loop-disk {existing_disk2} 1M""")
+        self.addCleanup(m.execute, f"wipefs -a {loop_dev}")
+
+        args = self.createVm("subVmTest1")
+        self.addCleanup(m.execute, "virsh destroy subVmTest1")
+
+        # Wait for the system to completely start
+        self.waitGuestBooted(args['logfile'])
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+
+        b.wait_in_text("#vm-subVmTest1-system-state", "Running")
+        self.goToVmPage("subVmTest1")
+
+        partition = os.path.basename(dev) + "1"
+        self.VMAddDiskDialog(
+            self,
+            pool_name='pool-disk',
+            pool_type='disk',
+            volume_name=partition,
+            volume_size=1,
+            volume_size_unit='MiB',
+            expected_target=get_next_free_target(used_targets)[-1],
+            pixel_test_tag='vm-add-disk-modal-disk-pool',
+            # FIXME: The buttons size seems to change undeterministically
+            pixel_test_ignore='.pf-v6-c-modal-box__footer',
+        ).execute()
+
+        self.VMAddDiskDialog(
+            self,
+            mode="use-existing",
+            pool_name="loop-disk",
+            pool_type="disk",
+            volume_name=existing_disk,
+            expected_target=get_next_free_target(used_targets)[-1],
+        ).execute()
+
+        # Test fix for https://bugzilla.redhat.com/show_bug.cgi?id=2107247
+        m.upload([os.path.join(testlib.BOTS_DIR, "machine/cloud-init.iso")], "/var/lib/libvirt/images/defaultVol.iso")
+        m.execute("virsh pool-refresh images")
+        testlib.wait(lambda: "defaultVol.iso" in m.execute("virsh vol-list images"), delay=3)
+
+        # wait until the volume bubbled through the UI
+        b.go("/machines#/storages")
+        self.waitPoolRow("images")
+        self.togglePoolRow("images")
+        b.click("tr[data-row-id=pool-images-system] + tr li:contains('Storage volumes') button")
+        b.wait_in_text("#storage-pools-listing", "defaultVol.iso")
+        b.go("/machines#vm?name=subVmTest1&connection=system")
+
+        dialog = self.VMAddDiskDialog(
+            self,
+            mode="use-existing",
+            pool_name="loop-disk",
+            pool_type="disk",
+            volume_name=existing_disk2,
+            expected_target=get_next_free_target(used_targets)[-1],
+            device="disk",
+        )
+        dialog.openDialog()
+        # First select some iso file, where disk type is set to "cdrom"
+        dialog.set_DropdownSelect("use_existing.pool", "images")
+        dialog.set_DropdownSelect("use_existing.volume", "defaultVol.iso")
+        # Then choose a different storage pool without selecting the volume
+        # (let UI automatically select the first volume from loop-disk storage pool)
+        # This tests that type of disk automatically resets back to default "disk"
+        dialog.set_DropdownSelect("use_existing.pool", "loop-disk")
+        # Check that newly attached disk is indeed of type "disk"
+        dialog.add_disk().verify_disk_added()
+
+    @testlib.timeout(900)
+    def testAddDiskDirPool(self):
+        b = self.browser
+        m = self.machine
+        prefix = "#vm-subVmTest1-disks-adddisk"
+
+        used_targets = ['vda']
+        transient_targets = []
+
+        self.createVm("subVmTest1")
+
+        # prepare libvirt storage pools
+        v1 = os.path.join(self.vm_tmpdir, "vm_one")
+        v2 = os.path.join(self.vm_tmpdir, "vm_two")
+        default_tmp = os.path.join(self.vm_tmpdir, "default_tmp")
+        m.execute(f"mkdir --mode 777 {v1} {v2} {default_tmp}")
+        m.execute(f"virsh pool-define-as default_tmp --type dir --target {default_tmp}; virsh pool-start default_tmp")
+        m.execute(f"virsh pool-define-as myPoolOne --type dir --target {v1}; virsh pool-start myPoolOne")
+        m.execute(f"virsh pool-define-as myPoolTwo --type dir --target {v2}; virsh pool-start myPoolTwo")
+
+        m.upload([os.path.join(testlib.BOTS_DIR, "machine/cloud-init.iso")],
+                 os.path.join(default_tmp, "defaultVol.iso"))
+        m.execute("virsh pool-refresh default_tmp")
+        m.execute("virsh vol-create-as myPoolTwo mydiskofpooltwo_temporary --capacity 50M --format qcow2")
+        m.execute("virsh vol-create-as myPoolTwo mydiskofpooltwo_permanent --capacity 50M --format qcow2")
+
+        testlib.wait(lambda: "mydiskofpooltwo_permanent" in m.execute("virsh vol-list myPoolTwo"))
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+
+        b.wait_in_text("#vm-subVmTest1-system-state", "Running")
+        self.goToVmPage("subVmTest1")
+
+        transient_targets.append(get_next_free_target(used_targets)[-1])
+        self.VMAddDiskDialog(
+            self,
+            pool_name='myPoolOne',
+            volume_name='mydiskofpoolone_temporary',
+            mode='create-new',
+            volume_size=10,
+            volume_size_unit='MiB',
+            permanent=False,
+            expected_target=transient_targets[-1],
+        ).execute()
+
+        d = self.VMAddDiskDialog(
+            self,
+            pool_name='myPoolOne',
+            mode='use-existing',
+        ).openDialog()
+        b._wait_present(d.field("use_existing.pool") + " option[value=myPoolTwo]")
+        # since both disks are already attached
+        b.wait_not_present(d.field("use_existing.pool") + " option[value=myPoolOne]")
+        b.click(d.cancel_button())
+        b.wait_not_present(f"{prefix}-dialog-modal-window")
+
+        pool_disk = get_next_free_target(used_targets)[-1]
+        self.VMAddDiskDialog(
+            self,
+            pool_name='myPoolTwo',
+            volume_name='mydiskofpooltwo_permanent',
+            volume_size=2,
+            mode='use-existing',
+            expected_target=pool_disk
+        ).execute()
+
+        # shut off
+        self.performAction("subVmTest1", "forceOff")
+
+        # check if the just added non-permanent disks are gone
+        for target in transient_targets:
+            b.wait_not_present(f"#vm-subVmTest1-disks-{target}-device")
+            release_target(used_targets, target)
+
+        permanent_targets = [t for t in used_targets if t not in transient_targets]
+        self.waitDisks(permanent_targets)
+
+        # Check that creating a new volume in default_tmp does not by
+        # accident use the defaults from defaultVol.iso.  Those
+        # defaults will add the disk as "scsi" and "raw", while we
+        # expect "virtio" and "qcow2".  It's important that
+        # defaultVol.iso is not yet attached itself for this.
+
+        self.VMAddDiskDialog(
+            self,
+            pool_name='default_tmp',
+            volume_name='zzz-i-am-not-first',
+            mode='create-new',
+            volume_size=10,
+            volume_size_unit='MiB',
+            bus_type="virtio",
+            expected_format="qcow2",
+            expected_target=get_next_free_target(used_targets)[-1],
+        ).execute()
+
+        # check the autoselected options
+        # default_tmp pool should be autoselected since it's the first in alphabetical order
+        # defaultVol.iso volume should be autoselected since it's also first
+        self.VMAddDiskDialog(
+            self,
+            device='cdrom',
+            mode='use-existing',
+            pool_name='default_tmp',
+            volume_name='defaultVol.iso',
+            expected_target="sda",
+            expected_access='Read-only',
+            expected_volume_format='iso',
+        ).openDialog().add_disk().verify_disk_added()
+
+        # Add a new raw disk for a shut off VM
+        self.VMAddDiskDialog(
+            self,
+            pool_name='myPoolOne',
+            volume_name='mydiskofpoolone_raw',
+            mode='create-new',
+            volume_format='raw',
+            volume_size=10,
+            volume_size_unit='MiB',
+            expected_target=get_next_free_target(used_targets)[-1],
+            bus_type="virtio",
+        ).execute()
+
+        # Apparmor on debian and ubuntu may prevent access to /dev/sdb1 when starting VM,
+        # https://bugs.launchpad.net/ubuntu/+source/libvirt/+bug/1677398
+        if "debian" not in m.image and "ubuntu" not in m.image:
+            # Run VM
+            b.click("#vm-subVmTest1-system-run")
+            b.wait_in_text("#vm-subVmTest1-system-state", "Running")
+            # Test disk attachment to non-persistent VM
+            b.wait_visible(".vm-top-panel[data-vm-transient=false]")
+            m.execute("virsh undefine subVmTest1")
+            b.wait_visible(".vm-top-panel[data-vm-transient=true]")
+            self.VMAddDiskDialog(
+                self,
+                pool_name='myPoolOne',
+                volume_name='non-peristent-vm-disk',
+                permanent=False,
+                persistent_vm=False,
+                expected_target=get_next_free_target(used_targets)[-1],
+            ).execute()
+
+        # Undefine all Storage pools and confirm that the "Create new"
+        # and "Use existing" choices in the Add Disk dialog are
+        # disabled
+        active_pools = filter(lambda pool: pool != '', m.execute("virsh pool-list --name").split('\n'))
+        for pool in active_pools:
+            m.execute(f"virsh pool-destroy {pool}")
+        inactive_pools = filter(lambda pool: pool != '', m.execute("virsh pool-list --inactive --name").split('\n'))
+        for pool in inactive_pools:
+            m.execute(f"virsh pool-undefine {pool}")
+        b.wait_visible("#vm-details[data-pools-count='0']")
+
+        d = machineslib.MachinesDialogHelpers(b, f"{prefix}-dialog-modal-window")
+
+        b.click(prefix)
+        b.wait_visible(d.id("mode", "create-new") + ":disabled")
+        b.wait_visible(d.id("mode", "use-existing") + ":disabled")
+        b.wait_visible(d.id("mode", "custom-path") + ":not(:disabled)")
+        b.click(d.cancel_button())
+
+        # Make sure that trying to inspect the Disks tab will just show the
+        # fields that are available when a pool is inactive
+        b.reload()
+        b.enter_page('/machines')
+        self.waitPageInit()
+        # Check that usage information can't be fetched since the pool is inactive
+        b.wait_not_present(f"#vm-subVmTest1-disks-{pool_disk}-used")
+
+    def testAddDiskCustomPath(self):
+        b = self.browser
+        m = self.machine
+
+        prefix = "#vm-subVmTest1-disks-adddisk"
+
+        # We want a "pc-i440fx" machine that supports IDE etc, and
+        # "linux2016" gives us one.
+
+        self.createVm("subVmTest1", os="linux2016")
+
+        # Prepare file for Custom File disk type
+        m.execute("touch /var/lib/libvirt/novell.iso")
+        m.execute("touch /var/lib/libvirt/empty.img")
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+
+        b.wait_in_text("#vm-subVmTest1-system-state", "Running")
+        self.goToVmPage("subVmTest1")
+
+        # Using directory path for disk should create API failure
+        self.VMAddDiskDialog(
+            self,
+            device='disk',
+            file_path='/tmp/',
+            mode='custom-path',
+            xfail=True, xfail_error_title="Disk failed to be added",
+        ).execute()
+
+        # check disk device type
+        self.VMAddDiskDialog(
+            self,
+            device='disk',
+            bus_type='scsi',
+            expected_target='sda',
+            expected_format='raw',
+            file_path='/var/lib/libvirt/novell.iso',
+            mode='custom-path',
+            permanent=False,
+            pixel_test_tag='vm-add-disk-modal-custom-path'
+        ).execute()
+
+        # Disk type should be detected
+        m.execute("qemu-img create -f qcow2 /tmp/foobar.qcow2 1M")
+        self.VMAddDiskDialog(
+            self,
+            device='disk',
+            expected_target='vdb',
+            expected_format='qcow2',
+            file_path='/tmp/foobar.qcow2',
+            mode='custom-path',
+            permanent=False,
+        ).execute()
+
+        # Disk with backing file should shown a warning
+        m.execute("qemu-img create -f qcow2 /tmp/backing.qcow2 1M")
+        m.execute("qemu-img create -f qcow2 -F qcow2 -b /tmp/backing.qcow2 /tmp/base.qcow2")
+        self.VMAddDiskDialog(
+            self,
+            device='disk',
+            file_path='/tmp/base.qcow2',
+            mode='custom-path',
+            xfail=True,
+            xfail_object='custom_path.file',
+            xfail_error_message='Importing an image with a backing file is unsupported',
+        ).execute()
+
+        # non iso file
+        self.VMAddDiskDialog(
+            self,
+            device='disk',
+            bus_type='scsi',
+            expected_target='sdb',
+            file_path='/var/lib/libvirt/empty.img',
+            mode='custom-path',
+            permanent=False,
+        ).execute()
+
+        # shut off
+        self.performAction("subVmTest1", "forceOff")
+
+        # check cdrom device (cdrom can be only added to shut off VM)
+        self.VMAddDiskDialog(
+            self,
+            device='cdrom',
+            bus_type='scsi',
+            expected_target='sda',
+            file_path='/var/lib/libvirt/novell.iso',
+            mode='custom-path'
+        ).execute()
+
+        # check that bus and device type can be automatically picked up from the *.iso extension
+        # https://bugzilla.redhat.com/show_bug.cgi?id=1977810
+        self.VMAddDiskDialog(
+            self,
+            expected_target='sdb',
+            file_path='/var/lib/libvirt/novell.iso',
+            mode='custom-path'
+        ).execute()
+
+        # Ensure that pressing a few times arrow-down in the file selector will not cause an oops
+        # https://bugzilla.redhat.com/show_bug.cgi?id=1977554
+        d = self.VMAddDiskDialog(
+            self,
+            mode='custom-path'
+        ).openDialog()
+        b.click(d.field("custom_path.file") + " .pf-v6-c-menu-toggle__button")
+        b.wait_visible(".pf-v6-c-menu__content")
+        b.key("ArrowDown")
+        b.focus(".pf-v6-c-menu__content li:first-child")
+        for _retry in range(0, 10):
+            b.key("ArrowDown")
+            time.sleep(0.5)
+        b.click(".pf-v6-c-modal-box__close button")
+        b.wait_not_present(".pf-v6-c-modal-box")
+        b.wait_not_present("#navbar-oops")
+
+        # Ensure that adding disks with custom path is possible when no storage pools are present
+        # https://bugzilla.redhat.com/show_bug.cgi?id=1985228
+        m.execute("for pool in $(virsh pool-list --name); do virsh pool-destroy $pool; done")
+        m.execute("for pool in $(virsh pool-list --all --name); do virsh pool-undefine $pool; done")
+        b.wait_visible("#vm-details[data-pools-count='0']")
+        b.click(prefix)
+        d.set_RadioSelect("mode", "custom-path")
+        d.set_FileAutoComplete("custom_path.file", "/var/lib/libvirt/novell.iso")
+        b.wait_visible(d.apply_button() + ":not([disabled])")
+        b.wait_visible(d.id("mode", "create-new") + ":disabled")
+        b.wait_visible(d.id("mode", "use-existing") + ":disabled")
+        b.click(d.cancel_button())
+        b.wait_not_present(".pf-v6-c-modal-box")
+
+        self.VMAddDiskDialog(
+            self,
+            expected_target='sdc',
+            file_path='/var/lib/libvirt/novell.iso',
+            mode='custom-path'
+        ).execute()
+
+        d = machineslib.MachinesDialogHelpers(b, f"{prefix}-dialog-modal-window")
+
+        # Ensure that the bus type autofilled value is according to the bus types of the existing disks of the guest,
+        # even when these are not in the predefined value (see ide)
+        m.execute("virt-xml subVmTest1 --edit --disk target=vda,bus=ide,path=/var/lib/libvirt/images/subVmTest1-2.img,clearxml=yes")  # ruff: ignore[line-too-long]
+        self.expandDiskRow("vda")
+        b.wait_text("#vm-subVmTest1-disks-vda-bus", "ide")
+        b.click(prefix)
+        d.set_RadioSelect("mode", "custom-path")
+        d.set_DropdownSelect("custom_path.device", "disk")
+        b.click("div.pf-v6-c-modal-box button:contains(Show additional options)")
+        d.wait_DropdownSelect("additional_options.bus_type", "ide")
+        b.click(d.cancel_button())
+        b.wait_not_present(".pf-v6-c-modal-box")
+
+        # check CD/DVD discs correctly assumes raw format for raw file
+        m.execute("qemu-img create -f raw /var/lib/libvirt/images/foobar.raw 1M")
+        self.VMAddDiskDialog(
+            self,
+            device='cdrom',
+            bus_type='scsi',
+            expected_target='sdd',
+            expected_format='raw',
+            file_path='/var/lib/libvirt/images/foobar.raw',
+            mode='custom-path',
+        ).execute()
+
+        # check CD/DVD discs correctly assumes raw format for ISO file
+        m.upload([os.path.join(testlib.BOTS_DIR, "machine/cloud-init.iso")], "/var/lib/libvirt/images/isofile")
+        self.VMAddDiskDialog(
+            self,
+            device='disk',
+            bus_type='scsi',
+            expected_target='sde',
+            expected_format='raw',
+            file_path='/var/lib/libvirt/images/isofile',
+            mode='custom-path',
+        ).execute()
+
+        # check CD/DVD discs correctly assumes qcow2 format for qcow2 file
+        m.execute("qemu-img create -f qcow2 /var/lib/libvirt/images/foobar.qcow2 1M")
+        self.VMAddDiskDialog(
+            self,
+            device='disk',
+            bus_type='scsi',
+            expected_target='sdf',
+            expected_format='qcow2',
+            file_path='/var/lib/libvirt/images/foobar.qcow2',
+            mode='custom-path',
+        ).execute()
+
+    def testAddDiskAdditionalOptions(self):
+        m = self.machine
+
+        used_targets = ['vda']
+        # prepare libvirt storage pools
+        v1 = os.path.join(self.vm_tmpdir, "vm_one")
+        m.execute(f"mkdir --mode 777 {v1}")
+        m.execute(f"virsh pool-define-as myPoolOne --type dir --target {v1}; virsh pool-start myPoolOne")
+        m.execute("virsh vol-create-as myPoolOne qcowVol --capacity 10M --format qcow2")
+
+        self.createVm("subVmTest1", running=False)
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+
+        self.goToVmPage("subVmTest1")
+
+        # Configure cache mode from the UI
+        self.VMAddDiskDialog(
+            self,
+            pool_name='myPoolOne',
+            volume_name='writeback_cache_disk',
+            mode='create-new',
+            volume_size=2,
+            cache_mode='writeback',
+            expected_target=get_next_free_target(used_targets)[-1],
+            pixel_test_tag='vm-add-disk-modal-additional-options'
+        ).execute()
+
+        # Configure scsi bus type from the UI
+        self.VMAddDiskDialog(
+            self,
+            pool_name='myPoolOne',
+            volume_name='scsi_bus_disk',
+            mode='create-new',
+            bus_type='scsi',
+            expected_target='sda',
+        ).execute()
+
+        # Configure usb bus type from the UI
+        self.VMAddDiskDialog(
+            self,
+            pool_name='myPoolOne',
+            volume_name='usb_bus_disk',
+            mode='create-new',
+            bus_type='usb',
+            expected_target='sdb',
+        ).execute()
+
+        # testing sata disk after VM shutoff because sata disk cannot be hotplugged
+        self.VMAddDiskDialog(
+            self,
+            pool_name='myPoolOne',
+            volume_name='sata_bus_disk',
+            mode='create-new',
+            bus_type='sata',
+            expected_target='sdc',
+        ).execute()
+
+        # Disk with serial number
+        self.VMAddDiskDialog(
+            self,
+            pool_name='myPoolOne',
+            volume_name='disk_with_serial',
+            mode='create-new',
+            serial='disk_WITH-serial+.',
+            expected_target='vdc',
+        ).execute()
+
+        # Disk with serial number
+        self.VMAddDiskDialog(
+            self,
+            pool_name='myPoolOne',
+            volume_name='disk_with_serial_warning1',
+            mode='create-new',
+            serial='íňválíď;šéříáľ123',
+            expected_target='vdd',
+            xfail=True,
+            xfail_object="additional_options.serial",
+            xfail_error_message="Allowed characters"
+        ).execute()
+
+        # Disk with serial number
+        self.VMAddDiskDialog(
+            self,
+            pool_name='myPoolOne',
+            volume_name='disk_with_serial_warning2',
+            mode='create-new',
+            serial='serial_so_long_its_longer_than_20_characters',
+            expected_target='vdd',
+            xwarning_object="additional_options.serial",
+            xwarning_message="Identifier may be silently truncated to 20 characters"
+        ).execute()
+
+        m.execute("touch /var/lib/libvirt/novell.iso")
+        m.execute("virsh vol-create-as myPoolOne rawVol --capacity 10M --format raw")
+        # CDROM (ISO) disk can only be read-only
+        self.VMAddDiskDialog(
+            self,
+            device='cdrom',
+            bus_type='scsi',
+            expected_target='sdd',
+            file_path='/var/lib/libvirt/novell.iso',
+            expected_access='Read-only',
+            mode='custom-path',
+            serial="customPath",
+        ).execute()
+
+        # Raw disk should be Writeable
+        self.VMAddDiskDialog(
+            self,
+            vm_name="subVmTest1",
+            pool_name='myPoolOne',
+            volume_name='rawVol',
+            mode='use-existing',
+            expected_target='vde',
+            expected_access="Writeable",
+            volume_format='raw',
+            serial="useexisting",
+        ).execute()
+
+        self.createVm("subVmTest2")
+
+        self.goToMainPage()
+        self.waitVmRow("subVmTest2")
+        self.goToVmPage("subVmTest2")
+        # Adding a raw disk to multiple VMs, should not make it 'shared'
+        self.VMAddDiskDialog(
+            self,
+            vm_name="subVmTest2",
+            pool_name='myPoolOne',
+            volume_name='rawVol',
+            mode='use-existing',
+            expected_target='vdb',
+            expected_access="Writeable",
+            volume_format='raw',
+        ).execute()
+
+    def testDetachDisk(self):
+        b = self.browser
+        m = self.machine
+
+        args = self.createVm("subVmTest1")
+
+        # prepare libvirt storage pools
+        p1 = os.path.join(self.vm_tmpdir, "vm_one")
+        m.execute(f"mkdir --mode 777 {p1}")
+        m.execute(f"virsh pool-create-as myPoolOne --type dir --target {p1}")
+        m.execute("virsh vol-create-as myPoolOne mydiskofpoolone_1 --capacity 1G --format qcow2")
+        m.execute("virsh vol-create-as myPoolOne mydiskofpoolone_2 --capacity 1G --format qcow2")
+        m.execute("virsh vol-create-as myPoolOne mydiskofpoolone_3 --capacity 1M --format qcow2")
+        testlib.wait(lambda: "mydiskofpoolone_1" in m.execute("virsh vol-list myPoolOne"))
+        testlib.wait(lambda: "mydiskofpoolone_2" in m.execute("virsh vol-list myPoolOne"))
+        testlib.wait(lambda: "mydiskofpoolone_3" in m.execute("virsh vol-list myPoolOne"))
+
+        vdc_path = f"{p1}/mydiskofpoolone_1"
+        vdd_path = f"{p1}/mydiskofpoolone_2"
+        vde_path = f"{p1}/mydiskofpoolone_3"
+        self.attackDisk("subVmTest1", vdc_path, "vdc", "virtio")
+        self.attackDisk("subVmTest1", vdd_path, "vdd", "virtio", persistent=True)
+        self.attackDisk("subVmTest1", vde_path, "vde", "virtio", persistent=True)
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+        self.waitVmRow("subVmTest1")
+
+        # Wait for the login prompt before we try detaching disks - we need the OS to be fully responsive
+        self.waitGuestBooted(args['logfile'])
+
+        # Test detaching non permanent disk of a running domain
+        b.wait_in_text("#vm-subVmTest1-system-state", "Running")
+        self.goToVmPage("subVmTest1")
+        self.waitDisks(["vda", "vdc", "vdd", "vde"])
+
+        self.deleteDisk("vdc", expect_path=vdc_path)
+        # Wait for underlying VM's OS to detach the disk
+        testlib.wait(lambda: "vdc" not in m.execute("virsh domblklist subVmTest1"), delay=1)
+        b.wait_not_present("#vm-subVmTest1-disks-vdc-device")
+
+        # Test that detaching disk of a running domain will affect the
+        # inactive configuration as well
+        self.performAction("subVmTest1", "forceOff")
+        b.wait_not_present("#vm-subVmTest1-disks-vdc-device")
+
+        # Test detaching permanent disk of a stopped domain
+        self.deleteDisk("vdd", expect_path=vdd_path)
+
+        # Test detaching several disks and the deletion dialog can be closed correctly
+        m.execute("virsh vol-create-as myPoolOne diskVirtio --capacity 1M --format qcow2")
+        m.execute("virsh vol-create-as myPoolOne diskSata --capacity 1M --format qcow2")
+        m.execute("virsh vol-create-as myPoolOne diskSata2 --capacity 1M --format qcow2")
+        m.execute("virsh vol-create-as myPoolOne diskSata3 --capacity 1M --format qcow2")
+        testlib.wait(lambda: "diskVirtio" in m.execute("virsh vol-list myPoolOne"))
+        testlib.wait(lambda: "diskSata" in m.execute("virsh vol-list myPoolOne"))
+        testlib.wait(lambda: "diskSata2" in m.execute("virsh vol-list myPoolOne"))
+        testlib.wait(lambda: "diskSata3" in m.execute("virsh vol-list myPoolOne"))
+        vdf_path = f"{p1}/diskVirtio"
+        sda_path = f"{p1}/diskSata"
+        sdb_path = f"{p1}/diskSata2"
+        sdc_path = f"{p1}/diskSata3"
+        domain = "subVmTest1"
+        self.attackDisk(domain, vdf_path, "vdf", "virtio", persistent=True)
+        self.attackDisk(domain, sda_path, "sda", "sata", persistent=True)
+        self.attackDisk(domain, sdb_path, "sdb", "sata", persistent=True)
+        self.attackDisk(domain, sdc_path, "sdc", "virtio", persistent=True)
+        # attach disk with no file (empty cd-rom)
+        m.execute("virsh attach-disk --domain subVmTest1 --config --target sdd --type cdrom --source ''")
+        m.execute("virt-xml subVmTest1 --add-device --disk type='block',source.dev='/dev/null',target.dev=sde")
+
+        # Need to refresh when attaching disk for shutoff VM
+        b.reload()
+        b.enter_page('/machines')
+        self.waitPageInit()
+        self.waitDisks(["sda", "sdb", "sdc", "vda"])
+
+        def removeDiskAndChecks(target, path, removeFile=False, removeFileFail=False, removeFileNotPresent=False):
+            self.dropdownAction(f"#vm-subVmTest1-disks-{target}-action-kebab",
+                                f"#delete-vm-subVmTest1-disks-{target}")
+            b.wait_in_text("div[role=dialog]:contains(\"Remove disk\")", target)
+            b.wait_in_text("#delete-resource-modal-target", target)
+            if path:
+                b.wait_in_text("#delete-resource-modal-file", path)
+
+            # "Remove and delete file" is not present
+            if removeFileNotPresent:
+                b.wait_not_present("#delete-resource-modal-secondary")
+                b.click("#delete-resource-modal-primary")
+            else:
+                # Remove disk and delete file
+                if removeFile:
+                    b.click("#delete-resource-modal-secondary")
+                # Remove disk but don't delete file
+                else:
+                    b.click("#delete-resource-modal-primary")
+
+            # The deletion dialog should be closed
+            b.wait_not_present("div[role=dialog]:contains(\"Remove disk\")")
+            # No modal error
+            b.wait_not_present("div[aria-label=\"Danger Alert\"]")
+            b.wait_not_present(f"#vm-subVmTest1-disks-{target}-device")
+
+            if removeFileFail:
+                # Check Toast notification is present
+                b.wait_in_text(".pf-v6-c-alert.pf-m-warning .pf-v6-c-alert__title", "Could not delete")
+                # Cleanup Toast notification
+                b.click(".pf-v6-c-alert-group li:first-of-type .pf-v6-c-alert button.pf-m-plain")
+
+            b.wait_not_present(".pf-v6-c-alert.pf-m-warning")
+
+            # Verify correctness of disk file
+            if path:
+                if removeFile and not removeFileFail:
+                    m.execute(f"! test -f {path}")
+                else:
+                    m.execute(f"test -f {path}")
+
+        removeDiskAndChecks("sda", sda_path)
+        removeDiskAndChecks("vdf", vdf_path)
+        removeDiskAndChecks("sdb", sdb_path, True, False)
+        # Prevent user from deleting the file
+        m.execute(f"chattr +i {sdc_path}")
+        self.addCleanup(m.execute, f"chattr -i {sdc_path}")
+        removeDiskAndChecks("sdc", sdc_path, True, True)
+        # Disk with no source file should not have "Remove and delete file" option present
+        removeDiskAndChecks("sdd", None, False, False, True)
+        # Non-file and non-volume disk should not have "Remove and delete file" option present
+        removeDiskAndChecks("sde", None, False, False, True)
+
+        # Test detaching disk of a paused domain
+        m.execute(f"> {args['logfile']}")  # clear logfile
+        m.execute("virsh start subVmTest1")
+        # Make sure that the VM booted normally before attempting to suspend it
+        self.waitGuestBooted(args['logfile'])
+        m.execute("virsh suspend subVmTest1")
+        b.wait_in_text("#vm-subVmTest1-system-state", "Paused")
+        b.click("#vm-subVmTest1-disks-vde-action-kebab")
+        b.wait_visible(".pf-m-disabled #delete-vm-subVmTest1-disks-vde")
+        m.execute("virsh resume subVmTest1")
+        self.waitGuestBooted(args['logfile'])
+
+        # Test detaching of disk on non-persistent VM
+        m.execute("virsh undefine subVmTest1")
+        self.attackDisk("subVmTest1", f"{p1}/mydiskofpoolone_1", "vdc", "virtio")
+        self.deleteDisk("vdc")
+        testlib.wait(lambda: "vdc" not in m.execute("virsh domblklist subVmTest1"), delay=1)
+        b.wait_not_present("#vm-subVmTest1-disks-vdc-device")
+
+    def testInsertDiscCDROM(self):
+        b = self.browser
+        m = self.machine
+
+        # Prepare storage pool with an ISO file in it to be used with "Use existing" option
+        m.execute("virsh pool-define-as images --type dir --target /var/lib/libvirt/images; virsh pool-start images")
+        m.upload([os.path.join(testlib.BOTS_DIR, "machine/cloud-init.iso")], "/var/lib/libvirt/images/cd.iso")
+
+        # Prepare ISO file to be used with "Custom path" option
+        m.execute("touch /var/lib/libvirt/novell.iso")
+
+        self.createVm("subVmTest1", running=False)
+        # Add empty CDROM device to the VM
+        m.execute("virt-xml subVmTest1 --add-device --disk target.dev=sda,device=cdrom")
+        m.execute("virsh start subVmTest1")
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+
+        b.wait_in_text("#vm-subVmTest1-system-state", "Running")
+        self.goToVmPage("subVmTest1")
+        # wait until Disks have initialized; otherwise the kebabs jump around
+        self.waitDisks(["sda", "vda"])
+
+        self.VMInsertMediaDialog(
+            self,
+            mode='custom-path',
+            target='sda',
+            file_path='/var/lib/libvirt/novell.iso',
+            pixel_tag='vm-disc-eject-modal',
+        ).execute()
+
+        self.VMInsertMediaDialog(
+            self,
+            mode='use-existing',
+            target='sda',
+            pool_name='images',
+            volume_name='cd.iso',
+        ).execute()
+
+        # On Ubuntu and Debian ejecting CDROM disc after rebooting VM will lead to the failure:
+        # "unable to execute QEMU command 'blockdev-remove-medium': Tray of device 'ide0-1-0' is not open"
+        # https://bugs.launchpad.net/ubuntu/+source/libvirt/+bug/1930398
+        if "debian" not in m.image and "ubuntu" not in m.image:
+            self.VMInsertMediaDialog(
+                self,
+                mode='custom-path',
+                target='sda',
+                file_path='/var/lib/libvirt/novell.iso',
+                force=True,
+            ).execute()
+
+    def testBlockDeviceDisk(self):
+        b = self.browser
+        m = self.machine
+
+        loop_dev = self.add_loopback_disk()
+
+        self.createVm("subVmTest1", running=False)
+        m.execute(f"virt-xml subVmTest1 --add-device --disk source.type=block,source.dev={loop_dev}")
+        m.execute("virsh start subVmTest1")
+        self.addCleanup(m.execute, "virsh destroy subVmTest1")
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+
+        b.wait_in_text("#vm-subVmTest1-system-state", "Running")
+        self.goToVmPage("subVmTest1")
+
+        b.wait_in_text('#vm-subVmTest1-disks', "Block device")
+        self.expandDiskRow("vdb")
+        b.wait_text('#vm-subVmTest1-disks-vdb-source-dev', loop_dev)
+
+        if "debian" in m.image or "ubuntu" in m.image:
+            self.allow_journal_messages(f'.* type=1400 .* apparmor="DENIED" operation="open".*profile="virt-aa-helper" name="{loop_dev}".*')  # ruff: ignore[line-too-long]
+
+
+if __name__ == '__main__':
+    testlib.test_main()

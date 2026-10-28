@@ -1,0 +1,339 @@
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
+
+#
+# Copyright (C) 2022 Red Hat, Inc.
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
+
+import testlib
+
+HOST = "host.containers.internal"
+
+
+@testlib.onlyImage("no cockpit/ws container on this image", "fedora-coreos")
+@testlib.nondestructive
+class TestWsBastionContainer(testlib.MachineCase):
+    def setUp(self):
+        super().setUp()
+        # stop ws container from previous runs
+        self.machine.stop_cockpit()
+        # undo cockpit/ws install steps
+        self.restore_file("/etc/systemd/system/cockpit.service")
+        self.addCleanup(self.machine.execute, "podman rm -f --all")
+
+    def approve_key(self, b, hostname):
+        b.wait_visible("#hostkey-group")
+        b.wait_in_text("#hostkey-message-1", f"You are connecting to {hostname} for the first time.")
+        b.click("#login-button")
+
+    def testPasswordLogin(self):
+        m = self.machine
+        b = self.browser
+        m.execute("podman run -d --name cockpit-bastion -p 9090:9090 localhost/cockpit/ws")
+        m.execute("until curl --fail --head -k https://localhost:9090/; do sleep 1; done", timeout=10)
+
+        b.open("/", tls=True)
+
+        b.wait_visible("#login")
+        # should be pre-configured to RequireHost
+        b.wait_not_visible("#option-group")
+        b.wait_visible("#server-field")
+        # LoginTitle from default-bastion.conf
+        b.wait_text("#server-name", "Cockpit Bastion")
+        # No branding by default
+        b.wait_text("#brand", "")
+
+        b.set_val("#login-user-input", "admin")
+        b.set_val("#login-password-input", "foobar")
+
+        # Requires a host
+        b.click("#login-button")
+        b.wait_text("#login-error-title", "Please specify the host to connect to")
+        b.wait_not_visible("#login-error-message")
+        # so connect to our own container host
+        b.set_val("#server-field", HOST)
+        b.set_val("#login-password-input", "foobar")
+        # key is unknown
+        b.click("#login-button")
+        self.approve_key(b, HOST)
+
+        b.wait_visible('#content')
+        b.wait_text('#current-username', 'admin')
+        # Our test VM only pre-installs -system and -networkmanager
+        b.wait_in_text("#host-apps", "Overview")
+        b.wait_in_text("#host-apps", "Networking")
+        self.assertNotIn("Kernel dump", b.text("#host-apps"))
+        # runs the ssh target's bridge (no beiboot)
+        m.execute("pgrep -f /usr/bin/[c]ockpit-bridge")
+        b.logout()
+
+        # remembers the last host via URL, server field should be pre-filled
+        self.assertEqual(b.eval_js("window.location.pathname"), f"/={HOST}/system")
+        # this is only for Cockpit Client
+        b.wait_not_visible("#recent-hosts")
+        # second time SSH key is known
+        b.try_login()
+        b.wait_visible('#content')
+        b.logout()
+
+        # disable target bridge, should use beiboot
+        m.execute("mount -o bind /dev/null /usr/bin/cockpit-bridge")
+        self.addCleanup(m.execute, "umount /usr/bin/cockpit-bridge")
+        b.try_login()
+        b.wait_visible('#content')
+        m.execute("pgrep -f '[p]ython3 -ic # cockpit-bridge'")
+        # beiboot mode has extra included pages
+        b.wait_in_text("#host-apps", "Overview")
+        b.wait_in_text("#host-apps", "Networking")
+        b.wait_in_text("#host-apps", "Kernel dump")
+        b.wait_in_text("#host-apps", "SELinux")
+        # but Storage and Applications are hidden due to failing manifest conditions
+        self.assertNotIn("Storage", b.text("#host-apps"))
+        self.assertNotIn("Applications", b.text("#host-apps"))
+        b.logout()
+
+    def testKnownHosts(self):
+        m = self.machine
+        b = self.browser
+
+        m.execute(f"ssh-keyscan localhost | sed 's/^localhost/{HOST}/' > /root/known_hosts")
+        self.addCleanup(m.execute, "rm /root/known_hosts")
+
+        def check_login():
+            m.execute("until curl --fail --head -k https://localhost:9090/; do sleep 1; done", timeout=10)
+            b.open("/", tls=True)
+            b.set_val("#login-user-input", "admin")
+            b.set_val("#login-password-input", "foobar")
+            b.set_val("#server-field", HOST)
+            b.click("#login-button")
+            b.wait_visible('#content')
+            b.logout()
+            m.execute("podman rm -f cockpit-bastion")
+
+        # default location
+        m.execute("podman run -d --name cockpit-bastion -p 9090:9090 "
+                  "-v /root/known_hosts:/etc/ssh/ssh_known_hosts:ro,Z "
+                  "localhost/cockpit/ws")
+        check_login()
+
+        # custom location
+        m.execute("podman run -d --name cockpit-bastion -p 9090:9090 "
+                  "-v /root/known_hosts:/known_hosts:ro,Z "
+                  "-e COCKPIT_SSH_KNOWN_HOSTS_FILE=/known_hosts "
+                  "localhost/cockpit/ws")
+        check_login()
+
+    def testCustomConf(self):
+        m = self.machine
+        b = self.browser
+
+        # custom cockpit.conf and pretend we are Fedora CoreOS/RHEL
+        self.write_file("/root/cockpit.conf", """[WebService]
+            LoginTitle = My Walden
+""")
+        m.execute("cp /etc/os-release /root; "
+                  "podman run -d --name cockpit-bastion -p 9090:9090 "
+                  "-v /root/cockpit.conf:/etc/cockpit/cockpit.conf:ro,Z "
+                  "-v /root/os-release:/etc/os-release:ro,Z "
+                  "localhost/cockpit/ws")
+        m.execute("until curl --fail --head -k https://localhost:9090/; do sleep 1; done", timeout=10)
+
+        b.open("/", tls=True)
+
+        b.wait_visible("#login")
+        b.wait_text("#server-name", "My Walden")
+        # custom conf does not have RequireHost
+        b.wait_visible("#option-group")
+        # Shows os-release branding
+        b.wait_in_text("#brand", "Fedora" if m.image == "fedora-coreos" else "Red Hat Enterprise Linux")
+
+        # pre-fill target host
+        b.open(f"/={HOST}/", tls=True)
+        b.wait_visible("#login")
+        b.set_val("#login-user-input", "admin")
+        b.set_val("#login-password-input", "foobar")
+
+        b.click("#login-button")
+        self.approve_key(b, HOST)
+
+        b.wait_visible('#content')
+        b.wait_text('#current-username', 'admin')
+
+    def testKeyLogin(self):
+        m = self.machine
+        b = self.browser
+
+        KEY_PASSWORD = "sshfoobar"
+
+        # old RSA/PEM format
+        m.execute(f"ssh-keygen -q -f /root/id_bastion -t rsa -m PEM -N {KEY_PASSWORD}")
+        m.execute(f"ssh-keyscan localhost | sed 's/^localhost/{HOST}/' > /root/known_hosts")
+        self.addCleanup(m.execute, "rm /root/known_hosts /root/id_bastion /root/id_bastion.pub")
+
+        def do_test_key_login(ssh_key_env: str):
+            m.execute(
+                "podman run -d --name cockpit-bastion -p 9090:9090 "
+                "-v /root/known_hosts:/etc/ssh/ssh_known_hosts:ro,Z "
+                "-v /root/id_bastion:/id_bastion:ro,Z "
+                f"-e {ssh_key_env}=/id_bastion "
+                "-e COCKPIT_DEBUG=all "
+                "localhost/cockpit/ws"
+            )
+            m.execute("until curl --fail --head -k https://localhost:9090/; do sleep 1; done", timeout=10)
+
+            b.open("/", tls=True)
+            b.set_val("#login-user-input", "admin")
+            b.set_val("#server-field", HOST)
+
+            # the account password does not work
+            b.set_val("#login-password-input", "foobar")
+            b.click("#login-button")
+            b.wait_text("#login-error-title", "Authentication failed")
+            b.wait_text("#login-error-message", "Wrong user name or password")
+
+            # SSH key password, but key is not authorized
+            b.set_val("#login-password-input", KEY_PASSWORD)
+            b.click("#login-button")
+            b.wait_text("#login-error-title", "Authentication failed")
+            b.wait_text("#login-error-message", "Wrong user name or password")
+
+            # authorize key
+            self.restore_file("/home/admin/.ssh/authorized_keys")
+            # Do not use authorized_keys.d as that does not work on rhel4edge
+            # Do not append but overwrite so we are sure the right key is used
+            m.execute("cat /root/id_bastion.pub > /home/admin/.ssh/authorized_keys")
+
+            # fails with wrong key password
+            b.set_val("#login-password-input", "notthispassword")
+            b.click("#login-button")
+            b.wait_text("#login-error-title", "Authentication failed")
+            b.wait_text("#login-error-message", "Wrong user name or password")
+
+            # works with correct key password
+            b.set_val("#login-password-input", KEY_PASSWORD)
+            b.click("#login-button")
+            b.wait_visible('#content')
+            # runs the ssh target's bridge (no beiboot)
+            m.execute("pgrep -f /usr/bin/[c]ockpit-bridge")
+            b.logout()
+
+            # now test with current OpenSSH format
+            m.execute(f"yes | ssh-keygen -q -f /root/id_bastion -t rsa -N {KEY_PASSWORD}")
+            m.execute("cat /root/id_bastion.pub > /home/admin/.ssh/authorized_keys")
+            b.set_val("#login-user-input", "admin")
+            b.set_val("#server-field", HOST)
+            b.set_val("#login-password-input", KEY_PASSWORD)
+            b.click("#login-button")
+            b.wait_visible('#content')
+            b.logout()
+
+            # disable target bridge, should use beiboot
+            m.execute("mount -o bind /dev/null /usr/bin/cockpit-bridge")
+            try:
+                b.try_login(password=KEY_PASSWORD)
+                b.wait_visible('#content')
+                m.execute("pgrep -f '[p]ython3 -ic # cockpit-bridge'")
+            finally:
+                m.execute("umount /usr/bin/cockpit-bridge")
+            b.logout()
+
+            m.execute("podman rm -f -t0 cockpit-bastion")
+            m.execute("rm /home/admin/.ssh/authorized_keys")
+
+        for ssh_key_env in ["COCKPIT_SSH_KEY_PATH", f"COCKPIT_SSH_KEY_PATH_{HOST.upper()}"]:
+            do_test_key_login(ssh_key_env=ssh_key_env)
+
+    def testExternalAgent(self):
+        m = self.machine
+        b = self.browser
+
+        KEY_PASSWORD = "sshfoobar"
+
+        # run the container as user -- as root does not make sense, as we want to
+        # share the user's SSH key with it
+        m.execute(f"podman save localhost/cockpit/ws -o {self.vm_tmpdir}/cockpit-ws.tar")
+
+        # HACK: user podman does not add default route if the host doesn't have any
+        m.execute("ip route add default via 172.27.0.1")
+        self.addCleanup(m.execute, "ip route del default")
+
+        self.restore_dir("/home/admin")
+
+        # podman needs logind session (https://bugzilla.redhat.com/show_bug.cgi?id=2375715)
+        m.execute("loginctl enable-linger admin")
+        self.addCleanup(m.execute, "loginctl disable-linger admin")
+
+        m.execute("runuser -u admin -- sh -ex", input=f"""
+        # we don't start a real login session here, fake it
+        cd $HOME
+        export XDG_RUNTIME_DIR=/run/user/$(id -u)
+
+        # create new key, set it up for logging into host
+        ssh-keygen -q -f ~/.ssh/id_bastion -N {KEY_PASSWORD}
+        cat ~/.ssh/id_bastion.pub > /home/admin/.ssh/authorized_keys
+        ssh-keyscan localhost | sed 's/^localhost/{HOST}/' > ~/.ssh/known_hosts
+
+        # start agent, load key
+        eval $(ssh-agent -a $XDG_RUNTIME_DIR/ssh-agent)
+        printf '#!/bin/sh\necho {KEY_PASSWORD}\n' > /tmp/pwd
+        chmod u+x /tmp/pwd
+        SSH_ASKPASS_REQUIRE=force SSH_ASKPASS=/tmp/pwd ssh-add ~/.ssh/id_bastion
+        rm /tmp/pwd
+        ssh-add -l
+
+        # run container
+        podman load -i {self.vm_tmpdir}/cockpit-ws.tar
+        podman run -d --rm --name cockpit-bastion -p 9090:9090 \
+                -v ~/.ssh/known_hosts:/etc/ssh/ssh_known_hosts:ro \
+                -v $XDG_RUNTIME_DIR/ssh-agent:/ssh-agent \
+                -e SSH_AUTH_SOCK=/ssh-agent \
+                --security-opt=label=disable \
+                -e COCKPIT_DEBUG=all localhost/cockpit/ws
+
+        until curl --fail --head -k https://localhost:9090/; do sleep 1; done
+        """)
+
+        # login works without a password, using the external agent
+        b.open("/", tls=True)
+        b.set_val("#server-field", HOST)
+        b.try_login(password="")
+        b.wait_visible('#content')
+
+
+@testlib.onlyImage("no cockpit/ws container on this image", "fedora-coreos")
+@testlib.nondestructive
+class TestWsPrivileged(testlib.MachineCase):
+    def testService(self):
+        # the install script should have created a cockpit.service, but not started it
+        m = self.machine
+
+        self.assertEqual(m.execute("! systemctl is-enabled cockpit.service").strip(), "disabled")
+        self.assertEqual(m.execute("! systemctl is-active cockpit.service").strip(), "inactive")
+        # stop ws container from previous test runs
+        self.machine.stop_cockpit()
+        self.assertEqual(m.execute("podman ps --noheading"), "")
+        self.addCleanup(m.execute, "systemctl disable --now cockpit.service")
+
+        m.execute("systemctl start cockpit.service")
+        self.assertEqual(m.execute("systemctl is-active cockpit.service").strip(), "active")
+        firstStartTime = m.execute("podman inspect cockpit-ws| jq '.[0].Created'")
+        m.execute("until curl --fail --head -k https://localhost:9090/; do sleep 1; done", timeout=10)
+
+        m.execute("systemctl restart cockpit.service")
+        self.assertEqual(m.execute("systemctl is-active cockpit.service").strip(), "active")
+        secondStartTime = m.execute("podman inspect cockpit-ws| jq '.[0].Created'")
+        m.execute("until curl --fail --head -k https://localhost:9090/; do sleep 1; done", timeout=10)
+
+        self.assertNotEqual(firstStartTime, secondStartTime)
+
+        m.execute("systemctl stop cockpit.service")
+        self.assertEqual(m.execute("! systemctl is-enabled cockpit.service").strip(), "disabled")
+        self.assertEqual(m.execute("! systemctl is-active cockpit.service").strip(), "inactive")
+        self.assertEqual(m.execute("podman ps --noheading"), "")
+
+        # current container has `set -x` in its startup script, which ends up in the journal
+        self.allow_journal_messages("^[/+'].*")
+
+
+if __name__ == '__main__':
+    testlib.test_main()

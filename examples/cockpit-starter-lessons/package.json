@@ -1,0 +1,49 @@
+{
+  "name": "starter-kit",
+  "description": "Scaffolding for a cockpit module",
+  "type": "module",
+  "main": "index.js",
+  "repository": "git@github.com:cockpit/starter-kit.git",
+  "author": "",
+  "license": "LGPL-2.1",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "watch": "ESBUILD_WATCH='true' ./build.js",
+    "build": "./build.js",
+    "lint": "oxlint src/",
+    "lint:fix": "oxlint --fix src/",
+    "stylelint": "stylelint src/*.{css,scss}",
+    "stylelint:fix": "stylelint --fix src/*.{css,scss}"
+  },
+  "devDependencies": {
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "esbuild-wasm": "0.28.2",
+    "qunit": "3.0.0",
+    "stylelint": "17.16.0",
+    "stylelint-config-recommended-scss": "17.0.1",
+    "stylelint-config-standard": "40.0.0",
+    "stylelint-config-standard-scss": "17.0.0",
+    "stylelint-formatter-pretty": "4.0.1",
+    "typescript": "catalog:",
+    "oxlint": "catalog:"
+  },
+  "dependencies": {
+    "@patternfly/patternfly": "catalog:",
+    "@patternfly/react-core": "catalog:",
+    "@patternfly/react-icons": "catalog:",
+    "@patternfly/react-styles": "catalog:",
+    "argparse": "3.0.4",
+    "esbuild": "catalog:",
+    "esbuild-sass-plugin": "3.7.0",
+    "gettext-parser": "10.0.0",
+    "react": "catalog:",
+    "react-dom": "catalog:"
+  },
+  "allowScripts": {
+    "@parcel/watcher@2.6.0": true,
+    "esbuild@0.28.2": true
+  }
+}

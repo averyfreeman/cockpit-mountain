@@ -1,0 +1,298 @@
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { act, render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { StackInfoModal } from "./StackInfoModal";
+import { mockSpawn } from "../test/setup";
+import { mockProcess } from "../test/helpers";
+import type { ComposeStack } from "../api";
+
+vi.mock("../api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../api")>();
+  return { ...actual, readComposeFile: vi.fn() };
+});
+
+import { readComposeFile } from "../api";
+const mockReadComposeFile = vi.mocked(readComposeFile);
+
+beforeEach(() => {
+  mockSpawn.mockReset();
+  mockReadComposeFile.mockImplementation(() => mockProcess(""));
+});
+
+const stack: ComposeStack = {
+  Name: "myapp",
+  Status: "running(1)",
+  ConfigFiles: "/path/docker-compose.yml",
+};
+
+const containers = JSON.stringify([
+  {
+    ID: "abc123def456",
+    Name: "myapp_web_1",
+    Image: "nginx:latest",
+    State: "running",
+    Status: "Up 2 hours",
+    Ports: "0.0.0.0:8080->80/tcp",
+    Service: "web",
+  },
+]);
+
+const images = JSON.stringify([
+  {
+    ID: "sha256:abc",
+    Repository: "nginx",
+    Tag: "latest",
+    Size: 148897792,
+    CreatedAt: "2026-01-01 00:00:00",
+    ContainerName: "myapp_web_1",
+  },
+]);
+
+const volumes = JSON.stringify([
+  { Name: "myapp_data", Driver: "local", Mountpoint: "/var/lib/docker/volumes/myapp_data/_data" },
+]);
+
+// Takes lazy factories, not pre-built processes: listContainers()/etc. now try the engine
+// HTTP API first (an extra async hop before reaching these CLI spawns), so a process built
+// eagerly (at the time this is called, before render()) would have its data-delivery
+// microtask fire before .stream() is ever registered by the real caller — see the identical
+// fix applied in containers.test.ts.
+//
+// Routed by inspecting the actual command being spawned, not by call arrival order: the
+// modal fires its containers/images/volumes/networks effects in that declaration order, but
+// listContainers()'s extra async hop above means its underlying CLI spawn can now land
+// *after* the still-synchronous images/volumes calls from later effects — arrival order no
+// longer matches the positional order these factories are written in.
+function mockSpawnSequence(...factories: (() => ReturnType<typeof mockProcess>)[]) {
+  let networkIdx = 3;
+  mockSpawn.mockImplementation((args: string[]) => {
+    if (args.includes("images")) return (factories[1] ?? (() => mockProcess("")))();
+    if (args.includes("volumes")) return (factories[2] ?? (() => mockProcess("")))();
+    if (args.includes("ps") && args.includes("--all")) return (factories[0] ?? (() => mockProcess("")))();
+    // Both listProjectNetworks ("network ls") and listNetworkConnectedProjects
+    // ("ps --filter network=...") share the remaining positional slots, clamped to the last
+    // one once exhausted — matching how the original position-based sequence behaved.
+    const f = factories[Math.min(networkIdx, factories.length - 1)] ?? (() => mockProcess(""));
+    networkIdx++;
+    return f();
+  });
+}
+
+describe("StackInfoModal", () => {
+  it("renders modal title with stack name", async () => {
+    mockSpawnSequence(() => mockProcess(containers), () => mockProcess(images), () => mockProcess(volumes), () => mockProcess(""));
+    render(<StackInfoModal stack={stack} onClose={vi.fn()} />);
+    expect(screen.getByText(/myapp — info/i)).toBeInTheDocument();
+    await act(async () => {});
+  });
+
+  it("lists the stack's jobs with their triggers and profiles (Compose 5.6.0)", async () => {
+    mockReadComposeFile.mockImplementation(() => mockProcess(`
+services:
+  web:
+    image: nginx
+jobs:
+  migrate:
+    image: app
+    triggers:
+      manual: true
+  nightly:
+    image: app
+    profiles: [ops]
+    triggers:
+      manual: false
+      schedule: ["0 3 * * *"]
+`));
+    mockSpawnSequence(() => mockProcess(containers), () => mockProcess(images), () => mockProcess(volumes), () => mockProcess(""));
+    render(<StackInfoModal stack={stack} onClose={vi.fn()} />);
+    await waitFor(() => expect(screen.getByText("Jobs")).toBeInTheDocument());
+    expect(screen.getByText("migrate").closest("li")).toHaveTextContent("manual (via Run)");
+    const nightly = screen.getByText("nightly").closest("li");
+    expect(nightly).toHaveTextContent("scheduled: 0 3 * * *");
+    expect(nightly).not.toHaveTextContent("manual");
+    expect(nightly).toHaveTextContent("Profiles: ops");
+  });
+
+  it("shows no Jobs section when the file declares none", async () => {
+    mockSpawnSequence(() => mockProcess(containers), () => mockProcess(images), () => mockProcess(volumes), () => mockProcess(""));
+    render(<StackInfoModal stack={stack} onClose={vi.fn()} />);
+    await act(async () => {});
+    expect(screen.queryByText("Jobs")).not.toBeInTheDocument();
+  });
+
+  it("shows spinners while loading", async () => {
+    mockSpawnSequence(() => mockProcess(containers), () => mockProcess(images), () => mockProcess(volumes), () => mockProcess(""));
+    render(<StackInfoModal stack={stack} onClose={vi.fn()} />);
+    expect(screen.getAllByRole("progressbar").length).toBeGreaterThan(0);
+    await act(async () => {});
+  });
+
+  it("shows config file path", async () => {
+    mockSpawnSequence(() => mockProcess(containers), () => mockProcess(images), () => mockProcess(volumes), () => mockProcess(""));
+    render(<StackInfoModal stack={stack} onClose={vi.fn()} />);
+    expect(screen.getByText("/path/docker-compose.yml")).toBeInTheDocument();
+    await act(async () => {});
+  });
+
+  it("renders container info after loading", async () => {
+    mockSpawnSequence(() => mockProcess(containers), () => mockProcess(images), () => mockProcess(volumes), () => mockProcess(""));
+    render(<StackInfoModal stack={stack} onClose={vi.fn()} />);
+    await waitFor(() => expect(screen.queryByRole("progressbar")).toBeNull());
+    expect(screen.getByText("web")).toBeInTheDocument();
+    expect(screen.getAllByText("nginx:latest").length).toBeGreaterThan(0);
+    expect(screen.getByText(/Up 2 hours/i)).toBeInTheDocument();
+  });
+
+  it("shows truncated container ID (12 chars)", async () => {
+    mockSpawnSequence(() => mockProcess(containers), () => mockProcess(images), () => mockProcess(volumes), () => mockProcess(""));
+    render(<StackInfoModal stack={stack} onClose={vi.fn()} />);
+    await waitFor(() => expect(screen.queryByRole("progressbar")).toBeNull());
+    expect(screen.getByText("abc123def456")).toBeInTheDocument();
+  });
+
+  it("renders port label for mapped ports", async () => {
+    mockSpawnSequence(() => mockProcess(containers), () => mockProcess(images), () => mockProcess(volumes), () => mockProcess(""));
+    render(<StackInfoModal stack={stack} onClose={vi.fn()} />);
+    await waitFor(() => expect(screen.getByText("0.0.0.0:8080 → 80/tcp")).toBeInTheDocument());
+  });
+
+  it("shows empty state when no containers returned", async () => {
+    mockSpawnSequence(() => mockProcess("[]"), () => mockProcess("[]"), () => mockProcess("[]"), () => mockProcess(""));
+    render(<StackInfoModal stack={stack} onClose={vi.fn()} />);
+    await waitFor(() => expect(screen.getByText(/No containers found/i)).toBeInTheDocument());
+  });
+
+  it("shows error alert on container fetch failure", async () => {
+    mockSpawnSequence(() => mockProcess("", "permission denied"), () => mockProcess(images), () => mockProcess(volumes), () => mockProcess(""));
+    render(<StackInfoModal stack={stack} onClose={vi.fn()} />);
+    await waitFor(() => expect(screen.getByText(/Could not load container info/i)).toBeInTheDocument());
+  });
+
+  it("renders images table after loading", async () => {
+    mockSpawnSequence(() => mockProcess(containers), () => mockProcess(images), () => mockProcess(volumes), () => mockProcess(""));
+    render(<StackInfoModal stack={stack} onClose={vi.fn()} />);
+    await waitFor(() => expect(screen.queryByRole("progressbar")).toBeNull());
+    expect(screen.getByText("nginx")).toBeInTheDocument();
+    expect(screen.getByText("142.0MiB")).toBeInTheDocument();
+  });
+
+  it("shows images error alert on failure", async () => {
+    mockSpawnSequence(() => mockProcess(containers), () => mockProcess("", "images failed"), () => mockProcess(volumes), () => mockProcess(""));
+    render(<StackInfoModal stack={stack} onClose={vi.fn()} />);
+    await waitFor(() => expect(screen.getByText(/Could not load images/i)).toBeInTheDocument());
+  });
+
+  it("renders volumes table after loading", async () => {
+    mockSpawnSequence(() => mockProcess(containers), () => mockProcess(images), () => mockProcess(volumes), () => mockProcess(""));
+    render(<StackInfoModal stack={stack} onClose={vi.fn()} />);
+    await waitFor(() => expect(screen.queryByRole("progressbar")).toBeNull());
+    expect(screen.getByText("myapp_data")).toBeInTheDocument();
+    expect(screen.getByText("local")).toBeInTheDocument();
+  });
+
+  it("shows unavailable notice when docker compose volumes is not supported", async () => {
+    mockSpawnSequence(() => mockProcess(containers), () => mockProcess(images), () => mockProcess("", "unknown command"), () => mockProcess(""));
+    render(<StackInfoModal stack={stack} onClose={vi.fn()} />);
+    await waitFor(() => expect(screen.getByText(/Not available on this Docker Compose version/i)).toBeInTheDocument());
+  });
+
+  it("renders networks section with no networks found", async () => {
+    mockSpawnSequence(() => mockProcess(containers), () => mockProcess(images), () => mockProcess(volumes), () => mockProcess(""));
+    render(<StackInfoModal stack={stack} onClose={vi.fn()} />);
+    await waitFor(() => expect(screen.queryByRole("progressbar")).toBeNull());
+    expect(screen.getByText(/No networks found/i)).toBeInTheDocument();
+  });
+
+  it("renders network name in networks table", async () => {
+    mockSpawnSequence(
+      () => mockProcess(containers),
+      () => mockProcess(images),
+      () => mockProcess(volumes),
+      () => mockProcess("myapp_default\n"),
+      () => mockProcess(""),
+    );
+    render(<StackInfoModal stack={stack} onClose={vi.fn()} />);
+    await waitFor(() => expect(screen.queryByRole("progressbar")).toBeNull());
+    expect(screen.getByText("myapp_default")).toBeInTheDocument();
+  });
+
+  it("shows other project name when network is shared", async () => {
+    mockSpawnSequence(
+      () => mockProcess(containers),
+      () => mockProcess(images),
+      () => mockProcess(volumes),
+      () => mockProcess("myapp_default\n"),
+      () => mockProcess("otherapp\n"),
+    );
+    render(<StackInfoModal stack={stack} onClose={vi.fn()} />);
+    await waitFor(() => expect(screen.queryByRole("progressbar")).toBeNull());
+    expect(screen.getByText("otherapp")).toBeInTheDocument();
+  });
+
+  it("shows volume error alert for non-unknown-command failures", async () => {
+    mockSpawnSequence(() => mockProcess(containers), () => mockProcess(images), () => mockProcess("", "permission denied"), () => mockProcess(""));
+    render(<StackInfoModal stack={stack} onClose={vi.fn()} />);
+    await waitFor(() => expect(screen.getByText(/Could not load volumes/i)).toBeInTheDocument());
+  });
+
+  it("shows network error alert when network fetch fails", async () => {
+    mockSpawnSequence(() => mockProcess(containers), () => mockProcess(images), () => mockProcess(volumes), () => mockProcess("", "network error"));
+    render(<StackInfoModal stack={stack} onClose={vi.fn()} />);
+    await waitFor(() => expect(screen.getByText(/Could not load networks/i)).toBeInTheDocument());
+  });
+
+  it("shows profiles label for containers with active profiles", async () => {
+    const containerWithService = JSON.stringify([
+      {
+        ID: "abc123def456",
+        Name: "myapp_debug_1",
+        Image: "busybox:latest",
+        State: "running",
+        Status: "Up 1 hour",
+        Ports: "",
+        Service: "debug",
+      },
+    ]);
+    const composeWithProfiles = `
+services:
+  debug:
+    image: busybox
+    profiles: [debug]
+`;
+    mockReadComposeFile.mockImplementation(() => mockProcess(composeWithProfiles));
+    mockSpawnSequence(() => mockProcess(containerWithService), () => mockProcess("[]"), () => mockProcess("[]"), () => mockProcess(""));
+    render(<StackInfoModal stack={stack} onClose={vi.fn()} />);
+    await waitFor(() => expect(screen.getByText("Profiles")).toBeInTheDocument());
+    expect(screen.getAllByText("debug").length).toBeGreaterThan(0);
+  });
+
+  it("shows image error via String(ex) when image fetch fails with non-Error", async () => {
+    const nonErrorProcess = Object.assign(
+      new Promise<string>((_, reject) => queueMicrotask(() => reject("img string error"))),
+      { stream: vi.fn().mockReturnThis(), close: vi.fn(), input: vi.fn() },
+    ) as CockpitProcess;
+    mockSpawnSequence(() => mockProcess(containers), () => nonErrorProcess, () => mockProcess(volumes), () => mockProcess(""));
+    render(<StackInfoModal stack={stack} onClose={vi.fn()} />);
+    await waitFor(() => expect(screen.getByText(/Could not load images/i)).toBeInTheDocument());
+    expect(screen.getByText("img string error")).toBeInTheDocument();
+  });
+
+  it("renders volume rows with fallback dashes for missing fields", async () => {
+    const emptyVolume = JSON.stringify([{ Name: "", Driver: "", Mountpoint: "" }]);
+    mockSpawnSequence(() => mockProcess(containers), () => mockProcess(images), () => mockProcess(emptyVolume), () => mockProcess(""));
+    render(<StackInfoModal stack={stack} onClose={vi.fn()} />);
+    await waitFor(() => expect(screen.queryByRole("progressbar")).toBeNull());
+    expect(screen.getAllByText("—").length).toBeGreaterThan(0);
+  });
+
+  it("copy button invokes clipboard.writeText and shows copied state", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, writable: true, configurable: true });
+    mockSpawnSequence(() => mockProcess(containers), () => mockProcess(images), () => mockProcess(volumes), () => mockProcess(""));
+    render(<StackInfoModal stack={stack} onClose={vi.fn()} />);
+    await waitFor(() => expect(screen.queryByRole("progressbar")).toBeNull());
+    const copyBtn = screen.getAllByRole("button").find(b => b.getAttribute("aria-label")?.toLowerCase().includes("copy container"));
+    expect(copyBtn).toBeDefined();
+    fireEvent.click(copyBtn!);
+    await waitFor(() => expect(writeText).toHaveBeenCalled());
+  });
+});

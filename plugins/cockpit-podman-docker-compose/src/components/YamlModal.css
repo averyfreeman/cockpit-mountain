@@ -1,0 +1,108 @@
+.ym-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.ym-snapshots-panel {
+  margin-bottom: 1rem;
+  padding: 0.75rem;
+  background: var(--pf-t--global--background--color--secondary--default);
+  border-radius: var(--pf-t--global--border--radius--200);
+  max-height: 12rem;
+  overflow-y: auto;
+  flex-shrink: 0;
+}
+
+.ym-snapshots-title {
+  margin-bottom: 0.5rem;
+  font-weight: 600;
+}
+
+.ym-snapshot-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.5rem;
+  border-bottom: 1px solid var(--pf-t--global--border--color--default);
+}
+
+.ym-snapshot-name {
+  font-size: var(--pf-t--global--font--size--sm);
+}
+
+.ym-snapshot-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.ym-loading {
+  display: flex;
+  justify-content: center;
+  padding: 3rem;
+}
+
+.ym-confirm-note {
+  margin-top: 1rem;
+}
+
+.ym-config-file {
+  font-size: var(--pf-t--global--font--size--sm);
+  color: var(--pf-t--global--text--color--subtle);
+}
+
+.ym-tab-bar {
+  display: flex;
+  gap: 0.25rem;
+  margin-bottom: 0.5rem;
+  border-bottom: 1px solid var(--pf-t--global--border--color--default);
+  flex-shrink: 0;
+  align-items: center;
+}
+
+.ym-tab-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  padding-bottom: 2px;
+}
+
+.ym-tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 0.25rem 0.75rem;
+  font-size: var(--pf-t--global--font--size--sm);
+  color: var(--pf-t--global--text--color--subtle);
+  cursor: pointer;
+  margin-bottom: -1px;
+}
+
+.ym-tab--active {
+  border-bottom-color: var(--pf-t--global--color--brand--default);
+  color: var(--pf-t--global--text--color--regular);
+  font-weight: 600;
+}
+
+.ym-delete-file-btn {
+  color: var(--pf-t--global--icon--color--status--danger--default) !important;
+}
+
+/* Unsaved-changes dot on tab */
+.ym-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.ym-tab-dirty {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--pf-t--global--color--brand--default);
+  flex-shrink: 0;
+}

@@ -1,0 +1,200 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ *
+ * Copyright (C) 2017 Red Hat, Inc.
+ */
+
+import cockpit from 'cockpit';
+
+
+import type { OSInfo } from '../../types';
+
+import { ExclamationTriangleIcon, OutlinedClockIcon } from "@patternfly/react-icons";
+
+import {
+    getTodayYearShifted,
+} from "../../helpers.js";
+
+import * as python from "python.js";
+import autoDetectOSScript from './autoDetectOS.py';
+
+const _ = cockpit.gettext;
+
+const ACCEPT_RELEASE_DATES_AFTER = getTodayYearShifted(-3);
+const RHSM_TOKEN = "rhsm-offline-token";
+
+export const URL_SOURCE = 'url';
+export const LOCAL_INSTALL_MEDIA_SOURCE = 'file';
+export const CLOUD_IMAGE = 'cloud';
+export const DOWNLOAD_AN_OS = 'os';
+export const EXISTING_DISK_IMAGE_SOURCE = 'disk_image';
+export const PXE_SOURCE = 'pxe';
+export const NONE = 0;
+export const RUN = 1;
+export const EDIT = 2;
+
+/*
+ * Uses libosinfo to autodetect an OS based on its media/treeinfo.
+ * treeinfo detection currently works only for rpm based distros.
+ */
+export function autodetectOS(url: string, signal: AbortSignal) {
+    const channel = python.spawn(autoDetectOSScript, [url], { environ: ['LC_ALL=C.UTF-8'], err: 'message' });
+    signal.onabort = () => channel.close();
+    return channel;
+}
+
+export function getOSStringRepresentation(os: OSInfo) {
+    let appendix = '';
+
+    if (os.version && !os.name.includes(os.version)) {
+        appendix += os.version;
+    }
+    if (os.codename) {
+        appendix += (appendix ? ' ' : '') + os.codename;
+    }
+    if (appendix) {
+        appendix = ` (${appendix})`;
+    }
+
+    return `${os.name}${appendix}`;
+}
+
+export function filterReleaseEolDates(os: OSInfo) {
+    // Filter out all OSes with elapsed EOL, or that have been released too long ago
+    return !(
+        (os.eolDate && new Date(os.eolDate).getTime() < Date.now()) ||
+        (!os.eolDate && os.releaseDate && compareDates(ACCEPT_RELEASE_DATES_AFTER, os.releaseDate) < 0)
+    );
+}
+
+export function getOSDescription(os: OSInfo) {
+    if (os.eolDate && new Date(os.eolDate).getTime() < Date.now())
+        return <span><ExclamationTriangleIcon /> {cockpit.format(_("Vendor support ended $0"), os.eolDate)}</span>;
+    if (!os.eolDate && os.releaseDate && compareDates(ACCEPT_RELEASE_DATES_AFTER, os.releaseDate) < 0)
+        return <span><OutlinedClockIcon /> {cockpit.format(_("Released $0"), os.releaseDate)}</span>;
+    return null;
+}
+
+export function compareDates(a: Date | string, b: string, emptyFirst: boolean = false): number {
+    if (!a) {
+        if (!b) {
+            return 0;
+        }
+        return emptyFirst ? -1 : 1;
+    }
+    if (!b) {
+        return emptyFirst ? 1 : -1;
+    }
+
+    return new Date(b).getTime() - new Date(a).getTime();
+}
+
+export function correctSpecialCases(os: OSInfo): OSInfo {
+    if (os.shortId === 'win8') {
+        os.releaseDate = '2012-08-01';
+    }
+
+    if (os.shortId === 'win8.1') {
+        os.releaseDate = '2014-04-08';
+    }
+
+    if (os.shortId === 'msdos6.22') {
+        os.releaseDate = '1994-06-01';
+    }
+
+    // linux
+    if (os.shortId.toLowerCase().includes('centos7')) {
+        os.eolDate = '2024-06-30';
+    }
+
+    if (os.shortId === 'freebsd2.2.9') {
+        os.releaseDate = '2006-04-01'; // april fools prank
+    }
+
+    if (os.shortId === 'openbsd4.2') {
+        os.releaseDate = '2007-11-01';
+    }
+
+    if (os.shortId === 'openbsd4.3') {
+        os.releaseDate = '2008-05-01';
+    }
+
+    if (os.shortId === 'openbsd4.4') {
+        os.releaseDate = '2008-11-01';
+    }
+
+    if (os.shortId === 'openbsd4.5') {
+        os.releaseDate = '2009-05-01';
+    }
+
+    if (os.shortId === 'openbsd4.8') {
+        os.releaseDate = '2010-11-01';
+    }
+
+    if (os.shortId === 'openbsd4.9') {
+        os.releaseDate = '2011-05-01';
+    }
+
+    if (os.shortId === 'openbsd5.0') {
+        os.releaseDate = '2011-11-01';
+    }
+
+    if (needsRHToken(os.shortId)) {
+        // We don't support unattended installation for RHEL via the
+        // "Download an OS" method.  (We do support it for the "Cloud
+        // base image" method.)
+        //
+        // It is probably technically possible, but doesn't currently
+        // work.  Because of access restrictions, we need to download
+        // the installation media for RHEL separately and can't just
+        // run "virt-install --install rhel-9.8" (for
+        // example). Instead, we download the "boot.iso" variant and
+        // then use "virt-install --cdrom ../rhel-9-8-boot.iso" (for
+        // example).  But the "--unattended" option of virt-install is
+        // not effective together with "--cdrom" for RHEL installation
+        // media.  The RHEL installer will not find the kickstart file
+        // provided by virt-install in this case.
+        //
+        // And even if it would, the "boot.iso" variant will need to
+        // subscribe to Red Hat to download the actual RPMs. Including
+        // the necessary credentials into the kickstart file is
+        // probably possible, but not implemented right now.
+        //
+        // So, if unattended installs of RHEL with "Download an OS"
+        // method is really wanted, it can probably be implemented,
+        // with changes to virt-install or libosinfo, and
+        // cockpit-machines.
+        //
+        // But it is more likely that people will use the RHEL Image
+        // Builder to make customized installation media (or cloud
+        // base images) and use those.
+
+        os.unattendedInstallable = false;
+    }
+
+    return os;
+}
+
+export function needsRHToken(osName: string) {
+    return osName.startsWith("rhel");
+}
+
+export function isDownloadableOs(os: OSInfo) {
+    return os.treeInstallable ||
+        (needsRHToken(os.shortId) &&
+        !os.version.endsWith("unknown") &&
+        // RHSM API supports only rhel versions >= 8: https://access.redhat.com/management/api/rhsm#/images/listImageDownloadsByVersionArch
+        (os.version.localeCompare("8.0", undefined, { numeric: true, sensitivity: 'base' }) >= 0));
+}
+
+export function saveOfflineToken(offlineToken: string) {
+    return localStorage.setItem(RHSM_TOKEN, offlineToken);
+}
+
+export function loadOfflineToken(setToken: (token: string | null) => void): void {
+    return setToken(localStorage.getItem(RHSM_TOKEN));
+}
+
+export function removeOfflineToken(): void {
+    return localStorage.removeItem(RHSM_TOKEN);
+}

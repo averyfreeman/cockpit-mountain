@@ -1,0 +1,1920 @@
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
+
+#
+# Copyright (C) 2017 Red Hat, Inc.
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
+
+import fnmatch
+import time
+from collections.abc import Collection
+
+import packagelib
+import submanlib
+import testlib
+
+OSesWithoutTracer = ["debian-*", "ubuntu-*", "fedora-coreos", "centos-10", "rhel-10*"]
+OSesWithDnfRestart = ["centos-10", "rhel-10*"]
+OSesWithoutKpatch = ["debian-*", "ubuntu-*", "arch", "fedora-*", "centos-*"]
+
+
+class NoSubManCase(packagelib.PackageCase):
+
+    def setUp(self):
+        super().setUp()
+
+        # Disable Subscription Manager on RHEL for these tests; subscriptions are tested in a separate class
+        # On other OSes (Fedora/CentOS) we expect sub-man to be disabled in dnf, so it should not get in the way there
+        if self.machine.image.startswith("rhel") or self.machine.image.startswith("centos"):
+            self.machine.execute("systemctl mask --now rhsm.service")
+            self.addCleanup(self.machine.execute, "systemctl unmask rhsm.service")
+
+        # expected journal messages from enabling/disabling auto upgrade services
+        self.allow_journal_messages("(Created symlink|Removed).*dnf-automatic-install.timer.*")
+
+
+@testlib.skipOstree("Image uses OSTree")
+class TestUpdates(NoSubManCase):
+
+    def setUp(self):
+        super().setUp()
+
+        # apt does not support severity enhancement metadata
+        # only PackageKit ≥ 1.2.4 dnf (https://github.com/PackageKit/PackageKit/issues/268) supports severity
+        self.supports_severity = (self.backend != "apt") and (not self.machine.image.startswith("rhel-8"))
+
+        if self.supports_severity:
+            self.enhancement_severity = "enhancement"
+        else:
+            self.enhancement_severity = "bug"
+
+        self.update_icon = "#page_status_notification_updates .pf-v6-svg"
+        self.update_text = "#page_status_notification_updates"
+        self.update_text_action = "#page_status_notification_updates a"
+
+    def assertHistory(self, path: str, updates: list[str]) -> None:
+        selector = path + " li:nth-child({0})"
+        for index, pkg in enumerate(updates, start=1):
+            self.browser.wait_in_text(selector.format(index), pkg)
+        # make sure we don't have any extra ones
+        self.assertFalse(self.browser.is_present(selector.format(len(updates) + 1)))
+
+    def check_nth_update(self, index: int, pkgname: list[str] | str, version: str, severity: str = "bug",
+                         num_issues: 'int | None' = None, desc_matches: Collection[str] = (),
+                         cves: Collection[str] = (), bugs: Collection[str] = (), arch: 'str | None' = None,
+                         absent_anchor_attributes: Collection[str] = ()) -> str:
+        """Check the contents of the package update table row at index
+
+        None properties will not be tested.
+        """
+        b = self.browser
+        if arch is None:
+            arch = self.primary_arch
+        row = "#available-updates table[aria-label='Available updates'] > tbody:nth-of-type(%i) " % index
+
+        if isinstance(pkgname, list):
+            for idx, pkg in enumerate(pkgname, 1):
+                sel = row + "tr:first-child [data-label=Name] > div:nth-of-type(%i) span" % idx
+                self.assertEqual(b.text(sel).split(', ', 1)[0], pkg)
+        else:
+            self.assertEqual(b.text(row + " tr:first-child [data-label=Name]"), pkgname)
+            b.mouse(row + "tr:first-child [data-label=Name] span", "mouseenter")
+            b.wait_text(".pf-v6-c-tooltip", f"dummy {pkgname} ({arch})")
+            b.mouse(row + "tr:first-child [data-label=Name] span", "mouseleave")
+            b.wait_not_present(".pf-v6-c-tooltip")
+        self.assertEqual(b.text(row + "[data-label=Version]"), version)
+        # verify type
+        severity_to_aria = {"bug": "bug fix", "enhancement": "enhancement", "security": "security"}
+        b.wait_visible(f"{row} [data-label=Severity] .severity-icon[aria-label='{severity_to_aria[severity]}']")
+        self.assertEqual(b.text(row + "[data-label=Severity]").strip(),
+                         '' if num_issues is None else str(num_issues))
+
+        # should not be expanded by default
+        self.assertNotIn("pf-m-expanded", b.attr(row, "class"))
+        # expand
+        b.click(row + "td.pf-v6-c-table__toggle button")
+        self.assertIn("pf-m-expanded", b.attr(row, "class"))
+        b.wait_in_text(row + "> .pf-v6-c-table__expandable-row.pf-m-expanded", "Packages")
+        desc = b.text(row + "> .pf-v6-c-table__expandable-row.pf-m-expanded")
+
+        # details should contain all description bits, CVEs and bug numbers
+        for m in (*desc_matches, *cves, *bugs):
+            self.assertIn(m, desc)
+
+        for absent_anchor in absent_anchor_attributes:
+            self.assertIsNone(b.attr(f"{row} [data-label='Details'] a", absent_anchor))
+
+        return row
+
+    def wait_checking_updates(self):
+        """Wait until spinner is gone from updates icon for 3 s"""
+
+        good_count = 0
+        for _ in range(60):
+            classes = self.browser.attr(self.update_icon, "class")
+            if classes is not None and "pf-v6-c-spinner" in classes:
+                good_count = 0
+            else:
+                good_count += 1
+                if good_count >= 3:
+                    return
+            time.sleep(1)
+
+        self.fail("Timed out waiting for updates spinner to go away")
+
+    @testlib.nondestructive
+    @testlib.skipImage("kpatch is not available", *OSesWithoutKpatch)
+    def testKpatch(self):
+        b = self.browser
+        m = self.machine
+
+        kernel_ver_arch = m.execute("uname -r").strip()
+        fields = kernel_ver_arch.split("-")
+        kpp_kernel_version = fields[0].replace(".", "_")
+        release = fields[1].split(".")[:-2]  # remove el8.x86_64
+        kpp_kernel_release = "_".join(release)
+
+        sanitized_kernel_ver = "_".join(kernel_ver_arch.split(".")[:-2])
+        self.createPackage("-".join(["kpatch-patch", kpp_kernel_version, kpp_kernel_release]), "0", "0",
+                           arch=self.secondary_arch, provides=f"kpatch-patch = {kernel_ver_arch}")
+        self.enableRepo()
+
+        self.restore_file("/etc/dnf/plugins/kpatch.conf")
+        m.execute("systemctl disable --now kpatch")
+
+        self.login_and_go("/updates")
+        with b.wait_timeout(30):
+            b.wait_visible("#status")
+
+        # on supported systems we show a spinner
+        b.wait_visible("#kpatch-settings svg.pf-v6-c-spinner")
+
+        # Enable and install kpatch
+        with b.wait_timeout(30):
+            b.wait_in_text("#kpatch-settings", "Disabled")
+        b.click("#kpatch-settings button:contains('Enable')")
+
+        # Apply kernel live patches for current and future kernels
+        b.click("#apply-kpatch")
+        b.wait_visible("#apply-kpatch:checked")
+        b.wait_visible("#current-future:checked")
+
+        b.click("button:contains('Save')")
+        b.wait_not_present("#kpatch-setup")
+
+        self.assertIn("True", m.execute("grep autoupdate /etc/dnf/plugins/kpatch.conf"))
+        self.assertEqual(m.execute("systemctl is-enabled kpatch").strip(), "enabled")
+        self.assertEqual(m.execute("systemctl is-active kpatch").strip(), "active")
+        # Patches should be installed
+        m.execute("rpm -q kpatch-patch-" + sanitized_kernel_ver)
+
+        # Faking real patches is really hard, so fake `kpatch list` command
+        # To make sure it has the same structure as we expect it to be first check the real command
+        self.assertEqual(m.execute("kpatch list"), "Loaded patch modules:\n\nInstalled patch modules:\n")
+
+        kpatch = """#!/bin/bash
+echo -e "Loaded patch modules:\nkpatch_3_10_0_1062_1_1 [enabled]\n\nInstalled patch modules:\nkpatch_3_10_0_1062_1_1 (3.10.0-1062.el7.x86_64)"
+"""
+
+        self.createPackage("kpatch-patch-" + sanitized_kernel_ver, "1", "0", arch=self.secondary_arch,
+                           provides=f"kpatch-patch = {kernel_ver_arch}",
+                           content={"/usr/local/bin/kpatch": kpatch},
+                           postinst="chmod +x /usr/local/bin/kpatch; mount -o bind /usr/local/bin/kpatch /usr/sbin/kpatch")
+        # Mix in an normal update and ensure it's not updated
+        self.createPackage("vanilla", "1.0", "1", install=True)
+        self.createPackage("vanilla", "1.0", "2")
+        self.createPackage("secdeclare", "3", "4.a1", install=True)
+        self.createPackage("secdeclare", "3", "4.b1", severity="security",
+                           changes="Will crash your data center", cves=["CVE-2014-123456"])
+        self.enableRepo()
+        self.addCleanup(m.execute, "umount /usr/sbin/kpatch")
+
+        b.click("#status .pf-v6-c-card__actions button")
+        b.wait_visible(".pf-v6-c-badge:contains('patches')")
+        b.click("button:contains('Install kpatch updates')")
+        b.click("button:contains('Continue')")
+        b.wait_in_text("#status", "Kernel live patch kpatch_3_10_0_1062_1_1 is active")
+        # Other updates are not installed
+        self.check_nth_update(1, "secdeclare", "3-4.b1", "security", 1,
+                              desc_matches=["Will crash your data center"], cves=["CVE-2014-123456"])
+        self.check_nth_update(2, "vanilla", "1.0-2")
+        self.assertEqual(m.execute("rpm -q vanilla").strip(), "vanilla-1.0-1.noarch")
+
+        # Switch to 'for current kernel only'
+        b.click("#kpatch-settings button:contains('Edit')")
+        b.click("#current-only")
+        b.wait_visible("#current-future:not(:checked)")
+        b.wait_visible("#current-only:checked")
+
+        b.click("button:contains('Save')")
+        b.wait_not_present("#kpatch-setup")
+
+        self.assertIn("False", m.execute("grep autoupdate /etc/dnf/plugins/kpatch.conf"))
+        self.assertEqual(m.execute("systemctl is-enabled kpatch").strip(), "enabled")
+        self.assertEqual(m.execute("systemctl is-active kpatch").strip(), "active")
+        # Patches should be installed
+        m.execute("rpm -q kpatch-patch-" + sanitized_kernel_ver)
+
+        # Test disabling applying patches
+        b.click("#kpatch-settings button:contains('Edit')")
+        b.wait_visible("#apply-kpatch:checked")
+        b.click("#apply-kpatch")
+        b.wait_visible("#apply-kpatch:not(:checked)")
+
+        b.click("button:contains('Save')")
+        b.wait_not_present("#kpatch-setup")
+
+        b.wait_in_text("#kpatch-settings", "Disabled")
+        b.click("#kpatch-settings button:contains('Enable')")
+
+        # Test closing of the dialog and resetting of changes
+        b.wait_visible("#apply-kpatch:not(:checked)")
+        b.click("#apply-kpatch")
+        b.wait_visible("#apply-kpatch:checked")
+        b.click("button:contains('Cancel')")
+        b.wait_not_present("#kpatch-setup")
+        b.click("#kpatch-settings button:contains('Enable')")
+        b.wait_visible("#apply-kpatch:not(:checked)")
+
+        # Test 'for current kernel only' from clean state
+        m.execute("umount /usr/sbin/kpatch")
+        m.execute("systemctl restart kpatch")
+        m.execute("dnf -y remove kpatch-patch-" + sanitized_kernel_ver)
+        b.reload()  # Not listening on patches being removed
+        b.enter_page("/updates")
+
+        b.wait_in_text("#kpatch-settings", "Disabled")
+        b.click("#kpatch-settings button:contains('Enable')")
+
+        # Apply kernel live patches for current and future kernels
+        b.click("#apply-kpatch")
+        b.wait_visible("#apply-kpatch:checked")
+        b.click("#current-only")
+        b.wait_visible("#current-future:not(:checked)")
+        b.wait_visible("#current-only:checked")
+
+        b.click("button:contains('Save')")
+        b.wait_not_present("#kpatch-setup")
+
+        self.assertIn("False", m.execute("grep autoupdate /etc/dnf/plugins/kpatch.conf"))
+        self.assertEqual(m.execute("systemctl is-enabled kpatch").strip(), "enabled")
+        self.assertEqual(m.execute("systemctl is-active kpatch").strip(), "active")
+        # Patches should be installed
+        m.execute("rpm -q kpatch-patch-" + sanitized_kernel_ver)
+
+    @testlib.nondestructive
+    @testlib.skipImage("alpm PackageKit backend does not support cancelling", "arch")
+    def testBasic(self):
+        # no security updates, no changelogs
+        b = self.browser
+        m = self.machine
+
+        def check_status():
+            if any(fnmatch.fnmatch(m.image, img) for img in OSesWithoutTracer):
+                b.wait_in_text("#status p", "System is up to date")
+                # PK starts from a blank state, thus should force refresh and set the "time since" to 0
+                b.wait_in_text("#last-checked", "Last checked: less than a minute ago")
+            else:
+                code = m.execute("tracer > /dev/null 2>&1; echo $?").rstrip()
+                if code == "104":
+                    b.wait_in_text("#status p", "a system reboot")
+                elif code == "102" or code == "101":
+                    b.wait_in_text("#status p", "to be restarted")
+                else:
+                    b.wait_in_text("#status p", "System is up to date")
+                    # PK starts from a blank state, thus should force refresh and set the "time since" to 0
+                    b.wait_in_text("#last-checked", "Last checked: less than a minute ago")
+
+        self.enable_preload("packagekit", "index")
+
+        # Refresh cache so cockpit does not try to reload page
+        self.refreshMetadata()
+
+        self.login_and_go("/system")
+        # status on /system front page: no repos at all, thus no updates
+        self.wait_checking_updates()
+        b.wait_text(self.update_text, "System is up to date")
+        self.assertEqual(b.attr(self.update_icon, "data-pficon"), "check")
+
+        # no updates on the Software Updates page
+        b.go("/updates")
+        b.enter_page("/updates")
+
+        # refresh
+        b.click("#status .pf-v6-c-card__header button")
+        check_status()
+
+        install_lockfile = "/tmp/finish-pk"
+        # create two updates; force installing chocolate before vanilla
+        self.createPackage("vanilla", "1.0", "1", install=True)
+        self.createPackage("vanilla", "1.0", "2", depends="chocolate",
+                           postinst=f"while [ ! -e {install_lockfile} ]; do sleep 1; done; rm -f {install_lockfile}")
+        self.createPackage("chocolate", "2.0", "1", install=True, arch=self.secondary_arch)
+        self.createPackage("chocolate", "2.0", "2", arch=self.secondary_arch)
+        self.enableRepo()
+
+        # check again
+        b.click("#status .pf-v6-c-card__header button")
+
+        with b.wait_timeout(30):
+            b.wait_visible("#available-updates")
+        b.wait_in_text("#status", "2 updates available")
+
+        b.wait_in_text("table[aria-label='Available updates']", "vanilla")
+        self.check_nth_update(1, "chocolate", "2.0-2", arch=self.secondary_arch)
+        self.check_nth_update(2, "vanilla", "1.0-2")
+
+        # updates are shown on system page
+        b.go("/system")
+        b.enter_page("/system")
+        self.wait_checking_updates()
+        b.wait_text(self.update_text, "Bug fix updates available")
+        self.assertEqual(b.attr(self.update_icon, "data-pficon"), "bug")
+        # should be a link, click on it to go to /updates
+        b.click(self.update_text_action)
+        b.enter_page("/updates")
+
+        # old versions are still installed
+        m.execute("test -f /stamp-vanilla-1.0-1; test -f /stamp-chocolate-2.0-1")
+
+        # no update history yet
+        self.assertFalse(b.is_present("table.updates-history"))
+
+        # should only have one button (no security updates)
+        self.assertEqual(b.text("#available-updates button#install-all"), "Install all updates")
+
+        # update; Cancel button should eventually disappear, on some OSes
+        b.click("#available-updates button#install-all")
+        b.wait_visible(".progress-main-view")
+        if m.image in ["fedora-44"]:
+            # dnf5backend allows "Cancel" during setup
+            pass
+        else:
+            b.wait_not_present(".progress-main-view button.pf-m-secondary")
+        # gets stuck at vanilla, which needs install_lockfile
+        b.wait_in_text("#app div.progress-description", "vanilla 1.0-2")
+
+        # update log only exists in the expander, collapsed by default
+        self.assertFalse(b.is_visible("#update-log"))
+        # expand it
+        b.click(".pf-v6-c-expandable-section__toggle button")
+        # should eventually show chocolate when vanilla starts installing
+        b.wait_in_text("#update-log", "chocolate")
+
+        # finish the package installation
+        m.execute(f"touch {install_lockfile}")
+
+        b.wait_in_text(".pf-v6-c-empty-state__title", "Update was successful")
+        # if restart checking is not present, reboot is recommended
+        if any(fnmatch.fnmatch(m.image, img) for img in OSesWithoutTracer) and not any(
+                fnmatch.fnmatch(m.image, img) for img in OSesWithDnfRestart):
+            b.wait_in_text("#app .pf-v6-c-empty-state button.pf-m-primary", "Reboot system...")
+        b.click("#ignore")
+
+        # should go back to updates overview, nothing pending any more
+        check_status()
+
+        # TODO make Packagekit GetUpdates work for tests properly
+        b.wait_not_present("#available-updates")
+
+        # new versions are now installed
+        m.execute("test -f /stamp-vanilla-1.0-2; test -f /stamp-chocolate-2.0-2")
+
+        # history shows the two packages, expanded by default
+        b.wait_text("table.updates-history tbody.pf-m-expanded td.history-pkgcount", "2 packages")
+        b.wait_in_text("table.updates-history .pf-v6-c-table__expandable-row.pf-m-expanded", "chocolate")
+        b.wait_in_text("table.updates-history .pf-v6-c-table__expandable-row.pf-m-expanded", "vanilla")
+
+        # system page has current state as well
+        b.go("/system")
+        b.enter_page("/system")
+        self.wait_checking_updates()
+        self.assertEqual(b.attr(self.update_icon, "data-pficon"), "check")
+        b.wait_text(self.update_text, "System is up to date")
+
+    @testlib.nondestructive
+    @testlib.skipImage("alpm PackageKit backend does not support cancelling", "arch")
+    def testBasicTZFullHour(self):
+        m = self.machine
+        orig_timezone = m.execute("timedatectl show --value -p Timezone").strip()
+        self.addCleanup(m.execute, f"timedatectl set-timezone {orig_timezone}")
+        # UTC+1 or 2
+        m.execute("timedatectl set-timezone Europe/Berlin")
+        self.testBasic()
+
+    @testlib.nondestructive
+    @testlib.skipImage("alpm PackageKit backend does not support cancelling", "arch")
+    def testBasicTZHalfHour(self):
+        m = self.machine
+        orig_timezone = m.execute("timedatectl show --value -p Timezone").strip()
+        self.addCleanup(m.execute, f"timedatectl set-timezone {orig_timezone}")
+        # IST = UTC + 5:30
+        m.execute("timedatectl set-timezone Asia/Kolkata")
+        self.testBasic()
+
+    # returns ExecMainStartTimestamp
+    def createServicePackageUpgrade(self, package: str, *, manual_proc: bool = False) -> str:
+        m = self.machine
+
+        unitContent = f"""[Service]
+ExecStart=/usr/local/bin/{package} infinity
+"""
+        self.createPackage(package, "1", "1", install=True, changes="initial package with service and run script",
+                           content={f"/usr/local/bin/{package}": {"path": "/usr/bin/sleep"},
+                                    f"/etc/systemd/system/{package}.service": unitContent},
+                           postinst=(f"chmod a+x /usr/local/bin/{package};"
+                                     f"systemctl daemon-reload; systemctl start {package}.service"),
+                           arch=self.secondary_arch)
+
+        if manual_proc:
+            manual_pid = m.spawn(f"{package} 3600", "non-service-bin.log")
+            self.addCleanup(m.execute, f"kill {manual_pid}")
+
+        self.createPackage(package, "1", "2",
+                           content={f"/usr/local/bin/{package}": {"path": "/usr/bin/sleep"},
+                                    f"/etc/systemd/system/{package}.service": unitContent},
+                           postinst=f"chmod a+x /usr/local/bin/{package}",
+                           arch=self.secondary_arch)
+
+        startTime = m.execute(f"systemctl show {package}.service --property=ExecMainStartTimestamp")
+
+        self.addCleanup(m.execute, ("pacman -R --noconfirm " if m.image == "arch" else "rpm -e ") + package)
+        self.addCleanup(m.execute, f"systemctl stop {package}")
+
+        return startTime
+
+    @testlib.skipImage("tracer not available", *OSesWithoutTracer)
+    def testTracer(self):
+        b = self.browser
+        m = self.machine
+
+        class Tracer:
+            def __init__(self,
+                         testObj: TestUpdates,
+                         rebootRequired: bool = False,
+                         testStatusCard: bool = False,
+                         packageName: str = "vanilla"):
+                self.testObj = testObj
+                self.rebootRequired = rebootRequired
+                self.testStatusCard = testStatusCard
+                self.packageName = packageName
+
+            def execute(self):
+                self.prepare()
+                self.test_frontend()
+                self.verify_backend()
+                self.cleanup()
+
+            def prepare(self):
+                if self.rebootRequired:
+                    # setting app as static in tracer's helper file will cause it to require a reboot
+                    self.testObj.write_file("/etc/tracer/applications.xml",
+                                            f"""
+<applications>
+   <app name="{self.packageName}" type="static" />
+</applications>
+""")
+
+                self.serviceStartTime = self.testObj.createServicePackageUpgrade(self.packageName)
+                self.testObj.enableRepo(refresh_repo=True)
+
+            def test_frontend(self):
+                self.testObj.login_and_go("/updates")
+
+                with b.wait_timeout(30):
+                    b.wait_visible("#status")
+
+                # check update is present
+                b.wait_in_text("#status", "1 update available")
+                b.wait_in_text("#available-updates table", self.packageName)
+
+                # install updates
+                b.wait_in_text("#install-all", "Install all updates")
+                b.click("#install-all")
+                with b.wait_timeout(60):
+                    b.wait_in_text(".pf-v6-c-empty-state__title", "Update was successful")
+
+                b.wait_visible("#ignore")
+                b.wait_visible(".updates-success-table")
+
+                if self.rebootRequired:
+                    rowId = "#reboot-row"
+                else:
+                    rowId = "#service-row"
+
+                b.wait_visible(f"{rowId}")
+                b.click(f"{rowId} button")
+                b.wait_in_text(f"{rowId} + tr", self.packageName)
+
+                # test the tracer functionality works also in the Status Card
+                if self.testStatusCard:
+                    b.click("#ignore")
+
+                    if self.rebootRequired:
+                        b.wait_in_text("#status", "1 package needs a system reboot")
+                        b.click("#packages-need-reboot button")
+                        b.wait_visible("#shutdown-dialog")
+                        b.click("#delay")
+                        b.click("button:contains('No delay')")
+                        b.wait_text("#delay .pf-v6-c-menu-toggle__text", "No delay")
+                        b.click("#shutdown-dialog button:contains('Reboot')")
+                        b.switch_to_top()
+                        b.wait_in_text(".curtains-ct h1", "Disconnected")
+
+                        # ensure that rebooting actually worked
+                        self.testObj.wait_reboot()
+                        self.testObj.login_and_go("/updates")
+                    else:
+                        b.wait_in_text("#status", "1 service needs to be restarted")
+                        b.click("#services-need-restart button")
+                        b.wait_visible("#restart-services-modal")
+                        b.wait_in_text(".restart-services-modal-body", self.packageName)
+                        b.click("#restart-services-modal button:contains('Restart services')")
+                        b.wait_not_present("#restart-services-modal")
+
+                # test the tracer functionality works in-page after successful update
+                else:
+                    if self.rebootRequired:
+                        # update required a reboot
+                        b.wait_not_present("#choose-service")
+                        b.click("#reboot-system")
+                        b.wait_visible("#shutdown-dialog")
+                        b.click("#delay")
+                        b.click("button:contains('No delay')")
+                        b.wait_text("#delay .pf-v6-c-menu-toggle__text", "No delay")
+                        b.click("#shutdown-dialog button:contains('Reboot')")
+                        b.switch_to_top()
+                        b.wait_in_text(".curtains-ct h1", "Disconnected")
+
+                        # ensure that rebooting actually worked
+                        self.testObj.wait_reboot()
+                        self.testObj.login_and_go("/updates")
+                    else:
+                        # update required a service restart
+                        b.wait_not_present("#reboot-system")
+                        b.click("#choose-service")
+                        b.wait_visible("#restart-services-modal")
+                        b.wait_in_text(".restart-services-modal-body", self.packageName)
+                        b.click("#restart-services-modal button:contains('Restart services')")
+                        b.wait_not_present("#restart-services-modal")
+
+                # check no updates are present
+                b.wait_in_text("#status", "System is up to date")
+
+                # history on "up to date" page should show the recent update (expanded by default)
+                self.testObj.assertHistory("#expanded-content0 > td > div > ul", [self.packageName])
+
+            def verify_backend(self):
+                if not self.rebootRequired:
+                    # Check the service was actually restarted
+                    newServiceStartTime = m.execute(
+                        f"systemctl show {self.packageName}.service --property=ExecMainStartTimestamp")
+                    self.testObj.assertGreater(newServiceStartTime, self.serviceStartTime)
+
+                # check no services/processes need reboot or service restart
+                # tracer returns non-zero exit code if any services/processes are affected
+                m.execute("tracer --all --root")
+
+            def cleanup(self):
+                if self.rebootRequired:
+                    m.execute("rm /etc/tracer/applications.xml")
+
+        Tracer(
+            testObj=self,
+            packageName="apple",
+            rebootRequired=True,
+            testStatusCard=False,
+        ).execute()
+
+        Tracer(
+            testObj=self,
+            packageName="cherry",
+            rebootRequired=False,
+            testStatusCard=False,
+        ).execute()
+
+        Tracer(
+            testObj=self,
+            packageName="pear",
+            rebootRequired=True,
+            testStatusCard=True,
+        ).execute()
+
+        Tracer(
+            testObj=self,
+            packageName="banana",
+            rebootRequired=False,
+            testStatusCard=True,
+        ).execute()
+
+    @testlib.nondestructive
+    @testlib.onlyImage("dnf needs-restart not available", *OSesWithDnfRestart)
+    def testDnfRestart(self):
+        m = self.machine
+        b = self.browser
+
+        start_time = self.createServicePackageUpgrade("mydaemon")
+        self.enableRepo()
+        self.login_and_go("/updates")
+        # check update is present
+        with b.wait_timeout(30):
+            b.wait_in_text("#status", "1 update available")
+        b.wait_in_text("#available-updates table", "mydaemon")
+
+        b.click("#install-all")
+        with b.wait_timeout(60):
+            b.wait_in_text(".pf-v6-c-empty-state__title", "Update was successful")
+
+        # update required only a service restart
+        b.wait_text(".update-success-table-title", "1 service needs to be restarted")
+        b.click("[data-ouia-component-id='toggle-service']")
+        b.wait_in_text(".updates-success-table", "mydaemon.service")
+        b.wait_not_present("#reboot-system")
+        b.click("#choose-service")
+        b.wait_visible("#restart-services-modal")
+        b.wait_in_text(".restart-services-modal-body", "mydaemon")
+        b.click("#restart-services-modal button:contains('Restart services')")
+        b.wait_not_present("#restart-services-modal")
+        b.wait_in_text("#status p", "System is up to date")
+
+        new_start_time = m.execute("systemctl show mydaemon.service --property=ExecMainStartTimestamp")
+        self.assertGreater(new_start_time, start_time)
+
+        # finds manual process
+        self.createServicePackageUpgrade("manual", manual_proc=True)
+        self.enableRepo()
+        b.click("#status .pf-v6-c-card__header button")
+        with b.wait_timeout(30):
+            b.wait_visible("#available-updates")
+        b.wait_in_text("#status", "1 update available")
+        b.click("#install-all")
+        with b.wait_timeout(60):
+            b.wait_in_text(".pf-v6-c-empty-state__title", "Update was successful")
+
+        b.wait_text("#service-row .update-success-table-title", "1 service needs to be restarted")
+        b.wait_visible("#manual-row .update-success-table-title")
+
+        b.click("[data-ouia-component-id='toggle-manual']")
+        b.wait_in_text(".updates-success-table", "manual 3600")
+
+        # offers both service restart and reboot
+        b.wait_visible("#choose-service")
+        b.wait_visible("#reboot-system")
+        b.click("#ignore")
+
+        b.wait_in_text("#status", "1 service needs to be restarted")
+        b.wait_in_text("#status", "Some software needs to be restarted manually")
+        b.wait_in_text("#status", "manual 3600")
+
+        # kernel update for "needs reboot"
+        self.createPackage("kernel-rt", "1.0", "1", install=True)
+        self.createPackage("kernel-rt", "1.0", "2")
+        self.enableRepo()
+        b.click("#status .pf-v6-c-card__header button")
+        with b.wait_timeout(30):
+            b.wait_visible("#available-updates")
+        b.wait_in_text("#status", "1 update available")
+        b.click("#install-all")
+        b.click("[data-ouia-component-id='toggle-reboot']")
+        b.wait_in_text(".updates-success-table", "kernel-rt")
+        b.wait_visible("#reboot-system")
+        b.click("#ignore")
+        b.wait_in_text("#status", "1 package needs a system reboot")
+
+    @testlib.skipImage("Arch Linux does not start services by default", "arch")
+    @testlib.skipImage("tracer not available", *OSesWithoutTracer)
+    @testlib.nondestructive
+    def testFailServiceRestart(self):
+        b = self.browser
+
+        packageName = "apple"
+        scriptContent = "#!/bin/sh\nsleep infinity"
+        unitContent = f"""
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/{packageName}
+"""
+        self.createPackage(packageName, "1", "1", install=True, changes="initial package with service and run script",
+                           content={f"/usr/local/bin/{packageName}": scriptContent,
+                                    f"/etc/systemd/system/{packageName}.service": unitContent},
+                           postinst=f"chmod a+x /usr/local/bin/{packageName}; systemctl daemon-reload; systemctl start {packageName}.service")
+
+        scriptContent = "#!/bin/sh\nfalse"
+        unitContent = f"""
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/{packageName}
+"""
+        self.createPackage(packageName, "1", "2",
+                           content={f"/usr/local/bin/{packageName}": scriptContent,
+                                    f"/etc/systemd/system/{packageName}.service": unitContent})
+
+        self.enableRepo()
+
+        self.login_and_go("/updates")
+
+        # check update is present
+        with b.wait_timeout(30):
+            b.wait_in_text("#status", "1 update available")
+        b.wait_in_text("#available-updates table", packageName)
+
+        # install updates
+        b.wait_in_text("#install-all", "Install all updates")
+        b.click("#install-all")
+        with b.wait_timeout(60):
+            b.wait_in_text(".pf-v6-c-empty-state__title", "Update was successful")
+
+        b.wait_visible("#ignore")
+        b.wait_visible(".updates-success-table")
+
+        b.wait_visible("#service-row")
+        b.click("#service-row button")
+        b.wait_in_text("#service-row + tr", packageName)
+
+        # update required a service restart
+        b.wait_not_present("#reboot-system")
+        b.click("#choose-service")
+        b.wait_visible("#restart-services-modal")
+        b.wait_in_text(".restart-services-modal-body", packageName)
+        b.click("#restart-services-modal button:contains('Restart services')")
+        b.wait_visible("#restart-services-modal")
+
+        # tracer updated the list of services which need a restart, so our service is no longer present
+        b.wait_not_in_text("#restart-services-modal .pf-v6-l-stack__item", packageName)
+        b.wait_visible("#restart-services-modal .pf-v6-c-alert")
+
+    @testlib.skipImage("No security changelog support in packagekit", "arch")
+    def testInfoSecurity(self):
+        b = self.browser
+        m = self.machine
+
+        # make a package available from two repositories; PackageKit dnf doesn't handle
+        # that properly: https://issues.redhat.com/browse/RHEL-109155
+        self.createPackage("xeroxed", "10", "1", install=True)
+        self.createPackage("xeroxed", "12", "1", severity="enhancement", bugs=["789"],
+                           changes="Uniqueness is boring")
+        self.enableRepo()
+        dupe_dir = self.vm_tmpdir + "/repo-dupe"
+        m.execute(f"cp -r {self.repo_dir} {dupe_dir}")
+        if self.backend.startswith("dnf"):
+            repo = m.execute("cat /etc/yum.repos.d/cockpittest.repo")
+            repo = repo.replace(self.repo_dir, dupe_dir)
+            repo = repo.replace("name=cockpittest", "name=test-dupe")
+            m.write("/etc/yum.repos.d/test-dupe.repo", repo)
+        elif self.backend == "apt":
+            repo = m.execute("cat /etc/apt/sources.list.d/test.list")
+            repo = repo.replace(self.repo_dir, dupe_dir)
+            m.write("/etc/apt/sources.list.d/dupe.list", repo)
+        else:
+            self.fail(f"Copy logic for backend {self.backend} needs to be written")
+
+        # just changelog
+        self.createPackage("norefs-bin", "1", "1", install=True)
+        self.createPackage("norefs-bin", "2", "1", severity="enhancement",
+                           changes="Now 10% *more* [unicorns](http://unicorn.example.com)")
+
+        # binary from same source
+        self.createPackage("norefs-doc", "1", "1", install=True)
+        self.createPackage("norefs-doc", "2", "1", severity="enhancement",
+                           changes="Now 10% *more* [unicorns](http://unicorn.example.com)")
+        # bug fixes
+        self.createPackage("buggy", "2", "1", install=True)
+        self.createPackage("buggy", "2", "2", changes="* Fixit", bugs=["123", "456"])
+        # security fix with proper CVE list and severity
+        self.createPackage("secdeclare", "3", "4.a1", install=True)
+        self.createPackage("secdeclare", "3", "4.b1", severity="security",
+                           changes="Will crash your data center", cves=["CVE-2014-123456"])
+        # security fix with parsing from changes
+        self.createPackage("secparse", "4", "1", install=True)
+        self.createPackage("secparse", "4", "2", changes="Fix CVE-2014-54321 and CVE-2017-9999.")
+        # security fix with RHEL severity, errata and XSS
+        self.createPackage("sevcritical", "5", "1", install=True)
+        self.createPackage("sevcritical", "5", "2", cves=["CVE-2014-54321"], securitySeverity="critical",
+                           errata=["RHSA-2000:0001", "RHSA-2000:0002"],
+                           invalid_cves=["javascript:alert(document.cookie)", "https://example.com"],
+                           changes='See [malicious link](https://example.invalid/"onmouseover="alert(document.domain)) for info')
+
+        self.enableRepo(refresh_repo=True)
+
+        self.login_and_go("/updates")
+        with b.wait_timeout(30):
+            b.wait_visible("#available-updates")
+        b.wait_in_text("#status", "7 updates available, including 3 security fixes")
+
+        b.wait_in_text("table[aria-label='Available updates']", "sevcritical")
+
+        # security updates should get sorted on top and then alphabetically, so start with "secdeclare"
+        sel = self.check_nth_update(1, "secdeclare", "3-4.b1", "security", 1,
+                                    desc_matches=["Will crash your data center"], cves=["CVE-2014-123456"])
+        # should not have erratum label in details
+        self.assertNotIn("Errat", b.text(sel))
+
+        # secparse should also be considered a security update as the changelog mentions CVEs
+        self.check_nth_update(2, "secparse", "4-2", "security", 2,
+                              desc_matches=["Fix CVE-2014-54321 and CVE-2017-9999."],
+                              cves=["CVE-2014-54321", "CVE-2017-9999"])
+        apt_based = m.image.startswith(("debian-", "ubuntu-"))
+        # We cannot insert example.com as an url in apts' changelog format only accepts cve ids or issues,
+        # so it does not appear in the UI.
+        sel = self.check_nth_update(3, "sevcritical", "5-2", "security", 1 if apt_based else 2,
+                                    desc_matches=["See malicious link for info"],
+                                    absent_anchor_attributes=["onmouseover"])  # onmouseover does not survive our sanitization
+        # Malicious cve urls don't end up being rendered
+        # PackageKit parses the apt changelog and constructs CVE urls from it, so we can't insert a malicious javascript: uri
+        if apt_based:
+            b.wait_in_text(sel, "javascript:alert")
+            b.wait_not_present(f"{sel} a[href='javascript:alert(document.cookie)']")
+        else:
+            self.assertIsNone(b.attr(f"{sel} a[href='https://example.com']", "onmouseover"))
+            b.wait_not_in_text(sel, "javascript:alert")
+
+        # buggy: bug refs, no security
+        sel = self.check_nth_update(4, "buggy", "2-2", "bug", 2, bugs=["123", "456"], desc_matches=["Fixit"])
+        # should filter out enumeration in overview
+        ch = b.eval_js(f"document.querySelector(\"{sel + ' td.changelog'}\").innerHTML")
+        self.assertNotIn("<li>", ch)
+        self.assertNotIn("*", ch)
+        # should show bug fix icon and pf-v6-c-tooltip
+        self.assertEqual(b.attr(sel + " .severity-icon", "aria-label"), "bug fix")
+        b.mouse(sel + " .severity-icon", "mouseenter")
+        b.wait_text(".pf-v6-c-tooltip", "bug fix")
+        b.mouse(sel + " .severity-icon", "mouseleave")
+        b.wait_not_present(".pf-v6-c-tooltip")
+
+        # norefs: just changelog, show both binary packages
+        sel = self.check_nth_update(5, ["norefs-bin", "norefs-doc"], "2-1", self.enhancement_severity,
+                                    desc_matches=["Now 10% more unicorns"])
+        # verify Markdown formatting in table cell
+        self.assertEqual(b.text(sel + " td.changelog em"), "more")  # *more*
+        self.assertEqual(b.attr(sel + " td.changelog a", "href"), "http://unicorn.example.com")
+        self.assertEqual(b.attr(sel + " td.changelog a", "target"), "_blank")
+        # verify Markdown formatting in details
+        self.assertEqual(b.text(sel + " .pf-v6-c-table__expandable-row.pf-m-expanded em"), "more")  # *more*
+        b.wait_visible(sel + ' .pf-v6-c-table__expandable-row.pf-m-expanded a[href="http://unicorn.example.com"][target="_blank"]')
+
+        # verify that changelog is absent in mobile
+        b.set_layout("mobile")
+        b.wait_not_visible(sel + " td.changelog em")
+        b.set_layout("desktop")
+        b.wait_visible(sel + " td.changelog em")
+
+        # check xeroxed
+        if self.backend.startswith("dnf"):
+            if "dnf5" in m.execute("pkcon backend-details"):
+                # The new "dnf5" backend gets it right, and even uses severity "enhancement".
+                self.check_nth_update(6, "xeroxed", "12-1", self.enhancement_severity, 1, bugs=["789"],
+                                      desc_matches=["Uniqueness is boring"])
+            else:
+                # see RHEL-109155 above; can't load update details, so no bugs nor description;
+                # realistically this won't ever get fixed, but if it does, surprise us!
+                self.check_nth_update(6, "xeroxed", "12-1", self.enhancement_severity)
+        else:
+            # apt works fine, except it uses severity "bug".
+            self.check_nth_update(6, "xeroxed", "12-1", "bug", 1, bugs=["789"],
+                                  desc_matches=["Uniqueness is boring"])
+
+        # updates are shown on system page
+        b.go("/system")
+        b.enter_page("/system")
+        self.wait_checking_updates()
+        b.wait_text(self.update_text, "Security updates available")
+        b.wait_attr(self.update_icon, "data-pficon", "security")
+
+        # should be a link, click on it to go to back to /updates
+        b.click(self.update_text_action)
+        b.enter_page("/updates")
+
+        # install only security updates
+        self.assertEqual(b.text("#available-updates button#install-security"), "Install security updates")
+        b.wait_not_present("#available-updates button#install-kpatches")
+        b.click("#available-updates button#install-security")
+        with b.wait_timeout(60):
+            b.wait_in_text(".pf-v6-c-empty-state__title", "Update was successful")
+
+        # history on restart page should show the three security updates
+        b.click(".pf-v6-c-expandable-section__toggle button")
+        self.assertHistory(".pf-v6-c-expandable-section ul", ["secdeclare", "secparse", "sevcritical"])
+
+        # ignore restarting
+        b.click("#ignore")
+
+        # should have succeeded; 4 non-security updates left
+        b.wait_in_text("#status", "4 updates available")
+        b.wait_in_text("#available-updates h2", "Available updates")
+
+        b.wait_in_text("#available-updates table", "norefs-doc")
+        self.assertIn("buggy", b.text("#available-updates table"))
+        self.assertNotIn("secdeclare", b.text("#available-updates table"))
+        self.assertNotIn("secparse", b.text("#available-updates table"))
+
+        # history should show the security updates
+        self.assertHistory("table.updates-history #expanded-content0 ul", ["secdeclare", "secparse", "sevcritical"])
+
+        # re-drop the duplicate repo with dnf; PackageKit can't update otherwise (still RHEL-109155)
+        if self.backend.startswith("dnf"):
+            m.execute("rm /etc/yum.repos.d/test-dupe.repo")
+
+        # stop PackageKit (e. g. idle timeout) to make sure the page survives that
+        m.execute("systemctl stop packagekit; systemctl reset-failed packagekit || true")
+
+        # new security versions are now installed
+        m.execute("test -f /stamp-secdeclare-3-4.b1; test -f /stamp-secparse-4-2; test -f /stamp-sevcritical-5-2")
+        # but the three others are untouched
+        m.execute("test -f /stamp-buggy-2-1; test -f /stamp-norefs-bin-1-1; test -f /stamp-norefs-doc-1-1")
+
+        # should now only have one button (no security updates left)
+        self.assertEqual(b.text("#available-updates button#install-all"), "Install all updates")
+        b.click("#available-updates button#install-all")
+
+        # should have succeeded and show restart
+        with b.wait_timeout(60):
+            b.wait_in_text(".pf-v6-c-empty-state__title", "Update was successful")
+        b.wait_visible("#ignore")
+
+        # history on restart page should show the three non-security updates
+        b.click(".pf-v6-c-expandable-section__toggle button")
+        self.assertHistory(".pf-v6-c-expandable-section ul", ["buggy", "norefs-bin", "norefs-doc", "xeroxed"])
+
+        if any(fnmatch.fnmatch(m.image, img) for img in OSesWithoutTracer) and not any(
+                fnmatch.fnmatch(m.image, img) for img in OSesWithDnfRestart):
+            # do the reboot; this will disconnect the web UI
+            b.click("#app .pf-v6-c-empty-state button.pf-m-primary")
+            b.wait_visible("#shutdown-dialog")
+            b.click("#delay")
+            b.click("button:contains('No delay')")
+            b.wait_text("#delay .pf-v6-c-menu-toggle__text", "No delay")
+            b.click("#shutdown-dialog button:contains('Reboot')")
+            b.switch_to_top()
+            b.wait_in_text(".curtains-ct h1", "Disconnected")
+
+            # ensure that rebooting actually worked
+            self.wait_reboot()
+            self.login_and_go("/updates")
+        else:
+            b.click("#ignore")
+
+        # new versions are now installed
+        m.execute("test -f /stamp-norefs-bin-2-1; test -f /stamp-norefs-doc-2-1")
+
+        # no further updates
+        b.wait_in_text("#status", "System is up to date")
+
+        # history on "up to date" page should show the recent update (expanded by default)
+        self.assertHistory(
+            "table.updates-history tbody.pf-m-expanded .pf-v6-c-table__expandable-row-content ul",
+            ["buggy", "norefs-bin", "norefs-doc", "xeroxed"],
+        )
+        # and the previous one, not expanded
+        b.wait_visible("table.updates-history tbody:not(.pf-m-expanded)")
+
+    @testlib.skipImage("No security changelog support in packagekit", "arch")
+    @testlib.nondestructive
+    def testSecurityOnly(self):
+        b = self.browser
+
+        # security fix with proper CVE list and severity
+        self.createPackage("secdeclare", "3", "4.a1", install=True)
+        self.createPackage("secdeclare", "3", "4.b1", severity="security",
+                           changes="Will crash your data center", cves=['CVE-2014-123456'])
+
+        self.enableRepo(refresh_repo=True)
+
+        self.login_and_go("/updates")
+        with b.wait_timeout(30):
+            b.wait_visible("#available-updates")
+        b.wait_in_text("#status", "1 security fix available")
+
+        # should only have one button (only security updates)
+        b.wait_not_present("#available-updates button#install-all")
+        b.wait_not_present("#available-updates button#install-kpatches")
+        self.assertEqual(b.text("#available-updates button#install-security"), "Install security updates")
+
+        # security fix without CVE URLs
+        if self.supports_severity:
+            self.createPackage("secnocve", "1", "1", install=True)
+            self.createPackage("secnocve", "1", "2", severity="security", changes="Fix leak")
+            self.enableRepo()
+            # check for updates
+            b.click("#status .pf-v6-c-card__header button")
+            with b.wait_timeout(30):
+                b.wait_visible("#available-updates")
+            b.wait_in_text("#status", "2")
+
+            b.wait_in_text("table[aria-label='Available updates']", "secnocve")
+
+            # secnocve should be displayed properly
+            self.check_nth_update(2, "secnocve", "1-2", "security", desc_matches=["Fix leak"])
+
+    @testlib.skipImage("No changelog support in Arch Linux", "arch")
+    @testlib.nondestructive
+    def testInfoTruncation(self):
+        b = self.browser
+
+        # update with not too many binary packages
+        for i in range(4):
+            self.createPackage(f"coarse{i:02}", "1", "1", install=True)
+            self.createPackage(f"coarse{i:02}", "1", "2", changes="make it greener")
+
+        # update with lots of binary packages
+        for i in range(10):
+            self.createPackage(f"fine{i:02}", "1", "1", install=True)
+            self.createPackage(f"fine{i:02}", "1", "2", changes="make it better")
+
+        # update with long changelog
+        long_changelog = ""
+        for i in range(30):
+            long_changelog += f" - Things change #{i:02}\n"
+        self.createPackage("verbose", "1", "1", install=True)
+        self.createPackage("verbose", "1", "2", changes=long_changelog)
+
+        self.enableRepo()
+
+        self.login_and_go("/updates")
+
+        with b.wait_timeout(30):
+            b.wait_in_text("table[aria-label='Available updates']", "Things change")
+
+        # "coarse" package list should be complete
+        t = b.text("#app .ct-table tbody:nth-of-type(1) tr:first-child [data-label=Name]")
+        self.assertIn("coarse00", t)
+        self.assertIn("coarse03", t)
+        self.assertNotIn("…", t)
+
+        # "fine" package list should be truncated
+        t = b.text("#app .ct-table tbody:nth-of-type(2) tr:first-child [data-label=Name]")
+        self.assertIn("fine00", t)
+        self.assertIn("fine03", t)
+        self.assertNotIn("fine09", t)
+        self.assertIn("…", t)
+        # but complete in the details
+        self.check_nth_update(2, ["fine00", "fine01", "fine02", "fine03"], "1-2",
+                              desc_matches=["fine07", "fine09"])
+
+        # changelog should be truncated
+        desc = b.text("#app .ct-table tbody:nth-of-type(3) [data-label=Details]")
+        self.assertIn("Things change #00", desc)
+        self.assertNotIn("#01", desc)
+
+        # and not visible on mobile
+        b.set_layout("mobile")
+        b.wait_not_visible("#app .ct-table tbody:nth-of-type(3) [data-label=Details]")
+        # but complete in the details
+        self.check_nth_update(1, ["coarse00", "coarse01", "coarse02", "coarse03"], "1-2",
+                              desc_matches=["make it greener"])
+
+        # also on desktop
+        b.set_layout("desktop")
+        b.wait_visible("#app .ct-table tbody:nth-of-type(3) [data-label=Details]")
+        self.check_nth_update(3, "verbose", "1-2",
+                              desc_matches=["Things change #00", "Things change #29"])
+
+        # seems we can't verify that the description has a scrollbar
+
+    def testRebootAfterSuccess(self):
+        b = self.browser
+        m = self.machine
+
+        install_lockfile = "/tmp/finish-pk"
+        # create two updates; force installing chocolate before vanilla
+        self.createPackage("vanilla", "1.0", "1", install=True)
+        self.createPackage("vanilla", "1.0", "2",
+                           postinst=f"while [ ! -e {install_lockfile} ]; do sleep 1; done; rm -f {install_lockfile}")
+        self.enableRepo(refresh_repo=True)
+
+        self.login_and_go("/updates")
+        with b.wait_timeout(30):
+            b.wait_visible("#available-updates")
+        b.click("#available-updates button#install-all")
+
+        b.wait_visible("#app div.pf-v6-c-progress__bar")
+        # auto-reboot is off by default
+        b.wait_visible("#reboot-after:not(:checked)")
+        b.click("#reboot-after")
+        b.wait_visible("#reboot-after:checked")
+
+        m.execute(f"touch {install_lockfile}")
+        # reboots automatically
+        b.switch_to_top()
+        b.wait_in_text(".curtains-ct h1", "Disconnected")
+        self.wait_reboot()
+
+    @testlib.nondestructive
+    def testUpdateError(self):
+        b = self.browser
+        m = self.machine
+
+        # pretend running custom kernel without distro release for kpatch detection robustness
+        self.write_file("/usr/local/bin/uname", """#!/bin/sh
+            if [ "$1" = "-r" ]; then echo 1.2; else exec /usr/bin/uname "$@"; fi""", perm="755")
+
+        self.createPackage("vapor", "1", "1", install=True)
+        self.createPackage("vapor", "1", "2")
+
+        self.enableRepo(refresh_repo=True)
+
+        # break the upgrade by removing the generated packages from the repo
+        m.execute(f"rm -f {self.repo_dir}/vapor*.deb {self.repo_dir}/vapor*.rpm {self.repo_dir}/vapor*.pkg*")
+
+        self.login_and_go("/updates")
+        with b.wait_timeout(30):
+            b.wait_visible("#available-updates")
+        b.wait_in_text("#status", "1 update available")
+        b.wait_not_present("#kpatch-setup")
+
+        b.click("#available-updates button#install-all")
+
+        # error message visible
+        b.wait_visible("#app .pf-v6-c-page .pf-v6-c-empty-state__body")
+
+        self.assertRegex(b.text("#app .pf-v6-c-page .pf-v6-l-stack .pf-v6-c-code-block .pf-v6-c-code-block__content .pf-v6-c-code-block__pre .pf-v6-c-code-block__code span:first-of-type"),
+                         "missing|download|not.*available|No such file or directory|download library error")
+
+        # not expecting any buttons
+        self.assertFalse(b.is_present("#app button"))
+
+    @testlib.nondestructive
+    def testPackageKitCrash(self):
+        b = self.browser
+        m = self.machine
+
+        # this tends to corrupt the rpm database, so do a backup/restore
+        if 'dnf' in self.backend:
+            # https://www.fedoraproject.org/wiki/Changes/RelocateRPMToUsr
+            exists = self.machine.execute("if test -e %s; then echo yes; fi" % "/usr/lib/sysimage/rpm").strip() != ""
+            if exists:
+                self.restore_dir("/usr/lib/sysimage/rpm")
+            else:
+                self.restore_dir("/var/lib/rpm")
+
+        # make sure we have enough time to crash PK
+        self.createPackage("slow", "1", "1", install=True)
+        # we don't want this installation to finish
+        self.createPackage("slow", "1", "2", postinst="sleep infinity")
+        self.enableRepo(refresh_repo=True)
+
+        self.login_and_go("/updates")
+
+        with b.wait_timeout(30):
+            b.click("#available-updates button#install-all")
+
+        # let updates start and zap PackageKit
+        b.wait_visible("#app div.pf-v6-c-progress__bar")
+        m.execute("systemctl kill --signal=SEGV packagekit.service")
+        # this crash creates so many messages from systemd-coredump, debug metadata etc. that
+        # trying to keep up with specific patterns is too brittle
+        self.allow_journal_messages(".*")
+
+        # error message visible
+        b.wait_in_text("#app .pf-v6-c-page .pf-v6-l-stack .pf-v6-c-code-block__content", "PackageKit crashed")
+
+    @testlib.nondestructive
+    def testNoPackageKit(self):
+        b = self.browser
+        m = self.machine
+
+        m.execute("systemctl stop packagekit")
+        system_service = m.execute("systemctl show -p FragmentPath packagekit.service | cut -f2 -d=").strip()
+        m.execute(f"""mv {system_service} {system_service}.disabled
+                     mv /usr/share/dbus-1/system-services/org.freedesktop.PackageKit.service /usr/share/dbus-1/system-services/org.freedesktop.PackageKit.service.disabled
+                     systemctl daemon-reload""")
+        self.addCleanup(m.execute,
+                        f"""mv {system_service}.disabled {system_service}
+                           mv /usr/share/dbus-1/system-services/org.freedesktop.PackageKit.service.disabled /usr/share/dbus-1/system-services/org.freedesktop.PackageKit.service
+                           systemctl daemon-reload""")
+
+        # no bridge in beiboot mode
+        if not testlib.isBeibootLogin():
+            self.assertNotIn("\nupdates", m.execute("cockpit-bridge --packages"))
+        # should not appear in the menu at all
+        self.login_and_go(None)
+        b.wait_in_text("#host-apps .pf-m-current", "Overview")
+        self.assertNotIn("Updates", b.text("#host-apps .pf-m-current"))
+
+        # update status on front page should be invisible
+        b.go("/system")
+        b.enter_page("/system")
+        b.wait_visible(".system-health")
+        self.assertFalse(b.is_present(self.update_text))
+
+    @testlib.nondestructive
+    def testUnprivileged(self):
+        b = self.browser
+
+        self.createPackage("vanilla", "1.0", "1", install=True)
+        self.createPackage("vanilla", "2.0", "2")
+        self.enableRepo(refresh_repo=True)
+
+        # getting update info is allowed to all users
+        self.login_and_go("/updates", superuser=False)
+        with b.wait_timeout(30):
+            b.wait_in_text("#status", "1 update available")
+        b.wait_visible("#available-updates")
+
+        # but applying updates is not; FIXME: this is a crappy UX
+        b.click("#available-updates button#install-all")
+        # error message visible
+        b.wait_in_text("#app .pf-v6-c-code-block__content", "authentication")
+
+        # page adjusts automatically to privilege change
+        b.become_superuser()
+        b.wait_in_text("#status", "1 update available")
+        b.wait_visible("#available-updates")
+
+        # applying updates works now
+        b.click("#available-updates button#install-all")
+
+        with b.wait_timeout(60):
+            b.wait_in_text(".pf-v6-c-empty-state__title", "Update was successful")
+        b.click("#ignore")
+
+        # should go back to updates overview, nothing pending any more
+        # TODO make Packagekit GetUpdates work for tests properly
+        b.wait_not_present("#available-updates")
+
+
+@testlib.skipImage("TODO: Arch Linux has no cockpit-ws package, it's in cockpit", "arch")
+@testlib.skipWsContainer("no cockpit-ws package with cockpit/ws container")
+@testlib.skipImage("TODO: fix for OpenSUSE", "opensuse-tumbleweed")
+class TestWsUpdate(NoSubManCase):
+    def testBasic(self):
+        # The main case for this is that cockpit-ws itself gets upgraded, which
+        # restarts the service and terminates the connection. As we can't
+        # (efficiently) build a newer working cockpit-ws package, test the two
+        # parts (reconnect and warning about disconnect) separately.
+
+        # no security updates, no changelogs
+        b = self.browser
+        m = self.machine
+
+        install_lockfile = "/tmp/finish-pk"
+        # updating this package takes longer than a cockpit start and building the page
+        self.createPackage("slow", "1", "1", install=True)
+        self.createPackage(
+            "slow", "1", "2",
+            postinst=f"while [ ! -e {install_lockfile} ]; do sleep 1; done; rm -f {install_lockfile}")
+        self.enableRepo(refresh_repo=True)
+
+        self.login_and_go("/updates")
+
+        with b.wait_timeout(30):
+            b.click("#available-updates button#install-all")
+
+        # applying updates panel present
+        b.wait_in_text("#app div.progress-description", "slow")
+
+        # restarting should pick up that install progress
+        m.restart_cockpit()
+        b.login_and_go("/updates")
+
+        b.wait_in_text("#app div.progress-description", "slow 1-2")
+        # progress bar has some reasonable value
+        progress = b.get_pf_progress_value(".progress-main-view")
+        self.assertGreater(progress, 20)
+        self.assertLess(progress, 80)
+
+        # finish the package installation
+        m.execute(f"touch {install_lockfile}")
+
+        # should have succeeded and show restart page; cancel
+        b.wait_in_text(".pf-v6-c-empty-state__title", "Update was successful")
+        b.click("#ignore")
+        b.wait_in_text("#status", "System is up to date")
+
+        # now pretend that there is a newer cockpit-ws available, warn about disconnect
+        self.createPackage("cockpit-ws", "999", "1")
+        # these have strict version dependencies to cockpit-ws, don't get in the way
+        self.createPackage("cockpit", "999", "1")
+        m.execute("if type apt; then dpkg -P cockpit-ws-dbgsym; fi")
+        self.enableRepo()
+        b.click("#status .pf-v6-c-card__header button")
+
+        with b.wait_timeout(30):
+            b.wait_visible("#available-updates")
+        b.wait_in_text("#status", "2 updates available")
+        b.wait_in_text("table[aria-label='Available updates']", "cockpit-ws")
+
+        b.wait_visible(".cockpit-update-warning")
+        b.wait_in_text(".cockpit-update-warning-text", "Web Console will restart")
+
+        self.allow_restart_journal_messages()
+
+
+@testlib.skipImage("kpatch is not available", *OSesWithoutKpatch)
+@testlib.skipImage("TODO: fix for OpenSUSE", "opensuse-tumbleweed")
+class TestKpatchInstall(NoSubManCase):
+    def testBasic(self):
+        b = self.browser
+        m = self.machine
+
+        m.execute("rpm --erase --verbose kpatch kpatch-dnf")
+
+        self.login_and_go("/updates")
+        with b.wait_timeout(30):
+            b.wait_visible("#status")
+        b.wait_in_text("#kpatch-settings", "Not available")
+        # show unavailable packages in popover
+        b.click("#kpatch-settings .ct-info-circle")
+        b.wait_in_text(".pf-v6-c-popover", "Unavailable packages")
+        b.wait_in_text(".pf-v6-c-popover", "kpatch-dnf")
+        b.click("#kpatch-settings .ct-info-circle")
+        b.wait_not_present(".pf-v6-c-popover")
+
+        dummy_service = "[Service]\nExecStart=/bin/sleep infinity\n[Install]\nWantedBy=multi-user.target\n"
+        self.createPackage("kpatch", "999", "1", content={"/lib/systemd/system/kpatch.service": dummy_service})
+        self.createPackage("kpatch-dnf", "999", "1", content={"/etc/dnf/plugins/kpatch.conf": ""})
+        self.enableRepo()
+
+        b.reload()
+        b.enter_page("/updates")
+
+        b.wait_in_text("#kpatch-settings", "Not installed")
+        b.click("#kpatch-settings button:contains('Install')")
+        b.wait_in_text("#dialog", "kpatch, kpatch-dnf will be installed")
+        b.click("#dialog button:contains('Install')")
+
+        b.wait_in_text("#kpatch-settings", "Disabled")
+
+        # kpatch and kpatch-dnf should be installed
+        m.execute("rpm -q kpatch kpatch-dnf")
+
+
+@testlib.onlyImage("No subscriptions", "rhel-*")
+@testlib.skipBeiboot("sub-man-cockpit not contained in cockpit/ws")
+class TestUpdatesSubscriptions(packagelib.PackageCase, submanlib.SubscriptionCase):
+    provision = {
+        "0": {"address": "10.111.112.1/20", "dns": "10.111.112.1"},
+        "services": {"image": "services"}
+    }
+
+    def setUp(self):
+        super().setUp()
+        self.setup_candlepin_service(self.machines['services'])
+
+        self.update_icon = "#page_status_notification_updates"
+        self.update_text = "#page_status_notification_updates"
+        self.update_text_action = "#page_status_notification_updates a"
+
+    def testNoUpdates(self):
+        b = self.browser
+
+        # fresh machine, no updates available; by default our rhel-* images are not registered
+        self.login_and_go("/system")
+        # show unregistered status on system front page
+        with b.wait_timeout(30):
+            b.wait_in_text(self.update_text, "Not registered")
+        self.assertIn("pf-m-warning", b.attr(self.update_icon + " .pf-v6-c-icon__content", "class"))
+
+        # software updates page also shows unregistered
+        b.go("/updates")
+        b.enter_page("/updates")
+        # empty state visible in main area
+        b.wait_visible(".pf-v6-c-empty-state button")
+        b.wait_in_text(".pf-v6-c-empty-state", "This system is not registered")
+
+        # test the button to switch to Subscriptions
+        b.click(".pf-v6-c-empty-state button")
+        b.switch_to_top()
+        b.wait_js_cond('window.location.pathname === "/subscriptions"')
+
+        # after registration it should show the usual "system is up to date", through the "status changed" signal
+        self.register_with_candlepin()
+        b.go("/updates")
+        b.enter_page("/updates")
+        # check updates
+        b.wait_visible("#status .pf-v6-c-card__header button")
+        b.wait_in_text("#status", "System is up to date")
+
+        # same on system page
+        b.go("/system")
+        b.enter_page("/system")
+        self.assertEqual(b.attr(self.update_icon + " svg", "data-pficon"), "check")
+        b.wait_text(self.update_text, "System is up to date")
+
+    def testAvailableUpdates(self):
+        b = self.browser
+
+        # one available update
+        self.createPackage("vanilla", "1.0", "1", install=True)
+        self.createPackage("vanilla", "1.0", "2")
+        self.enableRepo()
+
+        self.login_and_go("/system")
+        # by default our rhel-* images are not registered; show warning on system page
+        with b.wait_timeout(30):
+            b.wait_in_text(self.update_text, "Not registered")
+        self.assertIn("pf-m-warning", b.attr(self.update_icon + " .pf-v6-c-icon__content", "class"))
+        # should be a link leading to subscriptions page
+        b.click(self.update_text_action)
+        b.enter_page("/subscriptions")
+
+        # software updates page also shows unregistered
+        b.go("/updates")
+        b.enter_page("/updates")
+
+        # empty state visible in main area
+        b.wait_visible(".pf-v6-c-empty-state button")
+        b.wait_in_text(".pf-v6-c-empty-state", "This system is not registered")
+
+        # after registration it should show available updates
+        self.register_with_candlepin()
+        b.go("/updates")
+        b.enter_page("/updates")
+        b.wait_not_present(".pf-v6-c-empty-state")
+        with b.wait_timeout(30):
+            b.wait_visible("#available-updates")
+        # no update history yet
+        self.assertFalse(b.is_present("table.updates-history"))
+
+        # has action buttons
+        b.wait_visible("#status .pf-v6-c-card__header button")
+        self.assertEqual(b.text("#available-updates button#install-all"), "Install all updates")
+
+        # show available updates on system page too
+        b.go("/system")
+        b.enter_page("/system")
+        b.wait_text(self.update_text, "Bug fix updates available")
+        self.assertEqual(b.attr(self.update_icon + " svg", "data-pficon"), "bug")
+
+    def testNoSubOsRepo(self):
+        b = self.browser
+
+        # pretend we have a proper OS repo that does not require subscription
+        self.createPackage("coreutils", "999", "1")
+        self.enableRepo(refresh_repo=True)
+
+        self.login_and_go("/system")
+        with b.wait_timeout(30):
+            b.wait_text(self.update_text, "System is up to date")
+
+        b.go("/updates")
+        b.enter_page("/updates")
+        b.wait_visible("#status .pf-v6-c-card__header button")
+        b.wait_in_text("#status", "System is up to date")
+
+
+@testlib.skipOstree("Image uses OSTree")
+@testlib.nondestructive
+class TestAutoUpdates(NoSubManCase):
+
+    def setUp(self):
+        super().setUp()
+        # not implemented for apt yet, only dnf
+        self.supported_backend = "dnf" in self.backend
+        if self.backend == "dnf5":
+            self.timer_unit = "dnf5-automatic"
+            self.config = "/etc/dnf/dnf5-plugins/automatic.conf"
+        elif self.backend == "dnf4":
+            self.timer_unit = "dnf-automatic-install"
+            self.config = "/etc/dnf/automatic.conf"
+
+    def closeSettings(self, browser: testlib.Browser) -> None:
+        browser.click("#automatic-updates-dialog button:contains('Save changes')")
+        with browser.wait_timeout(30):
+            browser.wait_not_present("#automatic-updates-dialog")
+
+    def testBasic(self):
+        b = self.browser
+        m = self.machine
+
+        self.login_and_go("/updates")
+        with b.wait_timeout(30):
+            b.wait_visible("#status")
+
+        if not self.supported_backend:
+            self.assertFalse(b.is_present("#automatic"))
+            self.assertFalse(b.is_present("#auto-update-type"))
+            return
+
+        def assertTimerDnf(hour: str | None, dow: str | None) -> None:
+            out = m.execute(f"systemctl --no-legend list-timers {self.timer_unit}.timer")
+            if hour:
+                # don't test the minutes, due to RandomizedDelaySec=60m
+                self.assertRegex(out, f" {hour}:")
+            else:
+                self.assertEqual(out, "")
+            if dow:
+                self.assertRegex(out, r"^%s\s" % dow)
+            else:
+                # "every day" should not have a "LEFT" time > 1 day
+                self.assertNotIn(" day", out)
+
+            # service should not run right away
+            self.assertEqual(m.execute(f"systemctl is-active {self.timer_unit}.service || true").strip(), "inactive")
+
+            # automatic reboots should be enabled whenever timer is enabled
+            out = m.execute(f"systemctl cat {self.timer_unit}.service")
+            if hour:
+                if m.image.startswith("rhel-8"):
+                    # for RHEL 8, dnf-automatic does not support reboot; we have a unit drop-in hack
+                    self.assertRegex(out, "ExecStartPost=/.*shutdown")
+                    # validate our assumption
+                    self.assertNotIn("reboot", m.execute(f"cat {self.config}"))
+                else:
+                    # newer dnf supports that natively
+                    self.assertNotIn("ExecStartPost", out)
+                    self.assertIn("reboot = when-needed", m.execute(f"cat {self.config}"))
+            else:
+                self.assertNotIn("ExecStartPost", out)
+
+        def assertTimer(hour: str | None, dow: str | None = None) -> None:
+            if "dnf" in self.backend:
+                assertTimerDnf(hour, dow)
+            else:
+                raise NotImplementedError(self.backend)
+
+        def assertTypeDnf(type_: str) -> None:
+            if type_ == "all":
+                match = '= default'
+            elif type_ == "security":
+                match = '= security'
+            else:
+                raise ValueError(type_)
+
+            self.assertIn(match, m.execute(f"grep upgrade_type {self.config}"))
+
+        def assertType(type_: str) -> None:
+            if "dnf" in self.backend:
+                assertTypeDnf(type_)
+            else:
+                raise NotImplementedError(self.backend)
+
+        # automatic updates are supported, but off
+        b.wait_in_text("#autoupdates-settings", "Disabled")
+        assertTimer(None)
+
+        # enable
+        b.click("#autoupdates-settings button:contains('Edit')")
+        b.wait_visible("#automatic-updates-dialog")
+        b.click("#all-updates")
+        b.wait_val("#auto-update-time-input", "06:00")
+        b.wait_in_text("#auto-update-day", "every day")
+        self.closeSettings(b)
+        b.wait_in_text("#autoupdates-settings", "Updates will be applied every day at 06:00")
+        assertTimer("06")
+        assertType("all")
+
+        # change type to security
+        b.click("#autoupdates-settings button:contains('Edit')")
+        b.wait_visible("#automatic-updates-dialog")
+        b.click("#security-updates")
+        self.closeSettings(b)
+        b.wait_in_text("#autoupdates-settings", "Security updates will be applied every day at 06:00")
+        assertType("security")
+        assertTimer("06")
+
+        # change it back
+        b.click("#autoupdates-settings button:contains('Edit')")
+        b.wait_visible("#automatic-updates-dialog")
+        b.click("#all-updates")
+        self.closeSettings(b)
+        b.wait_in_text("#autoupdates-settings", "Updates will be applied every day at 06:00")
+        assertType("all")
+        assertTimer("06")
+
+        # change day
+        b.click("#autoupdates-settings button:contains('Edit')")
+        b.wait_visible("#automatic-updates-dialog")
+        b.select_from_dropdown("#auto-update-day", "thu")
+        self.closeSettings(b)
+        b.wait_in_text("#autoupdates-settings", "Updates will be applied every Thursday at 06:00")
+        assertType("all")
+        assertTimer("06", "Thu")
+
+        # change time
+        b.click("#autoupdates-settings button:contains('Edit')")
+        b.wait_visible("#automatic-updates-dialog")
+        b.set_input_text("#auto-update-time-input", "21:00")
+        self.closeSettings(b)
+        b.wait_in_text("#autoupdates-settings", "Updates will be applied every Thursday at 21:00")
+        assertType("all")
+        assertTimer("21", "Thu")
+
+        # page should parse it correctly from the timer
+        b.logout()
+        b.login_and_go("/updates")
+        with b.wait_timeout(30):
+            b.wait_visible("#status")
+
+        with b.wait_timeout(30):
+            b.wait_in_text("#autoupdates-settings", "Updates will be applied every Thursday at 21:00")
+
+        # change back to daily
+        b.click("#autoupdates-settings button:contains('Edit')")
+        b.wait_visible("#automatic-updates-dialog")
+        b.select_from_dropdown("#auto-update-day", "everyday")
+        self.closeSettings(b)
+        b.wait_in_text("#autoupdates-settings", "Updates will be applied every day at 21:00")
+        assertType("all")
+        assertTimer("21")
+
+        # disable
+        b.click("#autoupdates-settings button:contains('Edit')")
+        b.wait_visible("#automatic-updates-dialog")
+        b.click("#no-updates")
+        self.closeSettings(b)
+        b.wait_in_text("#autoupdates-settings", "Disabled")
+        assertTimer(None)
+
+        if "dnf" in self.backend:
+            b.click("#autoupdates-settings button:contains('Edit')")
+            b.wait_visible("#automatic-updates-dialog")
+            b.click("#all-updates")
+            self.closeSettings(b)
+            # OnCalendar= parsing: only time
+            m.execute(f"mkdir -p /etc/systemd/system/{self.timer_unit}.timer.d")
+            m.execute(r'printf "[Timer]\nOnUnitInactiveSec=\nOnCalendar=08:00\n" > '
+                      f'/etc/systemd/system/{self.timer_unit}.timer.d/time.conf; systemctl daemon-reload')
+            b.reload()
+            b.enter_page("/updates")
+            b.wait_in_text("#autoupdates-settings", "Updates will be applied every day at 8:00")
+            b.wait_visible("#autoupdates-settings button")
+
+            # OnCalendar= parsing: weekday and time
+            m.execute(r'printf "[Timer]\nOnUnitInactiveSec=\nOnCalendar=Tue 20:00\n" > '
+                      f'/etc/systemd/system/{self.timer_unit}.timer.d/time.conf; systemctl daemon-reload')
+            b.reload()
+            b.enter_page("/updates")
+            b.wait_in_text("#autoupdates-settings", "Updates will be applied every Tuesday at 20:00")
+            b.wait_visible("#autoupdates-settings button")
+
+            # OnCalendar= parsing: "every day" calendar and time
+            m.execute(r'printf "[Timer]\nOnUnitInactiveSec=\nOnCalendar=*-*-* 07:00\n" > '
+                      f'/etc/systemd/system/{self.timer_unit}.timer.d/time.conf; systemctl daemon-reload')
+            b.reload()
+            b.enter_page("/updates")
+            b.wait_in_text("#autoupdates-settings", "Updates will be applied every day at 7:00")
+            b.wait_visible("#autoupdates-settings button")
+
+            # OnCalendar= parsing: unsupported
+            m.execute(r'printf "[Timer]\nOnUnitInactiveSec=\nOnCalendar=*-02-* 11:00\n" > '
+                      f'/etc/systemd/system/{self.timer_unit}.timer.d/time.conf; systemctl daemon-reload')
+            b.reload()
+            b.enter_page("/updates")
+            b.wait_visible("#settings .pf-v6-c-alert")
+            # don't allow stomping over unparsable custom settings
+            b.wait_not_present("#autoupdates-settings button")
+
+    @testlib.skipImage("No supported auto update backend", "debian-*", "ubuntu-*", "arch")
+    def testWithAvailableUpdates(self):
+        b = self.browser
+        m = self.machine
+
+        # use a package which dnf recognizes as "needs reboot"
+        self.createPackage("kernel-rt", "1.0", "1", install=True)
+        self.createPackage("kernel-rt", "1.0", "2")
+        self.enableRepo()
+
+        self.login_and_go("/updates")
+        with b.wait_timeout(30):
+            b.wait_visible("#available-updates")
+
+        b.wait_in_text("#autoupdates-settings", "Disabled")
+
+        # enable
+        b.click("#autoupdates-settings button:contains('Edit')")
+        b.wait_visible("#automatic-updates-dialog")
+        b.click("#all-updates")
+        self.closeSettings(b)
+        b.wait_in_text("#autoupdates-settings", "Updates will be applied every day at 06:00")
+
+        if "dnf" in self.backend:
+            # dial down the random sleep to avoid the test having to wait 5 mins
+            self.sed_file("/random_sleep/ s/=.*$/= 3/", self.config)
+            # then manually start the upgrade job like the timer would
+            m.execute(f"systemctl start {self.timer_unit}.service")
+            try:
+                # new kernel-rt package got installed
+                m.execute("test -f /stamp-kernel-rt-1.0-2")
+                # triggered reboot
+                m.execute("until test -f /run/nologin; do sleep 1; done")
+                # old distros don't have that yet; rely on /run/nologin to indicate scheduled shutdown
+                if not m.image.startswith("rhel-8"):
+                    self.assertIn("scheduled for", m.execute("shutdown --show 2>&1"))
+            finally:
+                # always cancel the scheduled reboot
+                m.execute("shutdown -c; test ! -f /run/nologin")
+            # service should show kernel-rt upgrade
+            out = m.execute(
+                f"if systemctl status --lines=50 {self.timer_unit}.service; then echo 'expected service to be stopped'; exit 1; fi")
+            self.assertIn("kernel-rt", out)
+
+            # run it again, now there are no available updates → no reboot
+            m.execute(f"systemctl start {self.timer_unit}.service")
+            m.execute("test -f /stamp-kernel-rt-1.0-2; test ! -f /run/nologin")
+            # service should not do much
+            out = m.execute(
+                f"if systemctl status {self.timer_unit}.service; then echo 'expected service to be stopped'; exit 1; fi")
+            self.assertNotIn("kernel-rt", out)
+        else:
+            raise NotImplementedError(self.backend)
+
+    @testlib.skipImage("No supported auto update backend", "debian-*", "ubuntu-*", "arch")
+    def testPrivilegeChange(self):
+        b = self.browser
+
+        self.refreshMetadata()
+        self.login_and_go("/updates", superuser=False)
+        b.wait_in_text("#status", "System is up to date")
+
+        # detecting auto updates configuration works unprivileged, but changing does not
+        with b.wait_timeout(30):
+            b.wait_visible("#autoupdates-settings button:disabled")
+
+        # become superuser, enable auto-updates
+        b.become_superuser()
+        b.wait_in_text("#autoupdates-settings", "Disabled")
+        b.click("#autoupdates-settings button:contains('Edit')")
+        b.wait_visible("#automatic-updates-dialog")
+        b.click("#all-updates")
+        self.closeSettings(b)
+        b.wait_in_text("#autoupdates-settings", "Updates will be applied every day at 06:00")
+
+        # without superuser, auto-update status still visible, but disabled
+        b.drop_superuser()
+        b.wait_in_text("#autoupdates-settings", "Updates will be applied every day at 06:00")
+        b.wait_visible("#autoupdates-settings button:disabled")
+
+
+@testlib.skipOstree("Image uses OSTree")
+class TestAutoUpdatesInstall(NoSubManCase):
+    def testUnsupported(self):
+        b = self.browser
+        m = self.machine
+
+        if self.backend == 'dnf5':
+            m.execute("dnf remove -y dnf5-plugin-automatic")
+        elif self.backend == 'dnf4':
+            m.execute("dnf remove -y dnf-automatic")
+        elif self.backend == 'apt':
+            m.execute("dpkg -P unattended-upgrades")
+
+        # first test with available upgrades
+        self.createPackage("vanilla", "1.0", "1", install=True)
+        self.createPackage("vanilla", "1.0", "2")
+        self.enableRepo()
+
+        self.login_and_go("/updates")
+        with b.wait_timeout(30):
+            b.wait_visible("#available-updates")
+
+        # apply updates
+        b.click("#available-updates button#install-all")
+        # wait until installation is finished
+        with b.wait_timeout(60):
+            b.wait_in_text(".pf-v6-c-empty-state__title", "Update was successful")
+        b.click("#ignore")
+        b.wait_in_text("#status", "System is up to date")
+
+        if "dnf" in self.backend:
+            b.wait_in_text("#autoupdates-settings", "Not set up")
+            b.wait_not_present("#settings .pf-v6-c-alert")
+            b.click("#autoupdates-settings button:contains('Enable')")
+        else:
+            b.wait_not_present("#settings")
+            b.wait_not_present("#autoupdates-settings")
+
+    @testlib.skipImage("No supported auto update backend", "debian-*", "ubuntu-*", "arch")
+    def testInstall(self):
+        b = self.browser
+        m = self.machine
+
+        # provide minimal content in order for the backend to be seen as supported
+        timerContent = """
+[Unit]
+Description=dnf-automatic timer
+# See comment in dnf-makecache.service
+ConditionPathExists=!/run/ostree-booted
+
+[Timer]
+OnBootSec=1h
+OnUnitInactiveSec=1d
+Unit=-.mount
+
+[Install]
+WantedBy=basic.target
+        """
+
+        if self.backend == 'dnf5':
+            m.execute("dnf remove -y dnf5-plugin-automatic")
+            self.createPackage('dnf5-plugin-automatic', '1', '1', content={
+                '/etc/dnf/dnf5-plugins/automatic.conf': '',
+                '/usr/lib/systemd/system/dnf5-automatic.timer': timerContent,
+            })
+
+        elif self.backend == 'dnf4':
+            m.execute("dnf remove -y dnf-automatic")
+
+            self.createPackage('dnf-automatic', '1', '1', content={
+                '/etc/dnf/automatic.conf': '',
+                '/usr/lib/systemd/system/dnf-automatic.timer': timerContent,
+                '/usr/lib/systemd/system/dnf-automatic-install.timer': timerContent,
+            })
+        elif self.backend == 'apt':
+            m.execute("dpkg -P unattended-upgrades")
+
+        self.enableRepo()
+
+        self.login_and_go('/updates')
+
+        # click through install dialog
+        with b.wait_timeout(30):
+            b.wait_in_text("#autoupdates-settings", "Not set up")
+        b.wait_not_present("#settings .pf-v6-c-alert")
+        b.click("#autoupdates-settings button:contains('Enable')")
+        b.wait_popup('dialog')
+        b.wait_visible('#dialog button.apply')
+        b.wait_not_attr('#dialog button.apply', 'disabled', '')
+        b.click('#dialog button.apply')
+
+        # as dnf-automatic isn't actually installed DnfImpl.setConfig will fail,
+        # but we can check that the backend is now enabled
+        b.wait_visible("#automatic-updates-dialog")
+
+
+@testlib.skipOstree("Image uses OSTree")
+@testlib.skipImage("TODO: fix for OpenSUSE", "opensuse-tumbleweed")
+@testlib.nondestructive
+class TestInstallDialog(NoSubManCase):
+
+    def show_install_dialog(self, *packages: str):
+        b = self.browser
+        b.set_input_text("#install-packages", ",".join(packages))
+        b.click("#install-button")
+        b.wait_in_text("#dialog", "Install software")
+
+    def install_packages(self):
+        b = self.browser
+        b.click("#dialog button:contains('Install')")
+        # assert some progress
+        b.wait_not_present("#dialog")
+
+    def testBasic(self):
+        b = self.browser
+
+        # dummy package
+        self.createPackage("dummy", "1", "1")
+
+        # package which depends on another package
+        self.createPackage("test-webserver", "998", "1", depends="test-webengine")
+        self.createPackage("test-webengine", "998", "1")
+
+        # package which conflicts with another package
+        self.createPackage("ok-software", "998", "1", install=True)
+        self.createPackage("breaking-software", "999", "1", conflicts="ok-software")
+
+        # package that is already installed should not prevent extra packages from showing
+        self.createPackage("already-installed", "998", "1", install=True)
+
+        # Test error condition, package not being available yet
+        self.login_and_go('/playground/packagemanager')
+        b.wait_in_text("#install-card-title", "Install dialog test")
+        self.show_install_dialog("dummy")
+        b.wait_in_text("#dialog .pf-v6-c-alert__title", "dummy is not available from any repository.")
+        b.wait_visible("#dialog button.pf-m-primary:disabled")
+        b.click("#dialog button.cancel")
+        b.wait_not_present("#dialog")
+
+        # Install dummy which is now available
+        # Also works around https://github.com/PackageKit/PackageKit/issues/893
+        self.enableRepo(refresh_repo=self.backend != "dnf5")
+
+        self.show_install_dialog("dummy")
+        b.wait_in_text("#dialog", "dummy will be installed.")
+        self.install_packages()
+
+        # Test that additional installed packages are shown in the dialog
+        b.wait_in_text("#install-card-title", "Install dialog test")
+        self.show_install_dialog("already-installed,test-webserver")
+        b.wait_in_text("#dialog", "already-installed, test-webserver will be installed.")
+        b.wait_text("#dialog .scale-up-ct", "Additional packages:test-webengine")
+        self.install_packages()
+
+        if self.backend != "dnf5":
+            # Test conflicting packages are shown as removed
+            self.show_install_dialog("breaking-software")
+            b.wait_in_text("#dialog", "breaking-software will be installed.")
+            # The svg icon creates a tiny bit of whitespace
+            b.wait_text("#dialog .scale-up-ct", " Removals:ok-software")
+            self.install_packages()
+        else:
+            # package which is replaced with another package
+            self.createPackage("good-software", "998", "1", install=True)
+            self.createPackage("awesome-software", "999", "1", provides="good-software = 999", obsoletes="good-software < 999")
+            self.enableRepo()
+
+            self.show_install_dialog("awesome-software")
+            b.wait_in_text("#dialog", "awesome-software will be installed.")
+            # The svg icon creates a tiny bit of whitespace
+            b.wait_text("#dialog .scale-up-ct", " Removals:good-software")
+            self.install_packages()
+
+            # Conflicting packages require setting `allow_erasing`.
+            self.show_install_dialog("breaking-software")
+            b.wait_in_text("#dialog", "breaking-software will be installed.")
+            b.wait_in_text("#dialog .pf-v6-c-alert__title", "Resolving install failed with result=2")
+            b.wait_in_text("#dialog .pf-v6-c-alert__title", "installed package ok-software-998-1.noarch conflicts with ok-software provided by breaking-software-999")
+
+
+if __name__ == '__main__':
+    testlib.test_main()

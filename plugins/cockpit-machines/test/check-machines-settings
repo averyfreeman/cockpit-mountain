@@ -1,0 +1,1006 @@
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/common/pywrap", sys.argv)
+# SPDX-License-Identifier: LGPL-2.1-or-later
+#
+# Copyright (C) 2013 Red Hat, Inc.
+import subprocess
+
+import machineslib
+import testlib
+
+# If this test fails to run, the host machine needs:
+# echo "options kvm-intel nested=1" > /etc/modprobe.d/kvm-intel.conf
+# rmmod kvm-intel && modprobe kvm-intel || true
+
+
+@testlib.nondestructive
+class TestMachinesSettings(machineslib.VirtualMachinesCase):
+
+    def testVCPU(self):
+        b = self.browser
+        m = self.machine
+
+        self.createVm("subVmTest1", running=False)
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+        self.waitVmRow("subVmTest1")
+
+        m.execute("virt-xml subVmTest1 -c qemu:///system --vcpu 2 --edit")
+
+        b.click("#vm-subVmTest1-system-run")
+        b.wait_in_text("#vm-subVmTest1-system-state", "Running")
+        self.goToVmPage("subVmTest1")
+
+        # Check the syntax of CPU should be "${number} vCPU, ${CPU mode}"
+        b.wait_in_text("#vm-subVmTest1-cpu", "2 vCPUs, ")
+
+        # Check "X" on the dialog
+        b.click("#vm-subVmTest1-cpu button")
+        b.wait_visible("#machines-cpu-modal-dialog")
+        b.click(".pf-v6-c-modal-box__close button")
+        b.wait_not_present("#machines-cpu-modal-dialog")
+
+        b.click("#vm-subVmTest1-cpu button")
+        b.wait_visible("#machines-cpu-modal-dialog")
+
+        # Test basic vCPU properties
+        b.wait_val("#machines-vcpu-count-field input", "2")
+        b.wait_val("#machines-vcpu-max-field input", "2")
+        b.wait_val("#socketsSelect", "1")
+        b.wait_val("#coresSelect", "2")
+        b.wait_val("#threadsSelect", "1")
+
+        # Set new values
+        b.set_input_text("#machines-vcpu-max-field input", "4")
+        b.set_input_text("#machines-vcpu-count-field input", "3")
+
+        # Set new socket value
+        b.wait_val("#socketsSelect", "4")
+        b.set_val("#socketsSelect", "2")
+        b.wait_val("#coresSelect", "1")
+        b.wait_val("#threadsSelect", "2")
+
+        # Check the warning on the dialog
+        b.wait_in_text("#machines-cpu-modal-dialog .pf-v6-c-alert",
+                       "Changes will take effect after shutting down the VM")
+
+        # Save
+        b.click("#machines-cpu-modal-dialog-apply")
+        b.wait_not_present("#machines-cpu-modal-dialog")
+
+        # Make sure warning next to vcpus appears
+        b.wait_visible("#cpu-tooltip")
+        b.wait_visible("#vm-subVmTest1-needs-shutdown")
+
+        # Shut off VM for applying changes after save
+        self.performAction("subVmTest1", "forceOff")
+
+        # Make sure warning is gone after shut off
+        b.wait_not_present("#cpu-tooltip")
+        b.wait_not_present("#vm-subVmTest1-needs-shutdown")
+
+        # Check changes
+        b.wait_in_text("#vm-subVmTest1-cpu", "3 vCPUs")
+
+        # Check after boot
+        # Run VM
+        b.click("#vm-subVmTest1-system-run")
+        b.wait_in_text("#vm-subVmTest1-system-state", "Running")
+
+        # Check VCPU count
+        b.wait_in_text("#vm-subVmTest1-cpu", "3 vCPUs")
+
+        # Open dialog window
+        b.click("#vm-subVmTest1-cpu button")
+        b.wait_visible(".pf-v6-c-modal-box__body")
+
+        # Check basic values
+        b.wait_val("#machines-vcpu-count-field input", "3")
+        b.wait_val("#machines-vcpu-max-field input", "4")
+
+        # Check sockets, cores and threads
+        b.wait_val("#socketsSelect", "2")
+        b.wait_val("#coresSelect", "1")
+        b.wait_val("#threadsSelect", "2")
+
+        b.click("#machines-cpu-modal-dialog-cancel")
+        b.wait_not_present("#machines-cpu-modal-dialog")
+
+        # Shut off VM
+        self.performAction("subVmTest1", "forceOff")
+
+        # Open dialog
+        b.click("#vm-subVmTest1-cpu button")
+
+        b.wait_visible(".pf-v6-c-modal-box__body")
+
+        b.set_input_text("#machines-vcpu-count-field input", "2")
+
+        # Set new socket value
+        b.set_val("#coresSelect", "2")
+        b.wait_val("#socketsSelect", "2")
+        b.wait_val("#threadsSelect", "1")
+
+        # Save
+        b.click("#machines-cpu-modal-dialog-apply")
+        b.wait_not_present("#machines-cpu-modal-dialog")
+
+        testlib.wait(lambda: m.execute(
+            "virsh dumpxml subVmTest1 | tee /tmp/subVmTest1.xml | xmllint --xpath '/domain/cpu/topology[@sockets=\"2\"][@threads=\"1\"][@cores=\"2\"]' -"))  # ruff: ignore[line-too-long]
+
+        # Run VM - this ensures that the internal state is updated before we move on.
+        # We need this here because we can't wait for UI updates after we open the modal dialog.
+        b.click("#vm-subVmTest1-system-run")
+        b.wait_in_text("#vm-subVmTest1-system-state", "Running")
+
+        # Wait for the VCPUs link to get new values before opening the dialog
+        b.wait_in_text("#vm-subVmTest1-cpu", "2 vCPUs")
+
+        # Open dialog
+        b.click("#vm-subVmTest1-cpu button")
+
+        b.wait_visible(".pf-v6-c-modal-box__body")
+
+        # Set new socket value
+        b.wait_val("#coresSelect", "2")
+        b.wait_val("#socketsSelect", "2")
+        b.wait_val("#threadsSelect", "1")
+
+        b.wait_in_text("#vm-subVmTest1-cpu", "2 vCPUs")
+
+        # Check value of sockets, threads and cores from VM dumpxml
+        xpath_sel = '/domain/cpu/topology[@sockets=\"2\"][@threads=\"1\"][@cores=\"2\"]'
+        self.getDomainXpathValue("subVmTest1", xpath_sel)
+        m.execute(f"virsh dumpxml subVmTest1 | xmllint --xpath '{xpath_sel}' -")
+
+        # non-persistent VM doesn't have configurable vcpu
+        m.execute("virsh undefine subVmTest1")
+        b.wait_visible("#vm-subVmTest1-cpu button:disabled")
+
+    def testAutostart(self):
+        b = self.browser
+        m = self.machine
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+
+        def checkAutostart(vm_name, running):
+            self.createVm(vm_name, running=running)
+            self.waitVmRow(vm_name)
+            b.wait_in_text(f"#vm-{vm_name}-system-state", "Running" if running else "Shut off")
+            self.goToVmPage(vm_name)
+
+            # set checkbox state and check state of checkbox
+            # don't know the initial state of checkbox, so set it to checked
+            b.set_checked(f"#vm-{vm_name}-autostart-switch", True)
+            b.wait_visible(f"#vm-{vm_name}-autostart-switch:checked")
+            # check virsh state
+            autostartState = m.execute("virsh dominfo %s | grep 'Autostart:' | awk '{print $2}'" % vm_name).strip()
+            self.assertEqual(autostartState, "enable")
+
+            # change checkbox state and check state of checkbox
+            b.click(f"#vm-{vm_name}-autostart-switch")
+            b.wait_not_present(f"#vm-{vm_name}-autostart-switch:checked")
+            # check virsh state
+            autostartState = m.execute("virsh dominfo %s | grep 'Autostart:' | awk '{print $2}'" % vm_name).strip()
+            self.assertEqual(autostartState, "disable")
+
+            # change checkbox state and check state of checkbox
+            b.click(f"#vm-{vm_name}-autostart-switch")
+            b.wait_visible(f"#vm-{vm_name}-autostart-switch:checked")
+            # check virsh state
+            autostartState = m.execute("virsh dominfo %s | grep 'Autostart:' | awk '{print $2}'" % vm_name).strip()
+            self.assertEqual(autostartState, "enable")
+
+            # non-persistent VM doesn't have autostart
+            if running:
+                m.execute(f"virsh undefine {vm_name}")
+                b.wait_not_present(f"#vm-{vm_name}-autostart-switch")
+
+            self.goToMainPage()
+
+        checkAutostart("subVmTest1", True)
+        checkAutostart("subVmTest2", False)
+
+    def testCPUModel(self):
+        b = self.browser
+
+        self.createVm("subVmTest1")
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+        self.waitVmRow("subVmTest1")
+
+        self.goToVmPage("subVmTest1")
+        b.wait_in_text("#vm-subVmTest1-system-state", "Running")
+
+        cpu_model = "host-model"
+
+        # Copy host CPU configuration
+        b.click("#vm-subVmTest1-cpu button")
+        b.wait_visible("#machines-cpu-modal-dialog")
+        b.select_from_dropdown("#cpu-model-select-group select", cpu_model)
+        b.click("#machines-cpu-modal-dialog-apply")
+        b.wait_not_present("#machines-cpu-modal-dialog")
+
+        # Warning about about difference in persistent and non-persistent XML should appear
+        b.wait_visible("#cpu-tooltip")
+        b.wait_visible("#vm-subVmTest1-needs-shutdown")
+        self.performAction("subVmTest1", "forceOff")
+        # Warning should disappear and changes should be visible in the UI
+        b.wait_not_present("#cpu-tooltip")
+        b.wait_not_present("#vm-subVmTest1-needs-shutdown")
+        b.wait_in_text("#vm-subVmTest1-cpu .pf-v6-c-description-list__text", "host")
+
+        # Choose manually a CPU model
+        b.click("#vm-subVmTest1-cpu button")
+        b.wait_visible("#machines-cpu-modal-dialog")
+        b.select_from_dropdown("#cpu-model-select-group select", "qemu64")
+        b.click("#machines-cpu-modal-dialog-apply")
+        b.wait_not_present("#machines-cpu-modal-dialog")
+        b.wait_in_text("#vm-subVmTest1-cpu .pf-v6-c-description-list__text", "custom (qemu64)")
+
+        # Verify libvirt XML
+        self.assertEqual("qemu64", self.getDomainXpathValue('subVmTest1', '/domain/cpu/model', str_value=True))
+
+        # Host-model gets expanded  to custom mode when the VM is running
+        b.click("#vm-subVmTest1-cpu button")
+        b.wait_visible("#machines-cpu-modal-dialog")
+        b.select_from_dropdown("#cpu-model-select-group select", "host-model")
+        b.click("#machines-cpu-modal-dialog-apply")
+        b.wait_not_present("#machines-cpu-modal-dialog")
+        b.wait_in_text("#vm-subVmTest1-cpu .pf-v6-c-description-list__text", "host")
+        b.click("#vm-subVmTest1-system-run")
+        b.wait_in_text("#vm-subVmTest1-cpu .pf-v6-c-description-list__text", "custom")
+        # In the test ENV libvirt does not properly set the CPU model so we see a tooltip https://bugzilla.redhat.com/show_bug.cgi?id=1913337
+        # b.wait_not_present("#cpu-tooltip")
+
+    def testBootOrder(self):
+        b = self.browser
+        m = self.machine
+
+        args = self.createVm("subVmTest1")
+        m.execute("""
+            touch /var/lib/libvirt/images/phonycdrom;
+            virsh attach-disk subVmTest1 /var/lib/libvirt/images/phonycdrom sdb --type cdrom --config
+        """)
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+        self.waitVmRow("subVmTest1")
+
+        b.wait_in_text("#vm-subVmTest1-system-state", "Running")
+        self.goToVmPage("subVmTest1")
+
+        # Wait for the edit button
+        bootOrder = b.text("#vm-subVmTest1-boot-order")
+
+        # Ensure that it's disabled for running VMs
+        b.wait_visible("#vm-subVmTest1-boot-order button[aria-disabled=true]")
+        self.performAction("subVmTest1", "forceOff")
+
+        # No host device is attached to VM by default, so attach a PCI device
+        # to have at least 1 host device in boot order Take a device from the
+        # end of the list, since first device might be a root pci device
+        pci_output = m.execute("virsh nodedev-list --cap pci").strip().splitlines()[-1]
+        # Turn 'pci_0123_45_67_8' into '0123:45:67.8'
+        split = pci_output[len("pci_"):].split('_')
+        pci_slot = f"{split[0]}:{split[1]}:{split[2]}.{split[3]}"
+        m.execute(f"virt-xml subVmTest1 --add-device --hostdev {pci_slot}")
+
+        # Older libvirt versions don't fire events for host device attachment so we have to reload the page
+        b.reload()
+        b.enter_page('/machines')
+
+        # Open dialog
+        b.click("#vm-subVmTest1-boot-order button")
+        b.wait_visible("#vm-subVmTest1-order-modal-window")
+        # Check boot options details:
+        # Checking the VM system disk path is the same with virsh command results
+        # Checking the VM MAC address is the same with virsh command results
+        b.wait_in_text("#vm-subVmTest1-order-modal-device-row-0 .boot-order-additional-info",
+                       m.execute("virsh domblklist subVmTest1 | awk 'NR==3{print $2}'").strip())
+        b.wait_in_text("#vm-subVmTest1-order-modal-device-row-1 .boot-order-additional-info",
+                       m.execute("virsh domiflist subVmTest1 | awk 'NR==3{print $5}'").strip())
+        b.wait_visible(f".boot-order-additional-info .pf-v6-c-description-list__description:contains('{pci_slot}')")
+        # Check a cdrom attributes are shown correctly
+        cdrom_row = b.text(".boot-order-list-view li:nth-child(3) .boot-order-additional-info")
+        self.assertIn("cdrom", cdrom_row)
+        self.assertIn("/var/lib/libvirt/images/phonycdrom", cdrom_row)
+        # Move first device down and check whether succeeded
+        row = b.text("#vm-subVmTest1-order-modal-device-row-1 .boot-order-additional-info")
+        b.click("#vm-subVmTest1-order-modal-device-row-0 #vm-subVmTest1-order-modal-down")
+        b.wait_in_text("#vm-subVmTest1-order-modal-device-row-0 .boot-order-additional-info", row)
+        # Save
+        b.click("#vm-subVmTest1-order-modal-save")
+        b.wait_not_present("#vm-subVmTest1-order-modal-window")
+
+        # Check boot order has changed and no warning is shown
+        b.wait_not_in_text("#vm-subVmTest1-boot-order", bootOrder)
+
+        bootOrder = b.text("#vm-subVmTest1-boot-order")
+
+        # Open dialog
+        b.click("#vm-subVmTest1-boot-order button")
+        b.wait_visible("#vm-subVmTest1-order-modal-window")
+        # Unselect second device
+        b.set_checked("#vm-subVmTest1-order-modal-device-1-checkbox", False)
+
+        # Save
+        b.click("#vm-subVmTest1-order-modal-save")
+        b.wait_not_present("#vm-subVmTest1-order-modal-window")
+
+        # Check boot order has changed and no warning is shown
+        b.wait_not_in_text("#vm-subVmTest1-boot-order", bootOrder)
+
+        # After unchecking all the boot options, the VM should fall back to using the first hard disk as a boot image
+        # Check that UI is able to detect this fallback
+        def uncheckTheLastBootOption(firstOptionType="disk"):
+            b.click("#vm-subVmTest1-boot-order button")
+            b.wait_visible("#vm-subVmTest1-order-modal-window")
+
+            # check boot option order
+            # use the first and the third option since network will be the third option if unchecking it
+            row0Type = "disk" if firstOptionType == "disk" else "network"
+            row2Type = "network" if firstOptionType == "disk" else "disk"
+            b.wait_text("#vm-subVmTest1-order-modal-device-row-0 .boot-order-description",
+                        row0Type)
+            b.wait_text("#vm-subVmTest1-order-modal-device-row-2 .boot-order-description",
+                        row2Type)
+
+            b.set_checked("#vm-subVmTest1-order-modal-device-row-0 input", False)
+            b.click("#vm-subVmTest1-order-modal-save")
+            b.wait_not_present("#vm-subVmTest1-order-modal-window")
+
+            b.wait_text("#vm-subVmTest1-boot-order", "diskedit")
+
+            # re-open and check the boot option is the disk
+            b.click("#vm-subVmTest1-boot-order button")
+            b.wait_visible("#vm-subVmTest1-order-modal-window")
+            file_desc_sel = ".pf-v6-c-description-list__description .pf-v6-c-description-list__text"
+            b.wait_text(f"#vm-subVmTest1-order-modal-device-row-0 {file_desc_sel}", args["image"])
+
+            b.click("#vm-subVmTest1-order-modal-cancel")
+            b.wait_not_present("#vm-subVmTest1-order-modal-window")
+
+        # Uncheck the last boot option which is network
+        uncheckTheLastBootOption(firstOptionType="network")
+        # Uncheck the last boot option which is disk
+        uncheckTheLastBootOption()
+
+    def testDomainMemorySettings(self):
+        b = self.browser
+        m = self.machine
+
+        args = self.createVm("subVmTest1", memory=256)
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+        self.waitVmRow("subVmTest1")
+
+        b.wait_in_text("#vm-subVmTest1-system-state", "Running")
+        self.goToVmPage("subVmTest1")
+
+        # Wait for the edit link
+        b.click("#vm-subVmTest1-memory-count button")
+
+        # Change memory
+        b.wait_visible("#vm-subVmTest1-memory-modal-memory")
+
+        b.wait_attr("#vm-subVmTest1-memory-modal-memory-slider  div[role=slider]", "aria-valuemin", "128")
+        b.wait_attr("#vm-subVmTest1-memory-modal-max-memory-slider  div[role=slider]", "aria-valuemin", "128")
+
+        current_memory = int(b.attr("#vm-subVmTest1-memory-modal-memory", "value"))
+        self.assertEqual(current_memory, 256)
+        b.wait_attr("#vm-subVmTest1-memory-modal-max-memory", "disabled", "")
+
+        # Check memory hotunplugging
+        # The balloon driver needs to be loaded to decrease memory
+        self.waitGuestBooted(args['logfile'])
+
+        b.set_input_text("#vm-subVmTest1-memory-modal-memory", str(current_memory - 10))
+        # Save the memory settings
+        b.click("#vm-subVmTest1-memory-modal-save")
+        b.wait_not_present("#vm-memory-modal")
+
+        b.wait_in_text("#vm-subVmTest1-memory-count", f"{f'{current_memory - 10}'} MiB")
+
+        # Shut off domain and check changes are  still there
+        self.performAction("subVmTest1", "forceOff")
+        b.wait_in_text("#vm-subVmTest1-memory-count", f"{f'{current_memory - 10}'} MiB")
+
+        # Click for the edit link
+        b.click("#vm-subVmTest1-memory-count button")
+
+        # Test slider
+        current_max_memory = int(b.val("#vm-subVmTest1-memory-modal-max-memory"))
+        slider = "#vm-subVmTest1-memory-modal-max-memory-slider .pf-v6-c-slider__rail"
+        width = b.call_js_func('(function (sel) { return ph_find(sel).offsetWidth; })', slider)
+        about_half_way = width / 2 + 1
+
+        b.mouse(slider, "click", about_half_way, 0)
+        b.wait_not_val("#vm-subVmTest1-memory-modal-max-memory", current_max_memory)
+
+        # Verify that limiting max memory in offline VMs below memory will decrease memory as well
+        b.set_input_text("#vm-subVmTest1-memory-modal-max-memory", str(current_memory - 20))
+        self.assertEqual(int(b.attr("#vm-subVmTest1-memory-modal-memory", "value")), current_memory - 20)
+
+        # Verify that unit conversions work
+        b.select_from_dropdown("#vm-subVmTest1-memory-modal-memory-unit-select", "GiB")
+        b.wait_attr("#vm-subVmTest1-memory-modal-memory", "value", "0")
+        b.click("#vm-memory-modal button[aria-label='Close']")
+        b.wait_not_present("#vm-memory-modal")
+
+        # Run VM
+        b.click("#vm-subVmTest1-system-run")
+        b.wait_in_text("#vm-subVmTest1-system-state", "Running")
+        # Non-persistent VM doesn't have configurable memory
+        m.execute("virsh undefine subVmTest1")
+        b.wait_visible("#vm-subVmTest1-memory-count button:disabled")
+
+    def testMultipleSettings(self):
+        b = self.browser
+        m = self.machine
+
+        # We want a machine without watchdog
+        args = self.createVm("subVmTest1", os="linux2016")
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+        self.waitVmRow("subVmTest1")
+
+        b.wait_in_text("#vm-subVmTest1-system-state", "Running")
+        self.goToVmPage("subVmTest1")
+
+        self.waitGuestBooted(args['logfile'])
+
+        # Change CPU model setting
+        b.click("#vm-subVmTest1-cpu button")
+        b.wait_visible("#machines-cpu-modal-dialog")
+        cpu_model = "host-model"
+        b.select_from_dropdown("#cpu-model-select-group select", cpu_model)
+        b.set_input_text("#machines-vcpu-max-field input", "3")  # Change values
+        b.set_input_text("#machines-vcpu-count-field input", "3")
+        b.click("#machines-cpu-modal-dialog-apply")  # Save
+        b.wait_not_present("#machines-cpu-modal-dialog")
+
+        # Add watchdog
+        b.click("#vm-subVmTest1-watchdog-button")
+        b.wait_visible("#vm-subVmTest1-watchdog-modal")
+        b.click("#reset")
+        b.click("#watchdog-dialog-apply")
+        b.wait_not_present("#vm-subVmTest1-watchdog-modal")
+
+        # Shut off domain
+        self.performAction("subVmTest1", "forceOff")
+
+        testlib.wait(lambda: cpu_model in self.getDomainXpathValue('subVmTest1', '//domain/cpu/@mode',
+                                                                   str_value=True))
+        testlib.wait(lambda: "3" in self.getDomainXpathValue('subVmTest1', '//domain/vcpu', str_value=True))
+
+        virsh_output = self.getDomainXpathValue('subVmTest1', '/domain/devices/watchdog/@action')
+        self.assertEqual(virsh_output, 'action="reset"')
+
+        # Check both changes have been applied
+        b.wait_in_text("#vm-subVmTest1-cpu", "3 vCPUs, host")
+        b.wait_in_text("#vm-subVmTest1-watchdog-state", "Reset")
+
+        # Add TPM to running VM
+        b.click("#vm-subVmTest1-system-run")
+        b.wait_in_text("#vm-subVmTest1-system-state", "Running")
+        self.assertNotIn("tpm", m.execute("virsh dumpxml subVmTest1"))
+        self.assertNotIn("tpm", m.execute("virsh dumpxml --inactive subVmTest1"))
+        self.performAction("subVmTest1", "add-tpm")
+        if machineslib.hasBrokenTPM(m.image):
+            error_location = ".pf-v6-c-alert-group li .pf-v6-c-alert"
+            b.wait_in_text(error_location, "Failed to add TPM to VM subVmTest1")
+            b.wait_in_text("button.alert-link.more-button", "show more")
+            b.click("button.alert-link.more-button")
+            b.wait_in_text(error_location, "unsupported configuration")
+            # Close the notification
+            b.click(".pf-v6-c-alert-group li .pf-v6-c-alert button.pf-m-plain")
+            b.wait_not_present(".pf-v6-c-alert-group li .pf-v6-c-alert")
+        else:
+            # this can only add it to the inactive XML, not live
+            b.click("#vm-subVmTest1-needs-shutdown")
+            b.wait_in_text(".pf-v6-c-popover", "TPM")
+            b.click(".pf-v6-c-popover .pf-v6-c-popover__close button")
+            b.wait_not_present(".pf-v6-c-popover")
+            self.assertIn("tpm", m.execute("virsh dumpxml --inactive subVmTest1"))
+            self.assertNotIn("tpm", m.execute("virsh dumpxml subVmTest1"))
+            # removes menu entry
+            b.click("#vm-subVmTest1-system-action-kebab")
+            b.wait_visible("#vm-subVmTest1-system-delete")
+            self.assertFalse(b.is_present("#vm-subVmTest1-system-add-tpm"))
+            b.click("#vm-subVmTest1-system-action-kebab")
+            b.wait_not_present(".pf-v6-c-menu__list")
+
+            # after restarting, TPM is active
+            self.performAction("subVmTest1", "forceOff")
+            b.wait_not_present("#vm-subVmTest1-needs-shutdown")
+            b.click("#vm-subVmTest1-system-run")
+            b.wait_in_text("#vm-subVmTest1-system-state", "Running")
+            self.assertIn("tpm", m.execute("virsh dumpxml subVmTest1"))
+
+            # https://launchpad.net/bugs/1968187
+            if m.image.startswith("debian"):
+                self.allow_journal_messages('.*apparmor="DENIED".*name="/etc/ssl/openssl.cnf".*comm="swtpm".*')
+
+    def testWatchdog(self):
+        b = self.browser
+        m = self.machine
+        action_strings = {
+            "reset": "Reset",
+            "shutdown": "Gracefully shutdown",
+            "poweroff": "Power off",
+            "pause": "Pause",
+            "none": "Do nothing",
+            "dump": "Dump",
+            "inject-nmi": "Inject a non-maskable interrupt",
+        }
+
+        def openWatchDogDialog():
+            b.click("#vm-subVmTest1-watchdog-button")
+            b.wait_visible("#vm-subVmTest1-watchdog-modal")
+
+        def closeWatchDogDialog(selector):
+            b.click(selector)
+            b.wait_not_present("#vm-subVmTest1-watchdog-modal")
+
+        def setWatchdogAction(action, machine_has_no_watchdog=False, pixel_test_tag=None, reboot_machine=False):
+            # If no watchdog action is set, we are attaching a new watchdog device.
+            # If watchdog already is set, we are editing an exiting watchdog device.
+            if machine_has_no_watchdog:
+                b.wait_in_text("#vm-subVmTest1-watchdog-button", "add")
+            else:
+                b.wait_in_text("#vm-subVmTest1-watchdog-button", "edit")
+
+            openWatchDogDialog()
+
+            if pixel_test_tag:
+                b.assert_pixels("#vm-subVmTest1-watchdog-modal", pixel_test_tag, skip_layouts=["rtl"])
+
+            b.click(f"#{action}")
+
+            if machine_has_no_watchdog:
+                b.wait_in_text("#watchdog-dialog-apply", "Add")
+            else:
+                b.wait_in_text("#watchdog-dialog-apply", "Save")
+
+            closeWatchDogDialog("#watchdog-dialog-apply")
+
+            b.wait_in_text("#vm-subVmTest1-watchdog-state", action_strings[action])
+
+            virsh_output = self.getDomainXpathValue('subVmTest1', '/domain/devices/watchdog/@action')
+            self.assertEqual(virsh_output, f'action="{action}"')
+
+        def setWatchdogActionLive(action, previous_action=None, reboot_machine=False, add=False, removable=True):
+            openWatchDogDialog()
+
+            b.click(f"#{action}")
+            if previous_action:
+                # When editing an exiting watchdog, message warning user that changes will take effect
+                # after reboot should be present
+                b.wait_visible("#vm-subVmTest1-watchdog-modal #vm-subVmTest1-idle-message")
+            else:
+                # When attaching adding a new watchdog, no message should be present
+                b.wait_not_present("#vm-subVmTest1-watchdog-modal #vm-subVmTest1-idle-message")
+
+            if add:
+                b.wait_in_text("#watchdog-dialog-apply", "Add")
+            else:
+                b.wait_in_text("#watchdog-dialog-apply", "Save")
+
+            if removable and not add:
+                b.wait_visible("#watchdog-dialog-detach")
+            else:
+                b.wait_not_present("#watchdog-dialog-detach")
+
+            closeWatchDogDialog("#watchdog-dialog-apply")
+
+            if previous_action:
+                # When editing an exiting watchdog, tooltip should be present on overview card
+                # warning user that changes will take effect after reboot.
+                b.wait_visible("#watchdog-tooltip")
+                b.wait_visible("#vm-subVmTest1-needs-shutdown")
+            else:
+                # When attaching adding a new watchdog, no tooltip should be present
+                b.wait_not_present("#watchdog-tooltip")
+                b.wait_not_present("#vm-subVmTest1-needs-shutdown")
+
+            # Libvirt doesn't support editing watchdog device on RUNNING vm, so a live VM config
+            # will persist the previously configured watchdog action until reboot.
+            # On the other hand, libvirt does support attaching a watchdog to a RUNNING VM
+            # So in summary:
+            # - if no previous watchdog action is configured on a VM (meaning VM has no watchdog device),
+            #   we are attaching a new watchdog device
+            #   and live VM config have new action set
+            # - if watchdog action is configured on a VM (meaning VM has a watchdog device),
+            #   we are editing an editing watchdog device
+            #   and live VM config will persist the old setting until VM is rebooted
+            expected_action = previous_action if previous_action else action
+            b.wait_in_text("#vm-subVmTest1-watchdog-state", action_strings[expected_action])
+            virsh_output_offline = self.getDomainXpathValue('subVmTest1', '/domain/devices/watchdog/@action')
+            self.assertEqual(virsh_output_offline, f'action="{expected_action}"')
+
+            # Offline VM config will always have newly configured watchdog action, no matter
+            # if we are attaching a new watchdog device or editing an existing one
+            virsh_output_offline = self.getDomainXpathValue('subVmTest1', '/domain/devices/watchdog/@action',
+                                                            inactive=True)
+            self.assertEqual(virsh_output_offline, f'action="{action}"')
+
+            if reboot_machine:
+                # Check that after rebooting machine, live VM config will have new watchdog configuration
+                self.performAction("subVmTest1", "forceOff")
+                b.click("#vm-subVmTest1-system-run")
+                b.wait_in_text("#vm-subVmTest1-system-state", "Running")
+
+                b.wait_in_text("#vm-subVmTest1-watchdog-state", action_strings[action])
+                virsh_output_current = self.getDomainXpathValue('subVmTest1', '/domain/devices/watchdog/@action')
+                self.assertEqual(virsh_output_current, f'action="{action}"')
+
+        def removeWatchdogDevice(live=True):
+            b.click("#vm-subVmTest1-watchdog-button")
+            b.wait_visible("#vm-subVmTest1-watchdog-modal")
+
+            b.click("#watchdog-dialog-detach")
+            b.wait_not_present("#vm-subVmTest1-watchdog-modal")
+
+            b.wait_in_text("#vm-subVmTest1-watchdog-state", "none")
+            # check no watchdog is present in VM
+            self.assertNotIn("watchdog", m.execute("virsh dumpxml subVmTest1"))
+
+            if live:
+                # check no watchdog is present in VM
+                self.assertNotIn("watchdog", m.execute("virsh dumpxml subVmTest1 --inactive"))
+
+        # We want a machine with hotpluggable watchdog, and no initial
+        # watchdog.  Asking for os="linux2016" gives us that.
+
+        args = self.createVm("subVmTest1", running=False, os="linux2016")
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+        self.goToVmPage("subVmTest1")
+
+        b.wait_in_text("#vm-subVmTest1-watchdog-state", "none")
+
+        # General checks for watchdog
+        # Cancel
+        openWatchDogDialog()
+        closeWatchDogDialog("#watchdog-dialog-apply + button")
+
+        # "X" of the dialog
+        openWatchDogDialog()
+        closeWatchDogDialog("#vm-subVmTest1-watchdog-modal button[aria-label=Close]")
+
+        openWatchDogDialog()
+        # Check no default watchdog device is selected
+        self.assertTrue(b.get_checked("#reset"))  # Reset is pre-selected as default when no watchdog is attached
+        self.assertFalse(b.get_checked("#poweroff"))
+        self.assertFalse(b.get_checked("#inject-nmi"))
+        self.assertFalse(b.get_checked("#pause"))
+        closeWatchDogDialog("#vm-subVmTest1-watchdog-modal button[aria-label=Close]")
+
+        # Test configuring watchdog for shutoff VM
+        setWatchdogAction(action="reset", machine_has_no_watchdog=True)
+        setWatchdogAction(action="poweroff", pixel_test_tag="watchdog")
+        setWatchdogAction(action="inject-nmi")
+        removeWatchdogDevice()
+
+        b.click("#vm-subVmTest1-system-run")
+        b.wait_in_text("#vm-subVmTest1-system-state", "Running")
+
+        # Test configuring watchdog for running VM
+        setWatchdogActionLive(action="reset", add=True)
+        setWatchdogActionLive(action="pause", previous_action="reset")
+        # Make sure that the VM booted normally before attempting to hotunplug
+        self.waitGuestBooted(args['logfile'])
+        removeWatchdogDevice(live=True)
+        # Check rebooting machine will not unexpectedly affect watchdog configuration
+        setWatchdogActionLive(action="poweroff", reboot_machine=True, add=True)
+
+        m.execute("virsh destroy subVmTest1")
+
+        # Some OSes don't support target.hotplug=off
+        if m.image.startswith("rhel-8"):
+            self.assertIn("Unknown --controller options", m.execute(
+                "! virt-xml subVmTest1 --edit model=pci-root --controller target.hotplug=off 2>&1")
+            )
+            m.execute("virsh start subVmTest1")
+        else:
+            # Disable hotplugging for subVmTest1
+            m.execute("virt-xml subVmTest1 --edit model=pci-root --controller target.hotplug=off")
+            # Cleanup watchdog configuration
+            m.execute("virt-xml subVmTest1 --remove-device --watchdog 1")
+            m.execute("virsh start subVmTest1")
+
+            # Test hotplug will fail and warning is shown
+            openWatchDogDialog()
+            b.wait_not_present("#watchdog-dialog-apply-next-boot")
+            b.click("#reset")
+            b.click("#watchdog-dialog-apply")
+            b.wait_in_text("#vm-subVmTest1-watchdog-modal .pf-m-warning", "Could not dynamically add watchdog")
+            b.wait_visible("#watchdog-dialog-apply[aria-disabled=true]")
+            # Apply coldplug
+            closeWatchDogDialog("#watchdog-dialog-apply-next-boot")
+            # Watchdog requires fresh boot
+            b.wait_visible("#watchdog-tooltip")
+
+            # Destroy and start a VM so libvirt reloads updated XML
+            m.execute("virsh destroy subVmTest1; virsh start subVmTest1")
+            b.wait_not_present("#watchdog-tooltip")
+
+        args = self.createVm("subVmTest2", os="linux2016")
+        self.goToMainPage()
+        self.waitPageInit()
+        self.goToVmPage("subVmTest2")
+        m.execute("virsh undefine subVmTest2")
+        testlib.wait(lambda: "no" in m.execute("virsh dominfo subVmTest2 | grep ^Persistent"), delay=3)
+        # UI was notified that VM is transient
+        b.wait_visible("#vm-subVmTest2-memory-count button[disabled]")
+
+        # Watchdog can be attached to a transient VM
+        b.click("#vm-subVmTest2-watchdog-button")
+        b.wait_visible("#vm-subVmTest2-watchdog-modal")
+        b.click("#pause")
+        b.click("#watchdog-dialog-apply")
+        b.wait_not_present("#vm-subVmTest2-watchdog-modal")
+        b.wait_in_text("#vm-subVmTest2-watchdog-state", action_strings["pause"])
+
+        # Watchdog of transient VM should not be editable
+        b.click("#vm-subVmTest2-watchdog-button")
+        b.wait_visible("#vm-subVmTest2-watchdog-modal")
+        b.wait_visible("#watchdog-dialog-apply[aria-disabled=true]")
+        b.mouse("#watchdog-dialog-apply", "mouseenter")
+        b.wait_visible("#watchdog-live-edit-tooltip")
+        b.click("#vm-subVmTest2-watchdog-modal button[aria-label=Close]")
+        b.wait_not_present("#vm-subVmTest2-watchdog-modal")
+
+        self.goToMainPage()
+        self.waitPageInit()
+
+        m.execute("virsh destroy subVmTest2")
+
+        # Create a Q35 machine, which has a permanent watchdog that
+        # can't be removed.  (Some older versions of libvirt don't add
+        # a watchdog.)
+
+        m.execute("virsh destroy subVmTest1; virsh undefine subVmTest1")
+        args = self.createVm("subVmTest1", os="linux2022")
+        has_watchdog = m.image not in ["rhel-8-10"]
+
+        self.goToVmPage("subVmTest1")
+        if has_watchdog:
+            b.wait_in_text("#vm-subVmTest1-watchdog-state", "Reset")
+            setWatchdogActionLive(action="pause", previous_action="reset", reboot_machine=True, removable=False)
+        else:
+            b.wait_in_text("#vm-subVmTest1-watchdog-state", "none")
+
+    def testVsock(self):
+        b = self.browser
+        m = self.machine
+
+        # When we don't specify address, libvit will choose lowest available (3 in case of clean VM)
+        default_libvirt_vsock_address = "3"
+
+        def setVsock(auto, address=None, machine_has_no_vsock=False, pixel_test_tag=None, reboot_machine=False):
+            # If no vsock configured, we are attaching a new vsock device. If vsock already is set,
+            # we are editing an exiting vsock device
+            if machine_has_no_vsock:
+                b.wait_in_text("#vm-subVmTest1-vsock-button", "add")
+            else:
+                b.wait_in_text("#vm-subVmTest1-vsock-button", "edit")
+
+            b.click("#vm-subVmTest1-vsock-button")
+            b.wait_visible("#vm-subVmTest1-vsock-modal")
+
+            if pixel_test_tag:
+                b.assert_pixels("#vm-subVmTest1-vsock-modal", pixel_test_tag)
+
+            b.set_checked("#vsock-cid-generate", not auto)
+            if not auto:
+                b.set_input_text("#vsock-context-identifier input", address)
+
+            if machine_has_no_vsock:
+                b.wait_in_text("#vsock-dialog-apply", "Add")
+            else:
+                b.wait_in_text("#vsock-dialog-apply", "Save")
+
+            b.click("#vsock-dialog-apply")
+            b.wait_not_present("#vm-subVmTest1-vsock-modal")
+
+            b.wait_in_text("#vm-subVmTest1-vsock-address", "assign automatically" if auto else address)
+
+            virsh_output_auto = self.getDomainXpathValue('subVmTest1', '/domain/devices/vsock/cid/@auto')
+            virsh_output_address = self.getDomainXpathValue('subVmTest1', '/domain/devices/vsock/cid/@address')
+            self.assertEqual(virsh_output_auto, 'auto="yes"' if auto else 'auto="no"')
+            if not auto:
+                self.assertEqual(virsh_output_address, f'address="{address}"')
+
+        def setVsockLive(new_auto, new_address=None, previous_address=None, previous_auto=None, reboot_machine=False):
+            b.click("#vm-subVmTest1-vsock-button")
+            b.wait_visible("#vm-subVmTest1-vsock-modal")
+
+            b.set_checked("#vsock-cid-generate", not new_auto)
+            if not new_auto:
+                b.set_input_text("#vsock-context-identifier input", new_address)
+
+            if previous_address or previous_auto:
+                # When editing an exiting vsock, warn the user that the changes will take effect after a reboot
+                b.wait_visible("#vm-subVmTest1-vsock-modal #vm-subVmTest1-idle-message")
+            else:
+                # When attaching adding a new vsock, no message should be present
+                b.wait_not_present("#vm-subVmTest1-vsock-modal #vm-subVmTest1-idle-message")
+
+            b.click("#vsock-dialog-apply")
+            b.wait_not_present("#vm-subVmTest1-vsock-modal")
+
+            if previous_address or previous_auto:
+                # When editing an exiting vsock, tooltip should be present on overview card
+                # warning user that changes will take effect after reboot.
+                b.wait_visible("#vsock-tooltip")
+            else:
+                # When attaching adding a new vsock, no tooltip should be present
+                b.wait_not_present("#vsock-tooltip")
+
+            # Libvirt doesn't support editing vsock device on RUNNING vm, so a live VM config will
+            # persist the previously configured vsock action until reboot.
+            # On the other hand, libvirt does support attaching a vsock to a RUNNING VM
+            # So in summary:
+            # - if no previous vsock is configured on a VM, we are attaching a new vsock device and
+            #   live VM config will get updated
+            # - if vsock action is configured on a VM, and we are editing an editing vsock device,
+            #    the live VM config will persist
+            #   the old setting until VM is rebooted
+            vmName = 'subVmTest1'
+            virsh_output_auto = self.getDomainXpathValue(vmName, '/domain/devices/vsock/cid/@auto')
+            if previous_auto is not None:  # Editing exiting vsock
+                expected_auto = "yes" if previous_auto else "no"
+            else:  # Attaching new vsock
+                expected_auto = "yes" if new_auto else "no"
+            self.assertEqual(virsh_output_auto, f'auto="{expected_auto}"')
+
+            if previous_address is not None:
+                expected_address = previous_address  # Editing exiting vsock, old vsock is still present in live XML
+            else:
+                if new_address is not None:
+                    expected_address = new_address   # Attaching new vsock, new vsock is already present in live VM
+                else:
+                    # When we don't specify address, libvirt will choose
+                    expected_address = default_libvirt_vsock_address
+            b.wait_in_text("#vm-subVmTest1-vsock-address", expected_address)
+            virsh_output_address = self.getDomainXpathValue(vmName, '/domain/devices/vsock/cid/@address')
+            self.assertEqual(virsh_output_address, f'address="{expected_address}"')
+
+            # Offline VM config will always have newly configured vsock, no matter if we are attaching
+            # a new vsock device or editing an existing one.
+            expected_auto_offline = "yes" if new_auto else "no"
+            virsh_output_offline_auto = self.getDomainXpathValue(vmName, '/domain/devices/vsock/cid/@auto',
+                                                                 inactive=True)
+            self.assertEqual(virsh_output_offline_auto, f'auto="{expected_auto_offline}"')
+
+            expected_address_offline = new_address
+            virsh_output_offline_address = self.getDomainXpathValue(vmName, '/domain/devices/vsock/cid/@address',
+                                                                    inactive=True)
+            if expected_address_offline:
+                self.assertEqual(virsh_output_offline_address, f'address="{expected_address_offline}"')
+
+            if reboot_machine:
+                # Check that after rebooting machine, live VM config will have new vsock configuration
+                self.performAction("subVmTest1", "forceOff")
+                b.click("#vm-subVmTest1-system-run")
+                b.wait_in_text("#vm-subVmTest1-system-state", "Running")
+
+                expected_after_reboot_auto = "yes" if new_auto else "no"
+                virsh_output_auto = self.getDomainXpathValue(vmName, '/domain/devices/vsock/cid/@auto')
+                self.assertEqual(virsh_output_auto, f'auto="{expected_after_reboot_auto}"')
+
+                expected_after_reboot_address = new_address if new_address else default_libvirt_vsock_address
+                b.wait_in_text("#vm-subVmTest1-vsock-address", expected_after_reboot_address)
+                virsh_output_address = self.getDomainXpathValue(vmName, '/domain/devices/vsock/cid/@address')
+                self.assertEqual(virsh_output_address, f'address="{expected_after_reboot_address}"')
+
+        def removeVsockDevice(live=True):
+            b.click("#vm-subVmTest1-vsock-button")
+            b.wait_visible("#vm-subVmTest1-vsock-modal")
+
+            b.click("#vsock-dialog-detach")
+            b.wait_not_present("#vm-subVmTest1-vsock-modal")
+
+            b.wait_in_text("#vm-subVmTest1-vsock-address", "none")
+            # check no vsock is present in VM
+            self.assertNotIn("vsock", m.execute("virsh dumpxml subVmTest1"))
+
+            if live:
+                # check no vsock is present in VM
+                self.assertNotIn("vsock", m.execute("virsh dumpxml subVmTest1 --inactive"))
+
+        self.createVm("subVmTest1", running=False)
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+        self.goToVmPage("subVmTest1")
+
+        b.wait_in_text("#vm-subVmTest1-vsock-address", "none")
+
+        # The whole UI is based around expectation that libvirt allows maximum 1 vsock per VM
+        # Have a canary here which will let us know once this is no longer true
+        m.execute("virt-xml subVmTest1 --add-device --vsock cid.auto=yes")
+        # Attaching second vsock is expected to fail
+        self.assertRaises(subprocess.CalledProcessError, m.execute,
+                          "virt-xml subVmTest1 --add-device --vsock cid.auto=no,cid.address=8")
+        m.execute("virt-xml subVmTest1 --remove-device --vsock 1")
+
+        # Test configuring vsock for shutoff VM
+        setVsock(auto=True, machine_has_no_vsock=True)
+        setVsock(auto=False, address="5", pixel_test_tag="vsock")
+        removeVsockDevice()
+
+        b.click("#vm-subVmTest1-system-run")
+        b.wait_in_text("#vm-subVmTest1-system-state", "Running")
+
+        # Because of bug in Debian, hotplug of vsock device fails
+        # https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1033872
+        if m.image not in ["debian-testing", "debian-trixie"]:
+            # Test configuring vsock for running VM
+            setVsockLive(new_auto=False, new_address="5")
+            setVsockLive(new_auto=True, previous_auto=False, previous_address="5", reboot_machine=True)
+            setVsockLive(new_auto=False, new_address="4", previous_auto=True,
+                         previous_address=default_libvirt_vsock_address)
+
+            m.execute("virsh undefine subVmTest1")
+            testlib.wait(lambda: "no" in m.execute("virsh dominfo subVmTest1 | grep ^Persistent"), delay=3)
+            # UI was notified that VM is transient
+            b.wait_visible("#vm-subVmTest1-memory-count button[disabled]")
+
+            # Vsock of transient VM should not be editable
+            b.click("#vm-subVmTest1-vsock-button")
+            b.wait_visible("#vm-subVmTest1-vsock-modal")
+            b.wait_visible("#vsock-dialog-apply[aria-disabled=true]")
+            b.mouse("#vsock-dialog-apply", "mouseenter")
+            b.wait_visible("#vsock-live-edit-tooltip")
+
+    def testBootOrderPreservesPasswords(self):
+        """Test that changing boot order preserves sensitive data like VNC passwords in domain XML"""
+        b = self.browser
+        m = self.machine
+
+        # Create a VM
+        self.createVm("bootOrderTestVM", graphics="vnc", running=False)
+
+        # Add VNC with password using virt-xml
+        vnc_password = "secret12"
+        m.execute(f"virt-xml bootOrderTestVM --edit --graphics vnc,passwd={vnc_password}")
+
+        # Verify the VNC password is present
+        original_xml = m.execute("virsh dumpxml bootOrderTestVM --security-info")
+        self.assertIn(vnc_password, original_xml)
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+        self.waitVmRow("bootOrderTestVM")
+
+        # Go to VM page
+        self.goToVmPage("bootOrderTestVM")
+
+        # Get current boot order
+        bootOrder = b.text("#vm-bootOrderTestVM-boot-order")
+
+        # Open boot order dialog and make a change
+        b.click("#vm-bootOrderTestVM-boot-order button")
+        b.wait_visible("#vm-bootOrderTestVM-order-modal-window")
+        b.click("#vm-bootOrderTestVM-order-modal-device-row-0 #vm-bootOrderTestVM-order-modal-down")
+        b.click("#vm-bootOrderTestVM-order-modal-save")
+        b.wait_not_present("#vm-bootOrderTestVM-order-modal-window")
+
+        # Verify boot order changed (indicating the API call succeeded)
+        b.wait_not_in_text("#vm-bootOrderTestVM-boot-order", bootOrder)
+
+        # Verify that VNC password is still present in the XML
+        updated_xml = m.execute("virsh dumpxml bootOrderTestVM --security-info")
+        self.assertIn(vnc_password, updated_xml, "VNC password should be preserved after boot order change")
+
+
+if __name__ == '__main__':
+    testlib.test_main()

@@ -1,0 +1,12 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
+.unit-select, .size-input {
+    max-inline-size: 5rem;
+}
+
+.pf-v6-c-tooltip__arrow {
+    margin-inline-end: var(--pf-t--global--spacer--xl);
+}
+
+.invalid-token-helper {
+    color: var(--pf-t--global--text--color--status--danger--default);
+}

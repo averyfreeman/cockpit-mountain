@@ -1,0 +1,11 @@
+# build artifacts
+node_modules/
+dist/
+.tmp-unit/
+/*.spec
+*.tar.xz
+*.rpm
+
+# editor / temp files
+*~
+tmp/

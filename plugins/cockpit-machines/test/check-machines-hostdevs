@@ -1,0 +1,337 @@
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/common/pywrap", sys.argv)
+# SPDX-License-Identifier: LGPL-2.1-or-later
+#
+# Copyright (C) 2021 Red Hat, Inc.
+import re
+import subprocess
+import xml.etree.ElementTree as ET
+
+import machineslib
+import testlib
+from machinesxmls import PCI_HOSTDEV, SCSI_HOST_HOSTDEV, USB_HOSTDEV, USB_HOSTDEV_NONEXISTENT
+
+
+def find_usb_hostdev(root, vendor_id, product_id):
+    for hostdev in root.find('devices').iter('hostdev'):
+        source = hostdev.find('source')
+        if source.find('vendor').get('id') == vendor_id and source.find('product').get('id') == product_id:
+            return True
+    return False
+
+
+def find_pci_hostdev(root, slot_parts):
+    for hostdev in root.find('devices').iter('hostdev'):
+        addr = hostdev.find('source').find('address')
+        addr_parts = [int(addr.get(a), 16) for a in ['domain', 'bus', 'slot', 'function']]
+        if slot_parts == addr_parts:
+            return True
+    return False
+
+
+class HostDevAddDialog:
+    def __init__(
+        self, test_obj, connection_name, dev_type="usb_device", dev_id=0, vm_dev_id=1, remove=True, fail_message=None
+    ):
+        self.test_obj = test_obj
+        self.connection_name = connection_name
+        self.dev_type = dev_type
+        self.dev_id = dev_id
+        self.vm_dev_id = vm_dev_id
+        self._vendor = None
+        self._model = None
+        self.fail_message = fail_message
+        self.run_admin = test_obj.run_admin
+        self.addCleanup = test_obj.addCleanup
+
+    def execute(self):
+        self.open()
+        self.fill()
+        self.add()
+        if not self.fail_message:
+            self.verify()
+            self.verify_backend()
+            if self.remove:
+                self.remove()
+
+    def open(self):
+        b = self.test_obj.browser
+        b.wait_not_present(f"#vm-subVmTest1-hostdev-{self.vm_dev_id}-product")
+        b.click("button#vm-subVmTest1-hostdevs-add")
+        b.wait_in_text(".pf-v6-c-modal-box .pf-v6-c-modal-box__header .pf-v6-c-modal-box__title",
+                       "Add host device")
+        if self.connection_name != "session":
+            b.assert_pixels(".pf-v6-c-modal-box", "vm-hostdevs-add-dialog", skip_layouts=["rtl"])
+
+    def fill(self):
+        b = self.test_obj.browser
+        b.click(f"input#{self.dev_type}")
+        b.set_checked(f".pf-v6-c-table [data-row='{self.dev_id}'] input", True)
+        sel = f"#vm-subVmTest1-hostdevs-dialog table tbody tr:nth-child({self.dev_id + 1})"
+        self._model = b.text(f"{sel} td:nth-child(2)")
+        self._vendor = b.text(f"{sel} td:nth-child(3)")
+        if self.dev_type == "pci":
+            self._slot = b.text(f"{sel} td:nth-child(4) dd")
+
+    def cancel(self):
+        b = self.test_obj.browser
+        b.click(".pf-v6-c-modal-box__footer button:contains(Cancel)")
+        b.wait_not_present("#vm-subVmTest1-hostdevs-dialog")
+
+    def add(self):
+        b = self.test_obj.browser
+        self._orig_xml = self.run_admin(f"virsh -c qemu:///{self.connection_name} dumpxml subVmTest1",
+                                        self.connection_name)
+        b.click(".pf-v6-c-modal-box__footer button:contains(Add)")
+        if self.fail_message:
+            b.wait_in_text(".pf-v6-c-modal-box__body .pf-v6-c-alert__title", self.fail_message)
+            b.click(".pf-v6-c-modal-box__footer button:contains(Cancel)")
+        b.wait_not_present("#vm-subVmTest1-hostdevs-dialog")
+
+    def verify(self):
+        b = self.test_obj.browser
+        b.wait_visible(f"#vm-subVmTest1-hostdev-{self.vm_dev_id}-product")
+        if (self._model != "(Undefined)"):
+            b.wait_in_text(f"#vm-subVmTest1-hostdev-{self.vm_dev_id}-product", self._model)
+
+        b.wait_in_text(f"#vm-subVmTest1-hostdev-{self.vm_dev_id}-vendor", self._vendor)
+
+    def verify_backend(self):
+        xml = self.run_admin(f"virsh -c qemu:///{self.connection_name} dumpxml subVmTest1", self.connection_name)
+        xml_root = ET.fromstring(xml)
+        orig_xml_root = ET.fromstring(self._orig_xml)
+
+        if self.dev_type == "usb_device":
+            # Find all devices with the expected vendor and model and
+            # check whether one of them has been added
+
+            output = self.run_admin(f"virsh -c qemu:///{self.connection_name} nodedev-list --cap {self.dev_type}",
+                                    self.connection_name)
+            devices = output.splitlines()
+            devices = list(filter(None, devices))
+            for dev in devices:
+                node_xml = self.run_admin(f"virsh -c qemu:///{self.connection_name} nodedev-dumpxml --device {dev}",
+                                          self.connection_name)
+                cap = ET.fromstring(node_xml).find('capability')
+                vendor = cap.find('vendor')
+                product = cap.find('product')
+                if vendor.text == self._vendor and product.text == self._model:
+                    p_id = product.get('id')
+                    v_id = vendor.get('id')
+                    if find_usb_hostdev(xml_root, v_id, p_id) and not find_usb_hostdev(orig_xml_root, v_id, p_id):
+                        return
+
+        elif self.dev_type == "pci":
+            slot_parts = [int(p, 16) for p in re.split(r":|\.", self._slot)]
+            if find_pci_hostdev(xml_root, slot_parts) and not find_pci_hostdev(orig_xml_root, slot_parts):
+                return
+
+        raise Exception("Verification failed. No matching node device was found in VM's xml.")
+
+    def remove(self):
+        b = self.test_obj.browser
+        b.click(f"#delete-vm-subVmTest1-hostdev-{self.vm_dev_id}")
+        b.wait_in_text(".pf-v6-c-modal-box__body .pf-v6-c-description-list", "subVmTest1")
+        if (self._model != "(Undefined)"):
+            b.wait_in_text("#delete-resource-modal-product", self._model)
+        b.wait_in_text("#delete-resource-modal-vendor", self._vendor)
+
+        b.click('.pf-v6-c-modal-box__footer button:contains("Remove")')
+        b.wait_not_present("#delete-resource-modal")
+        b.wait_not_present(f"#vm-subVmTest1-hostdev-{self.vm_dev_id}-product")
+
+
+@testlib.nondestructive
+class TestMachinesHostDevs(machineslib.VirtualMachinesCase):
+
+    def testHostDevicesList(self):
+        b = self.browser
+        m = self.machine
+
+        self.createVm("subVmTest1")
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+        self.waitVmRow("subVmTest1")
+
+        b.wait_in_text("#vm-subVmTest1-system-state", "Running")
+
+        self.goToVmPage("subVmTest1")
+
+        b.wait_in_text("#vm-subVmTest1-hostdevs .pf-v6-c-empty-state__body", "No host devices")
+
+        # Test hot plug of USB host device
+        # A usb device might not always be present
+        nodedev_list = m.execute("virsh nodedev-list")
+        lines = nodedev_list.partition('\n')
+        for line in lines:
+            if "usb_usb" in line:
+                m.execute(f"echo \"{USB_HOSTDEV}\" > /tmp/usbhostedxml")
+                m.execute("virsh attach-device --domain subVmTest1 --file /tmp/usbhostedxml")
+
+                b.wait_in_text("#vm-subVmTest1-hostdev-1-type", "usb")
+                b.wait_in_text("#vm-subVmTest1-hostdev-1-vendor", "Linux Foundation")
+                b.wait_in_text("#vm-subVmTest1-hostdev-1-product", "1.1 root hub")
+                b.wait_in_text("#vm-subVmTest1-hostdev-1-source #device-1", "1")
+                b.wait_in_text("#vm-subVmTest1-hostdev-1-source #bus-1", "1")
+
+        m.execute("virsh destroy subVmTest1")
+        b.wait_in_text("#vm-subVmTest1-system-state", "Shut off")
+
+        # Test attachment of non-existent host device
+        m.execute(f"echo \"{USB_HOSTDEV_NONEXISTENT}\" > /tmp/usbnonexistenthostedxml")
+        m.execute("virsh attach-device --domain subVmTest1 --file /tmp/usbnonexistenthostedxml --config")
+        b.reload()
+        b.enter_page('/machines')
+
+        b.wait_in_text("#vm-subVmTest1-hostdev-1-vendor", "0xffff")
+        b.wait_in_text("#vm-subVmTest1-hostdev-1-product", "0xffff")
+        b.wait_in_text("#vm-subVmTest1-hostdev-1-source #device-1", "Unspecified")
+        b.wait_in_text("#vm-subVmTest1-hostdev-1-source #bus-1", "Unspecified")
+
+        m.execute("virsh detach-device --domain subVmTest1 --file /tmp/usbnonexistenthostedxml --config")
+
+        # Test offline attachment of PCI host device
+        # A pci device should always be present
+        m.execute(f"echo \"{PCI_HOSTDEV}\" > /tmp/pcihostedxml")
+        m.execute("virsh attach-device --domain subVmTest1 --file /tmp/pcihostedxml --persistent")
+        b.reload()
+        b.enter_page('/machines')
+
+        b.wait_in_text("#vm-subVmTest1-hostdev-1-type", "pci")
+        try:
+            m.execute("test -d /sys/devices/pci0000\\:00/0000\\:00\\:0f.0/")
+            b.wait_in_text("#vm-subVmTest1-hostdev-1-vendor", "Red Hat, Inc")
+            b.wait_in_text("#vm-subVmTest1-hostdev-1-product", "Virtio network device")
+            b.assert_pixels("#vm-subVmTest1-hostdevs", "vm-details-hostdevs-card", skip_layouts=["rtl"])
+        except subprocess.CalledProcessError:
+            pass
+
+        b.wait_in_text("#vm-subVmTest1-hostdev-1-source #slot-1", "0000:00:0f.0")
+
+        # QEMU version on RHEL doesn't support scsi-host devices
+        if not m.image.startswith("rhel") and not m.image.startswith("centos") and not m.image == "fedora-eln":
+            # Test the unsupported device type, e.g. scsi_host, doesn't have "Remove" button
+            m.execute(f"echo \"{SCSI_HOST_HOSTDEV}\" > /tmp/scsihost_hostdevxml")
+            m.execute("virsh attach-device --domain subVmTest1 --file /tmp/scsihost_hostdevxml --persistent")
+            b.reload()
+            b.enter_page('/machines')
+
+            b.wait_in_text("#vm-subVmTest1-hostdev-2-type", "scsi_host")
+            b.wait_not_present("#delete-vm-subVmTest1-hostdev-r2")
+
+    def testHostDevAddSessionConnection(self):
+        b = self.browser
+
+        self.run_admin("mkdir /tmp/vmdir", "session")
+        self.addCleanup(self.run_admin, "rm -rf /tmp/vmdir/", "session")
+
+        self.login_and_go("/machines", superuser=False)
+        self.waitPageInit()
+
+        self.createVm("subVmTest1", connection="session")
+
+        self.goToVmPage("subVmTest1", "session")
+        b.wait_visible("#vm-subVmTest1-hostdevs")
+
+        # users can't access host devices
+        HostDevAddDialog(
+            self,
+            "session",
+            dev_type="pci",
+            fail_message="Host device could not be attached",
+        ).execute()
+
+    def testHostDevAddSingleDevice(self):
+        b = self.browser
+        m = self.machine
+
+        m.execute("mkdir /tmp/vmdir")
+        self.addCleanup(m.execute, "rm -rf /tmp/vmdir/")
+
+        # this needs to be dynamic: some TF or custom test machines don't have such devices
+        has_usb = m.execute("virsh nodedev-list --cap usb_device").strip() != ""
+        has_pci = m.execute("virsh nodedev-list --cap pci").strip() != ""
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+
+        self.createVm("subVmTest1")
+
+        self.goToVmPage("subVmTest1")
+        b.wait_visible("#vm-subVmTest1-hostdevs")
+
+        # Add USB devices when the VM is running
+        b.wait_in_text("#vm-subVmTest1-system-state", "Running")
+        if has_usb:
+            HostDevAddDialog(self, "system", dev_type="usb_device").execute()
+
+        # Check the error if selecting no devices when the VM is running
+        dialog = HostDevAddDialog(self, "system", fail_message="No host device selected")
+        dialog.open()
+        dialog.add()
+        m.execute("while virsh dumpxml subVmTest1 | grep -A 5 hostdev; do sleep 1; done")
+        # Check no host devices attached after shutting off the VM
+        self.performAction("subVmTest1", "forceOff")
+        b.wait_in_text("#vm-subVmTest1-system-state", "Shut off")
+        m.execute("while virsh dumpxml subVmTest1 | grep -A 5 hostdev; do sleep 1; done")
+
+        if has_usb:
+            HostDevAddDialog(self, "system", dev_type="usb_device").execute()
+
+        if has_pci:
+            HostDevAddDialog(self, "system", dev_type="pci",).execute()
+
+    def testHostDevAddMultipleDevices(self, connectionName='system'):
+        b = self.browser
+
+        self.run_admin("mkdir /tmp/vmdir", connectionName)
+        self.addCleanup(self.run_admin, "rm -rf /tmp/vmdir/", connectionName)
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+        self.createVm("subVmTest1", running=False, connection=connectionName)
+        self.goToVmPage("subVmTest1", connectionName)
+
+        b.wait_visible("#vm-subVmTest1-hostdevs")
+        b.wait_not_present("#vm-subVmTest1-hostdev-1-product")
+
+        b.click("button#vm-subVmTest1-hostdevs-add")
+        b.wait_in_text(".pf-v6-c-modal-box .pf-v6-c-modal-box__header .pf-v6-c-modal-box__title", "Add host device")
+        b.click("input#pci")
+
+        b.set_checked(".pf-v6-c-table tr[data-row='0'] input", True)
+        slot1 = b.text("#vm-subVmTest1-hostdevs-dialog table tbody tr:nth-child(1) td:nth-child(4) dd")
+
+        b.set_checked(".pf-v6-c-table tr[data-row='1'] input", True)
+        slot2 = b.text("#vm-subVmTest1-hostdevs-dialog table tbody tr:nth-child(2) td:nth-child(4) dd")
+
+        # PCI devices will be sorted in the UI by slot
+        if slot1 > slot2:
+            (slot1, slot2) = (slot2, slot1)
+
+        orig_xml = self.run_admin(f"virsh -c qemu:///{connectionName} dumpxml subVmTest1", connectionName)
+        b.click(".pf-v6-c-modal-box__footer button:contains(Add)")
+        b.wait_not_present("#vm-subVmTest1-hostdevs-dialog")
+
+        b.wait_visible("#vm-subVmTest1-hostdev-1-product")
+        b.wait_in_text("#slot-1", slot1)
+
+        b.wait_visible("#vm-subVmTest1-hostdev-2-product")
+        b.wait_in_text("#slot-2", slot2)
+
+        xml = self.run_admin(f"virsh -c qemu:///{connectionName} dumpxml subVmTest1", connectionName)
+
+        xml_root = ET.fromstring(xml)
+        orig_root = ET.fromstring(orig_xml)
+
+        slot_parts1 = [int(p, 16) for p in re.split(r":|\.", slot1)]
+        self.assertTrue(find_pci_hostdev(xml_root, slot_parts1))
+        self.assertFalse(find_pci_hostdev(orig_root, slot_parts1))
+
+        slot_parts2 = [int(p, 16) for p in re.split(r":|\.", slot2)]
+        self.assertTrue(find_pci_hostdev(xml_root, slot_parts2))
+        self.assertFalse(find_pci_hostdev(orig_root, slot_parts2))
+
+
+if __name__ == '__main__':
+    testlib.test_main()

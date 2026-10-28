@@ -1,0 +1,100 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": [
+    "eslint",
+    "typescript",
+    "unicorn",
+    "oxc",
+    "import",
+    "node",
+    "promise",
+    "react",
+    "jsx-a11y"
+  ],
+  "env": {
+    "browser": true,
+    "es2022": true,
+    "node": true,
+    "commonjs": true
+  },
+  "globals": {
+    "require": "readonly",
+    "module": "readonly",
+    "cockpit": "readonly"
+  },
+  "settings": {
+    "react": {
+      "version": "19.0.0"
+    },
+    "import/resolver": {
+      "node": {
+        "moduleDirectory": [
+          "pkg/lib"
+        ],
+        "extensions": [
+          ".js",
+          ".jsx",
+          ".ts",
+          ".tsx"
+        ]
+      }
+    }
+  },
+  "rules": {
+    "no-var": "error",
+    "no-undef": "error",
+    "no-unused-vars": [
+      "error",
+      {
+        "args": "none",
+        "caughtErrors": "none",
+        "ignoreRestSiblings": true,
+        "vars": "all"
+      }
+    ],
+    "prefer-promise-reject-errors": [
+      "error",
+      {
+        "allowEmptyReject": true
+      }
+    ],
+    "react/jsx-no-useless-fragment": "error",
+    "react/rules-of-hooks": "error",
+    "react/exhaustive-deps": "error",
+    "jsx-a11y/anchor-is-valid": "off",
+    "typescript/no-explicit-any": "error",
+    "typescript/no-empty-object-type": "error",
+    "no-empty": [
+      "error",
+      {
+        "allowEmptyCatch": true
+      }
+    ],
+    "import/no-duplicates": "error",
+    "import/no-absolute-path": "error",
+    "node/no-exports-assign": "error",
+    "node/no-new-require": "error",
+    "node/no-path-concat": "error",
+    "promise/param-names": "error",
+    "promise/no-callback-in-promise": "off",
+    "react/immutability": "off",
+    "react/no-did-mount-set-state": "off",
+    "react/no-unescaped-entities": "error",
+    "react/no-unknown-property": "error",
+    "react/self-closing-comp": "error",
+    "react/set-state-in-effect": "off",
+    "react/jsx-fragments": [
+      "error",
+      "syntax"
+    ]
+  },
+  "categories": {
+    "correctness": "error",
+    "suspicious": "off",
+    "pedantic": "off",
+    "perf": "off",
+    "style": "off",
+    "restriction": "off",
+    "nursery": "off"
+  }
+}

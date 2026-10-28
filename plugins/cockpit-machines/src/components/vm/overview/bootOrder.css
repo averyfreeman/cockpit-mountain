@@ -1,0 +1,14 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
+.boot-order-modal-cell {
+    display: flex;
+}
+
+.boot-order-description {
+    flex: 1 0 30%;
+    flex-basis: 30%;
+    font-weight: var(--pf-t--global--font--weight--body--bold);
+}
+
+.boot-order-additional-info {
+    flex-basis: 70%;
+}

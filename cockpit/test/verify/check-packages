@@ -1,0 +1,102 @@
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
+
+#
+# Copyright (C) 2013 Red Hat, Inc.
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
+
+import testlib
+
+test_manifest = """
+{
+  "tools": {
+    "test": {
+      "label": "Test"
+    }
+  },
+
+  "content-security-policy": "script-src 'self' 'unsafe-inline'"
+}
+"""
+
+test_html = """
+<html>
+  <head>
+    <meta charset="utf-8">
+    <script src="../base1/cockpit.js"></script>
+    <script>
+      cockpit.transport.wait(function () { });
+    </script>
+  </head>
+  <body>
+    <h1>Test</h1>
+  </body>
+</html>
+"""
+
+
+@testlib.nondestructive
+@testlib.skipBeiboot("no local cockpit packages in beiboot mode")
+class TestPackages(testlib.MachineCase):
+
+    def testBasic(self):
+        m = self.machine
+        b = self.browser
+
+        self.restore_dir("/usr/local/share/cockpit")
+
+        def reload_packages():
+            b.go("/playground/pkgs")
+            b.enter_page("/playground/pkgs")
+            b.click("#reload")
+
+        def check_nav_entry(label, present):
+            b.switch_to_top()
+            if present:
+                b.wait_visible(f"#nav-system li:contains('{label}')")
+            else:
+                b.wait_not_present(f"#nav-system li:contains('{label}')")
+
+        self.login_and_go("/playground/pkgs")
+
+        check_nav_entry("Terminal", present=True)
+
+        m.write("/usr/local/share/cockpit/test/manifest.json", test_manifest)
+        m.write("/usr/local/share/cockpit/test/test.html", test_html)
+        reload_packages()
+
+        b.switch_to_top()
+        b.click("#nav-system a:contains('Test')")
+
+        b.enter_page("/test/test")
+        b.wait_text("h1", "Test")
+
+        m.execute("rm -rf /usr/local/share/cockpit/test")
+        reload_packages()
+        check_nav_entry("Test", present=False)
+
+        # Hide the terminal with a system override
+        m.write("/etc/cockpit/systemd.override.json", """{
+    "tools": {
+        "terminal": null
+    }
+}""")
+        reload_packages()
+        check_nav_entry("Terminal", present=False)
+
+        # user override on top which renames the services label
+        self.restore_dir("/home/admin")
+        m.write("/home/admin/.config/cockpit/systemd.override.json", """{
+    "menu": {
+        "services": { "label": "Hackices" }
+    }
+}""")
+        reload_packages()
+        check_nav_entry("Services", present=False)
+        check_nav_entry("Hackices", present=True)
+        # it adds to, not replaces the /etc override
+        check_nav_entry("Terminal", present=False)
+
+
+if __name__ == '__main__':
+    testlib.test_main()

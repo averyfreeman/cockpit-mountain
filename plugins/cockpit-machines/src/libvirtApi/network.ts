@@ -1,0 +1,204 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ *
+ * Copyright (C) 2021 Red Hat, Inc.
+ */
+
+/*
+ * Provider for Libvirt using libvirt-dbus API.
+ * See https://github.com/libvirt/libvirt-dbus
+ */
+import cockpit from 'cockpit';
+import { appState } from '../state';
+
+import type { ConnectionName, Network } from '../types';
+import type { NetworkSpec } from '../libvirt-xml-create.js';
+
+import { getNetworkXML } from '../libvirt-xml-create.js';
+import { parseNetDumpxml } from '../libvirt-xml-parse.js';
+import { DBusProps, get_string_prop, get_boolean_prop, call, timeout, Enum } from './helpers.js';
+
+export function networkActivate({
+    connectionName,
+    objPath
+} : {
+    connectionName: ConnectionName,
+    objPath: string
+}): Promise<void> {
+    return call(connectionName, objPath, 'org.libvirt.Network', 'Create', [], { timeout, type: '' });
+}
+
+interface StaticHostEntriesSpec {
+    connectionName: ConnectionName,
+    objPath: string,
+    macAddress: string,
+    ipAddress: string,
+    parentIndex: number,
+    isNetworkActive: boolean,
+}
+
+export function networkAddStaticHostEntries(params: StaticHostEntriesSpec): Promise<void> {
+    return networkUpdateStaticHostEntries({ ...params, commandFlag: Enum.VIR_NETWORK_UPDATE_COMMAND_ADD_LAST });
+}
+
+export function networkCreate({
+    connectionName,
+    name,
+    forwardMode,
+    device,
+    ipv4,
+    netmask,
+    ipv6,
+    prefix,
+    ipv4DhcpRangeStart,
+    ipv4DhcpRangeEnd,
+    ipv6DhcpRangeStart,
+    ipv6DhcpRangeEnd
+} : { connectionName: ConnectionName } & NetworkSpec): Promise<void> {
+    const netXmlDesc = getNetworkXML({
+        name,
+        forwardMode,
+        ipv4,
+        netmask,
+        ipv6,
+        prefix,
+        device,
+        ipv4DhcpRangeStart,
+        ipv4DhcpRangeEnd,
+        ipv6DhcpRangeStart,
+        ipv6DhcpRangeEnd
+    });
+
+    return call(connectionName, '/org/libvirt/QEMU', 'org.libvirt.Connect', 'NetworkDefineXML', [netXmlDesc], { timeout, type: 's' });
+}
+
+export function networkDeactivate({
+    connectionName,
+    objPath
+} : {
+    connectionName: ConnectionName,
+    objPath: string,
+}): Promise<void> {
+    return call(connectionName, objPath, 'org.libvirt.Network', 'Destroy', [], { timeout, type: '' });
+}
+
+export async function networkGetAll({
+    connectionName,
+} : {
+    connectionName: ConnectionName,
+}): Promise<void> {
+    try {
+        const [objPaths]: [string[]] = await call(connectionName, '/org/libvirt/QEMU', 'org.libvirt.Connect', 'ListNetworks', [0], { timeout, type: 'u' });
+        await Promise.all(objPaths.map(path => networkGet({ connectionName, id: path })));
+    } catch (ex) {
+        console.warn('GET_ALL_NETWORKS action failed:', String(ex));
+        throw ex;
+    }
+}
+
+/*
+ * Read properties of a single Network
+ *
+ * @param Network object path
+ */
+export async function networkGet({
+    id: objPath,
+    connectionName,
+    updateOnly,
+} : {
+    id: string,
+    connectionName: ConnectionName,
+    updateOnly?: boolean,
+}): Promise<void> {
+    try {
+        const props: Partial<Network> & { id: string, connectionName: ConnectionName, name: string } = {
+            id: objPath,
+            connectionName,
+            name: "",
+        };
+
+        const [resultProps] = await call<[DBusProps]>(connectionName, objPath, 'org.freedesktop.DBus.Properties', 'GetAll', ['org.libvirt.Network'], { timeout, type: 's' });
+        /* Sometimes not all properties are returned; for example when some network got deleted while part
+            * of the properties got fetched from libvirt. Make sure that there is check before reading the attributes.
+            */
+        if ("Active" in resultProps)
+            props.active = get_boolean_prop(resultProps, "Active");
+        if ("Persistent" in resultProps)
+            props.persistent = get_boolean_prop(resultProps, "Persistent");
+        if ("Autostart" in resultProps)
+            props.autostart = get_boolean_prop(resultProps, "Autostart");
+        if ("Name" in resultProps)
+            props.name = get_string_prop(resultProps, "Name");
+
+        const [xml] = await call<[string]>(connectionName, objPath, 'org.libvirt.Network', 'GetXMLDesc', [0], { timeout, type: 'u' });
+        const network: Network = {
+            ...parseNetDumpxml(xml),
+            ...props,
+        };
+
+        if (updateOnly)
+            appState.updateNetwork(network, network);
+        else
+            appState.addNetwork(network);
+    } catch (ex) {
+        console.warn('GET_NETWORK action failed for path', objPath, String(ex));
+    }
+}
+
+export async function networkChangeAutostart({
+    network,
+    autostart
+} : {
+    network: Network,
+    autostart: boolean,
+}): Promise<void> {
+    const [networkPath] = await call<[string]>(network.connectionName, '/org/libvirt/QEMU', 'org.libvirt.Connect',
+                                               'NetworkLookupByName', [network.name], { timeout, type: 's' });
+    const args = ['org.libvirt.Network', 'Autostart', cockpit.variant('b', autostart)];
+
+    await call(network.connectionName, networkPath, 'org.freedesktop.DBus.Properties', 'Set', args, { timeout, type: 'ssv' });
+    await networkGet({ connectionName: network.connectionName, id: network.id });
+}
+
+export function networkRemoveStaticHostEntries(params: StaticHostEntriesSpec): Promise<void> {
+    return networkUpdateStaticHostEntries({ ...params, commandFlag: Enum.VIR_NETWORK_UPDATE_COMMAND_DELETE });
+}
+
+export function networkUndefine({
+    connectionName,
+    objPath
+} : {
+    connectionName: ConnectionName,
+    objPath: string,
+}): Promise<void> {
+    return call(connectionName, objPath, 'org.libvirt.Network', 'Undefine', [], { timeout, type: '' });
+}
+
+function networkUpdateStaticHostEntries({
+    connectionName,
+    objPath,
+    macAddress,
+    ipAddress,
+    parentIndex,
+    isNetworkActive,
+    commandFlag
+} : StaticHostEntriesSpec & { commandFlag: number }): Promise<void> {
+    let flags = Enum.VIR_NETWORK_UPDATE_AFFECT_CONFIG;
+    if (isNetworkActive)
+        flags |= Enum.VIR_NETWORK_UPDATE_AFFECT_LIVE;
+
+    const doc = document.implementation.createDocument('', '', null);
+    const hostElem = doc.createElement('host');
+    hostElem.setAttribute('mac', macAddress);
+    hostElem.setAttribute('ip', ipAddress);
+    const hostXml = new XMLSerializer().serializeToString(hostElem);
+
+    return call(
+        connectionName,
+        objPath,
+        'org.libvirt.Network',
+        'Update',
+        [commandFlag, Enum.VIR_NETWORK_SECTION_IP_DHCP_HOST, parentIndex, hostXml, flags]
+        , { timeout, type: 'uuisu' }
+    );
+}

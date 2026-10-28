@@ -1,0 +1,24 @@
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/common/pywrap", sys.argv)
+# SPDX-License-Identifier: LGPL-2.1-or-later
+#
+# Copyright (C) 2023 Red Hat, Inc.
+import testlib
+
+
+@testlib.nondestructive
+class TestMachinesManifest(testlib.MachineCase):
+
+    def testBasic(self):
+        b = self.browser
+        m = self.machine
+
+        self.restore_file("/usr/share/dbus-1/system.d/org.libvirt.conf")
+        m.execute("rm /usr/share/dbus-1/system.d/org.libvirt.conf")
+        self.login_and_go(None)
+        b.wait_in_text("#host-apps .pf-m-current", "Overview")
+
+        self.assertNotIn("Virtual machines", b.text("#host-apps"))
+
+
+if __name__ == '__main__':
+    testlib.test_main()

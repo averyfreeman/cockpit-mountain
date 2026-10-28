@@ -1,0 +1,60 @@
+{
+  "name": "file-sharing",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build:app": "run-p type-check \"build-only {@}\" --",
+    "build": "run-p build:app",
+    "preview": "vite preview",
+    "test:app": "vitest run",
+    "test": "vitest run",
+    "build-only": "vite build",
+    "type-check": "vue-tsc --skipLibCheck",
+    "lint": "oxlint src/",
+    "format": "prettier --write src/"
+  },
+  "dependencies": {
+    "@45drives/houston-common-css": "workspace:^",
+    "@45drives/houston-common-lib": "workspace:^",
+    "@45drives/houston-common-ui": "workspace:^",
+    "@headlessui/vue": "^1.7.22",
+    "@heroicons/vue": "^2.0.18",
+    "monet": "^0.9.3",
+    "neverthrow": "^6.2.1",
+    "p-limit": "^7.2.0",
+    "uuid": "^9.0.1",
+    "vue": "^3.5",
+    "vue-router": "^4.3.2",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@fontsource/red-hat-text": "^5.0.18",
+    "@tailwindcss/forms": "^0.5.7",
+    "@tsconfig/node20": "^20.1.4",
+    "@types/deep-equal": "^1.0.4",
+    "@types/jsdom": "^21.1.6",
+    "@types/node": "catalog:",
+    "@vitejs/plugin-vue": "catalog:",
+    "@vue/test-utils": "^2.4.6",
+    "@vue/tsconfig": "^0.5.1",
+    "autoprefixer": "^10.4.19",
+    "deep-equal": "^2.2.3",
+    "jsdom": "^24.0.0",
+    "npm-run-all2": "^6.1.2",
+    "postcss": "^8.4.38",
+    "postcss-modules": "^6.0.0",
+    "tailwindcss": "^3.4.3",
+    "ts-node": "^10.9.2",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "vite-plugin-vue-devtools": "catalog:",
+    "vitest": "catalog:",
+    "vue-tsc": "catalog:",
+    "oxlint": "catalog:"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

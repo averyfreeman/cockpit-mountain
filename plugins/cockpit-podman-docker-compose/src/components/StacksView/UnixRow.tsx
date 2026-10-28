@@ -1,0 +1,315 @@
+import { useState, useCallback, useEffect } from "react";
+import { useTranslation } from "react-i18next";
+import { useContextMenu } from "../../hooks/useContextMenu";
+import { ContextMenu } from "./ContextMenu";
+import {
+  Button,
+  Modal,
+  ModalHeader,
+  ModalBody,
+  ModalFooter,
+  Dropdown,
+  DropdownList,
+  DropdownItem,
+  MenuToggle,
+  Divider,
+  Spinner,
+} from "@patternfly/react-core";
+import { Tooltip } from "@rxtx4816/cockpit-plugin-base-react/components";
+import { type ComposeStack, parseStackStatus, parseServiceCount, formatBytes, getPortUrl } from "../../api";
+import { effectiveStatus, isStackUp } from "../../lib/stackStatus";
+import {
+  EllipsisVIcon,
+  ArrowsAltVIcon,
+  PauseCircleIcon,
+  PlayCircleIcon,
+  BellIcon,
+  ListAltIcon,
+  PlayIcon,
+  BroomIcon,
+  BanIcon,
+  ArchiveIcon,
+  RedoAltIcon,
+} from "@patternfly/react-icons";
+import { useStackActions } from "../../hooks/useStackActions";
+import { useServiceActions } from "../../hooks/useServiceActions";
+import { useStackContainers } from "../../hooks/useStackContainers";
+import { useContainerStats } from "../../hooks/useContainerStats";
+import { useAutoRefresh } from "../../hooks/useAutoRefresh";
+import { ContainerTable } from "./ContainerTable";
+import { LogsModal } from "../LogsModal";
+import { splitConfigFiles } from "../../lib/configFiles";
+import "./UnixRow.css";
+
+interface UnixRowProps {
+  stack: ComposeStack;
+  expanded: boolean;
+  onToggle: () => void;
+  onLogs: () => void;
+  onYaml: () => void;
+  onInfo: () => void;
+  onDown: () => void;
+  onKill: () => void;
+  onUp: () => void;
+  onPull: () => void;
+  onEvents: () => void;
+  onTop: () => void;
+  onExec: () => void;
+  onRun: () => void;
+  onPrune: () => void;
+  onBackup: () => void;
+  onScale: () => void;
+  onActingChange: (delta: 1 | -1) => void;
+  onRefresh: () => void;
+  isSelected?: boolean;
+  onToggleSelect?: () => void;
+  globalActing?: boolean;
+}
+
+const STATUS_LABEL: Record<string, { text: string; cls: string }> = {
+  running: { text: "RUNNING", cls: "ur-status--running" },
+  partial: { text: "PARTIAL", cls: "ur-status--partial" },
+  stopped: { text: "STOPPED", cls: "ur-status--stopped" },
+  paused:  { text: "PAUSED",  cls: "ur-status--paused"  },
+  unknown: { text: "UNKNOWN", cls: "ur-status--stopped"  },
+};
+
+export function UnixRow({
+  stack, expanded, onToggle, onLogs, onYaml, onInfo, onDown, onKill, onUp, onPull,
+  onEvents, onTop, onExec, onRun, onPrune, onBackup, onScale, onActingChange, onRefresh,
+  isSelected = false, onToggleSelect, globalActing = false,
+}: UnixRowProps) {
+  const { t } = useTranslation();
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [confirmStopOpen, setConfirmStopOpen] = useState(false);
+  const [confirmRestartOpen, setConfirmRestartOpen] = useState(false);
+
+  const baseStatus = parseStackStatus(stack.Status);
+  const count = parseServiceCount(stack.Status);
+  const configFiles = splitConfigFiles(stack.ConfigFiles);
+
+  const { acting, doAction } = useStackActions(stack.Name, configFiles, onActingChange);
+  const { actingService, doServiceAction } = useServiceActions(stack, onActingChange);
+  const [logsService, setLogsService] = useState<string | null>(null);
+  const { containers, loading: loadingContainers, load: loadContainers, clear: clearContainers } =
+    useStackContainers(stack.Name, configFiles, baseStatus);
+  const { ports, stats } = useContainerStats(stack.Name, baseStatus);
+
+  const status = effectiveStatus(baseStatus, containers);
+
+  const afterAction = useCallback(async () => {
+    clearContainers();
+    await loadContainers();
+    // Refresh the page-level stack list immediately rather than waiting for its own poll
+    // (which can now be backed off several seconds on constrained hardware) — otherwise a
+    // finished action looks stuck until the next scheduled tick happens to land.
+    onRefresh();
+  }, [clearContainers, loadContainers, onRefresh]);
+
+  const afterServiceAction = useCallback(async () => {
+    await loadContainers();
+    onRefresh();
+  }, [loadContainers, onRefresh]);
+
+  const handleToggle = () => {
+    onToggle();
+    if (!expanded) void loadContainers();
+  };
+
+  useEffect(() => { void loadContainers(); }, [loadContainers]);
+  useAutoRefresh(loadContainers, acting ? 500 : 3000, globalActing && !acting && !actingService);
+
+  const sl = STATUS_LABEL[status] ?? STATUS_LABEL.unknown;
+  const isUp = isStackUp(status);
+  const cpuStr = stats ? `${stats.cpu.toFixed(1)}%` : "—";
+  const memStr = stats ? formatBytes(stats.mem) : "—";
+
+
+  // The context menu (#334) shows exactly this layout's kebab items; choosing one
+  // closes whichever of the two menus it was picked from.
+  const contextMenu = useContextMenu();
+  const closeMenus = () => { setMenuOpen(false); contextMenu.close(); };
+  const menuItems = (
+    <>
+              <DropdownItem key="restart" icon={<RedoAltIcon />} isDisabled={status === "stopped" || status === "unknown"} onClick={() => { closeMenus(); setConfirmRestartOpen(true); }}>{t("actions.restart")}</DropdownItem>
+              <DropdownItem key="pause" icon={status === "paused" ? <PlayCircleIcon /> : <PauseCircleIcon />} isDisabled={status === "stopped" || status === "unknown"} onClick={() => { closeMenus(); void doAction(status === "paused" ? "unpause" : "pause", afterAction); }}>{status === "paused" ? t("actions.unpause") : t("actions.pause")}</DropdownItem>
+              <DropdownItem key="scale" icon={<ArrowsAltVIcon />} onClick={() => { closeMenus(); onScale(); }}>{t("actions.scale")}</DropdownItem>
+              <DropdownItem key="events" icon={<BellIcon />} onClick={() => { closeMenus(); onEvents(); }}>{t("actions.events")}</DropdownItem>
+              <DropdownItem key="top" icon={<ListAltIcon />} onClick={() => { closeMenus(); onTop(); }}>{t("actions.top")}</DropdownItem>
+              <DropdownItem key="run" icon={<PlayIcon />} onClick={() => { closeMenus(); onRun(); }}>{t("actions.run")}</DropdownItem>
+              <DropdownItem key="backup" icon={<ArchiveIcon />} onClick={() => { closeMenus(); onBackup(); }}>{t("actions.backup")}</DropdownItem>
+              <Divider component="li" />
+              <DropdownItem key="prune" icon={<BroomIcon />} isDanger onClick={() => { closeMenus(); onPrune(); }}>{t("actions.prune")}</DropdownItem>
+              <DropdownItem key="kill" icon={<BanIcon />} isDanger onClick={() => { closeMenus(); onKill(); }}>{t("actions.kill")}</DropdownItem>
+    </>
+  );
+  return (
+    <>
+      <ContextMenu position={contextMenu.position} onClose={contextMenu.close} ariaLabel={t("actions.more_actions_for", { name: stack.Name })}>
+        {menuItems}
+      </ContextMenu>
+      <div
+        onContextMenu={acting ? undefined : contextMenu.onContextMenu}
+        onKeyDown={acting ? undefined : contextMenu.onKeyDown}
+        className={`ur-row${expanded ? " ur-row--expanded" : ""}${acting ? " ur-row--acting" : ""}`}
+        data-status={status}
+        data-stack-name={stack.Name}
+      >
+        <button className="ur-expand-btn" onClick={handleToggle} aria-expanded={expanded} aria-label={expanded ? "collapse" : "expand"}>
+          {expanded ? "▾" : "▸"}
+        </button>
+
+        <span className="ur-col ur-col--name" title={stack.Name}>
+          {stack.Name}
+        </span>
+
+        <span className={`ur-col ur-col--status ur-status ${sl.cls}`}>
+          <span className="ur-status-dot" />
+          {sl.text}
+        </span>
+
+        <span className="ur-col ur-col--svc">{count}</span>
+
+        <span className={`ur-col ur-col--cpu ${stats && stats.cpu > 80 ? "ur-val--high" : stats && stats.cpu > 50 ? "ur-val--med" : "ur-val--ok"}`}>
+          {cpuStr}
+        </span>
+
+        <span className="ur-col ur-col--mem">{memStr}</span>
+
+        <span className="ur-col ur-col--ports">
+          {ports.length === 0 ? "—" : ports.slice(0, 2).map(p => {
+            const url = getPortUrl(p);
+            return url ? (
+              <span
+                key={p.label}
+                className="ur-port-link"
+                onClick={() => window.open(url, "_blank", "noopener,noreferrer")}
+                title={url}
+              >
+                :{p.hostPort ?? p.label.split(":").pop()}
+              </span>
+            ) : (
+              <span key={p.label} className="ur-port">:{p.hostPort ?? p.label.split(":").pop()}</span>
+            );
+          })}
+          {ports.length > 2 && <span className="ur-port"> +{ports.length - 2}</span>}
+        </span>
+
+        <div className="ur-col ur-col--actions">
+          {onToggleSelect && (
+            <Tooltip content={t("stacks.select_stack", { name: stack.Name })}>
+              <button
+                className={`ur-key ur-key--select${isSelected ? " ur-key--select-on" : ""}`}
+                onClick={onToggleSelect}
+                aria-label={t("stacks.select_stack", { name: stack.Name })}
+                aria-pressed={isSelected}
+              >
+                {isSelected ? "[x]" : "[ ]"}
+              </button>
+            </Tooltip>
+          )}
+          {isUp ? (
+            <Tooltip content={t("actions.stop")}>
+              <button className="ur-key ur-key--stop" onClick={() => setConfirmStopOpen(true)} disabled={acting}>[stop]</button>
+            </Tooltip>
+          ) : (
+            <Tooltip content={t("actions.up_title")}>
+              <button className="ur-key ur-key--up" onClick={onUp} disabled={acting}>[up]</button>
+            </Tooltip>
+          )}
+          <Tooltip content={t("actions.down_title")}>
+            <button className="ur-key ur-key--down" onClick={onDown} disabled={acting}>[down]</button>
+          </Tooltip>
+          <Tooltip content={t("actions.logs_title")}>
+            <button className="ur-key" onClick={onLogs} disabled={acting}>[log]</button>
+          </Tooltip>
+          <Tooltip content={t("actions.shell")}>
+            <button className="ur-key" onClick={onExec} disabled={acting}>[sh]</button>
+          </Tooltip>
+          <Tooltip content={t("actions.edit_title")}>
+            <button className="ur-key" onClick={onYaml} disabled={acting}>[ed]</button>
+          </Tooltip>
+          <Tooltip content={t("actions.pull_title")}>
+            <button className="ur-key" onClick={onPull} disabled={acting}>[pull]</button>
+          </Tooltip>
+          <Tooltip content={t("actions.info_title")}>
+            <button className="ur-key" onClick={onInfo} disabled={acting}>[?]</button>
+          </Tooltip>
+
+          <Dropdown
+            isOpen={menuOpen}
+            onOpenChange={(o) => setMenuOpen(o)}
+            toggle={(ref) => (
+              <MenuToggle
+                ref={ref}
+                variant="plain"
+                onClick={() => setMenuOpen(o => !o)}
+                aria-label={t("actions.more_actions_for", { name: stack.Name })}
+                isDisabled={acting}
+                className="ur-menu-toggle"
+              >
+                <EllipsisVIcon />
+              </MenuToggle>
+            )}
+            popperProps={{ position: "right" }}
+          >
+            <DropdownList>
+              {menuItems}
+            </DropdownList>
+          </Dropdown>
+        </div>
+      </div>
+
+      {expanded && (
+        <div className="ur-expanded">
+          <div className="ur-expanded-inner">
+            <span className="ur-expanded-prefix">└── containers</span>
+            {loadingContainers ? (
+              <div className="ur-expanded-loading"><Spinner size="sm" /> loading...</div>
+            ) : containers.length === 0 ? (
+              <span className="ur-expanded-empty">{t("stack_row.no_containers")}</span>
+            ) : (
+              <div className="ur-expanded-table">
+                <ContainerTable
+                  containers={containers}
+                  actions={{
+                    actingService,
+                    onStart: s => { void doServiceAction("start", s, afterServiceAction); },
+                    onStop: s => { void doServiceAction("stop", s, afterServiceAction); },
+                    onRestart: s => { void doServiceAction("restart", s, afterServiceAction); },
+                    onLogs: s => setLogsService(s),
+                  }}
+                />
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+      {logsService && (
+        <LogsModal stack={stack} initialService={logsService} onClose={() => setLogsService(null)} />
+      )}
+
+      {confirmStopOpen && (
+        <Modal isOpen variant="small" onClose={() => setConfirmStopOpen(false)} aria-label={t("stop_modal.aria_label")}>
+          <ModalHeader title={t("stop_modal.title", { name: stack.Name })} />
+          <ModalBody><p>{t("stop_modal.body")}</p></ModalBody>
+          <ModalFooter>
+            <Button variant="danger" onClick={() => { setConfirmStopOpen(false); void doAction("stop", afterAction); }}>{t("stop_modal.confirm_button")}</Button>
+            <Button variant="link" onClick={() => setConfirmStopOpen(false)}>{t("common.cancel")}</Button>
+          </ModalFooter>
+        </Modal>
+      )}
+
+      {confirmRestartOpen && (
+        <Modal isOpen variant="small" onClose={() => setConfirmRestartOpen(false)} aria-label={t("restart_modal.aria_label")}>
+          <ModalHeader title={t("restart_modal.title", { name: stack.Name })} />
+          <ModalBody><p>{t("restart_modal.body")}</p></ModalBody>
+          <ModalFooter>
+            <Button variant="warning" onClick={() => { setConfirmRestartOpen(false); void doAction("restart", afterAction); }}>{t("restart_modal.confirm_button")}</Button>
+            <Button variant="link" onClick={() => setConfirmRestartOpen(false)}>{t("common.cancel")}</Button>
+          </ModalFooter>
+        </Modal>
+      )}
+    </>
+  );
+}

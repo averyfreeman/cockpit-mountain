@@ -1,0 +1,2168 @@
+#!/usr/bin/python3
+# hangar-run — privileged backup runner invoked by hangar-backup@<job>.service.
+#
+# Why this exists instead of chained ExecStartPre= directives: systemd's unit
+# directives fail opaquely (a failing ExecStartPre aborts the unit with no useful
+# record of which hook died), and they cannot capture restic's --json stream, which
+# is the whole reason we chose restic. So orchestration lives in one testable place.
+#
+# python3 is a safe dependency: cockpit-bridge is Python, so every host that can run
+# Cockpit already has it.
+#
+# Exit contract:
+#   0  success, or success with unreadable files (restic exit 3) — see NOTE below
+#   1  configuration error
+#   2  backup failed
+#   3  retention/prune failed after a successful backup
+#   4  a hook failed
+#
+# NOTE on restic exit 3: the snapshot IS written; some files could not be read.
+# Reporting that as a unit failure trains users to ignore real failures, so the unit
+# succeeds and the run is recorded with status "partial". The UI surfaces it, and the
+# state file below is what makes it visible after the journal rotates.
+#
+# The size guard (below) obeys the same rule for the same reason and adds NO exit
+# code: a snapshot that was written stays a success even when the cleanup after it
+# could not reach the size target. It is recorded with status "size-limit-exceeded"
+# and a journal warning naming the shortfall instead.
+
+import datetime
+import json
+import math
+import os
+import re
+import signal
+import subprocess
+import sys
+import time
+
+CONF_DIR = os.environ.get("HANGAR_CONF_DIR", "/etc/hangar")
+STATE_DIR = os.environ.get("HANGAR_STATE_DIR", "/var/lib/hangar/state")
+# Must equal CACHE_DIR in js/engine/restic.js; tests/smoke.mjs asserts they agree.
+# restic finds its cache from $XDG_CACHE_HOME or $HOME, and a systemd unit has
+# neither — so the path is passed explicitly on every command rather than left
+# to whatever environment happens to be around.
+RESTIC_CACHE_DIR = os.environ.get("HANGAR_CACHE_DIR", "/var/cache/hangar/restic")
+
+# Where dumped libvirt domain XML is staged before restic picks it up. Under
+# /var/lib rather than /etc because it is regenerated on every run and is not
+# configuration. Mirrors XML_DIR in js/core/sources-libvirt.js.
+LIBVIRT_XML_DIR = os.environ.get("HANGAR_LIBVIRT_XML_DIR", "/var/lib/hangar/libvirt")
+
+# Deadline for the short helper commands (volume inspect, virsh). libvirtd wedges
+# rather than refusing — qemu:///system times out outright on some hosts — and a
+# backup unit that hangs forever is invisible to the operator in a way a failed
+# one is not. 20s mirrors TIMEOUT_MS in js/core/sources-libvirt.js.
+CMD_TIMEOUT = float(os.environ.get("HANGAR_CMD_TIMEOUT", "20"))
+
+# restic exit codes we care about (see docs/CONVENTIONS.md).
+EXIT_READ_ERRORS = 3
+EXIT_REPO_MISSING = 10
+EXIT_REPO_LOCKED = 11
+EXIT_WRONG_PASSWORD = 12
+EXIT_CANCELLED = 130
+
+KIND_BY_CODE = {
+    0: "OK",
+    1: "GENERIC",
+    2: "GO_RUNTIME",
+    EXIT_READ_ERRORS: "READ_ERRORS",
+    EXIT_REPO_MISSING: "REPO_MISSING",
+    EXIT_REPO_LOCKED: "REPO_LOCKED",
+    EXIT_WRONG_PASSWORD: "WRONG_PASSWORD",
+    EXIT_CANCELLED: "CANCELLED",
+}
+
+# ---- a cloud destination whose authorisation has lapsed ---------------------
+#
+# restic SPAWNS rclone for an `rclone:` repository, so rclone's authorisation
+# error arrives inside RESTIC's stderr. There is no exit code for it — restic
+# collapses every backend failure into 1 — which makes the text the only signal
+# there is. And this is precisely the failure that happens unattended: Box
+# expires a refresh token after 60 days of inactivity, Google revokes one, a
+# tenant policy retires another. Without this the nightly unit fails at 03:00
+# with a message nobody reads, forever.
+#
+# Deliberately a copy of isAuthExpired in js/core/rclone.js rather than a call
+# into it: this helper must run with no Cockpit session and no node present.
+# tests/integration/hangar-run.test.js holds the two implementations together.
+#
+# The judgement that matters is the same one: a bare "401 Unauthorized" or
+# "403 Forbidden" is NOT expiry — it is also what an ordinary permission
+# problem looks like — so a status code only counts alongside a token signal.
+AUTH_EXPIRED_RES = [
+    re.compile(p, re.IGNORECASE) for p in (
+        r"couldn.?t\s+fetch\s+token",            # rclone: "…maybe it has expired?"
+        r"config\s+reconnect",                   # rclone naming its own remedy
+        r"invalid_grant",                        # Google/Box refresh-token refusal
+        r"\btokens?\b[^\n]{0,48}\b(expired|revoked)\b",
+        r"\b(expired|revoked)\b[^\n]{0,24}\btokens?\b",
+        r"refresh[ _-]?tokens?\b[^\n]{0,32}\b(is\s+not\s+set|not\s+set|missing)\b",
+    )
+]
+
+AMBIGUOUS_AUTH_RE = re.compile(
+    r"(\b40[13]\b|\bunauthoriz(?:ed|ation)\b|\bforbidden\b|access[ _]denied"
+    r"|permission[ _]denied|authentication\s+failed)", re.IGNORECASE)
+
+AUTH_SIGNAL_RE = re.compile(
+    r"(\boauth2?\b|\btokens?\b|\bbearer\b|invalid_grant|grant_type|\bre-?authoriz\w*)",
+    re.IGNORECASE)
+
+# A file NAME is not a diagnosis. Mirrors PATHISH_RE in js/core/rclone.js.
+#
+# restic and rclone both report the path they failed on, and a path may contain
+# the very words that decide here: /home/u/.config/gcloud/token,
+# secrets/token.json, /srv/oauth2/data, bearer.key, invalid_grant.json,
+# /var/log/token_expired.log. Read as signal, any of those turns an ordinary
+# "permission denied" or "403 Forbidden" into "your sign-in expired" — the
+# operator re-authorises a destination that was never the problem while the real
+# cause is hidden.
+#
+# What counts as a path is narrower than "contains a slash", and Dropbox is why:
+# its error body is {"error_summary": "expired_access_token/..."}, a slash inside
+# the API code for precisely this failure. Blanking every slash-bearing run would
+# delete the one word that decides. So a run only counts as a path when it says
+# so: it is a URL or starts with /, ./, ../ or ~/ (everything from that marker
+# goes), or it is a relative path ending in a file extension — secrets/token.json,
+# token/db.sql — in which case the whole thing goes. "expired_access_token/..."
+# matches neither as a whole; only its "/..." tail goes, and the code survives.
+PATHISH_RE = re.compile(
+    r"(?:[A-Za-z][A-Za-z0-9+.-]*://|~/|\.{1,2}/|/)[^\s\"'{}<>|]*"
+    r"|[A-Za-z0-9_.@+-]+(?:/[A-Za-z0-9_.@+-]+)+\.[A-Za-z0-9]{1,8}")
+
+# Exactly what Python's str.splitlines() breaks on, spelled out so the JavaScript
+# can match it character for character. splitlines() was used here and /\r?\n/
+# there, and the difference is not academic: a bare CARRIAGE RETURN, which fills
+# rclone's progress output, is a line break to one and an ordinary character to
+# the other. "403 Forbidden\rTransferred: 1 token" was one line on the JavaScript
+# side, carrying a status code and a token word — a false expiry the runner never
+# saw.
+LINE_SPLIT_RE = re.compile("\r\n|[\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029]")
+
+# Kinds whose classification is only a guess, and so may be improved by reading
+# the text. 10/11/12 carry restic's own authoritative answer; 0/3/130 must never
+# be reclassified, because exit 3 WROTE the snapshot.
+REFINABLE_KINDS = ("GENERIC", "UNKNOWN")
+
+
+def _line_is_expiry(line):
+    if any(rx.search(line) for rx in AUTH_EXPIRED_RES):
+        return True
+    return bool(AMBIGUOUS_AUTH_RE.search(line) and AUTH_SIGNAL_RE.search(line))
+
+
+def _mask_paths(line):
+    return PATHISH_RE.sub(" ", line) if "/" in line else line
+
+
+def auth_expired(text):
+    """True when this stderr says the destination's sign-in has expired.
+
+    Pairing is per LINE: a stderr tail can carry a quota refusal in one line and
+    the word "token" forty lines later, and joining those two would be exactly
+    the false positive worth avoiding — a wrong "your login expired" sends the
+    operator through a pointless re-authorisation and hides the real cause.
+
+    Anything shaped like a path is blanked out first, for the same reason: the
+    words that decide have to come from what the tool said about the failure, not
+    from the name of the file it failed on.
+
+    Each line is then tried with its underscores opened out, because '_' is a
+    word character: r"\\btoken\\b" does not match inside Dropbox's
+    "expired_access_token", which is the API code for precisely this failure.
+    Masking comes first — opening out the underscores of a path we are about to
+    discard would only invent phrases to match on.
+    """
+    # Not `text or ""`: a non-string would reach .splitlines() and raise an
+    # AttributeError out of a classifier whose whole contract is to answer
+    # yes or no. isAuthExpired() answers False for the same input.
+    if not isinstance(text, str) or not text:
+        return False
+    for line in LINE_SPLIT_RE.split(text):
+        line = _mask_paths(line)
+        if not line:
+            continue
+        if _line_is_expiry(line):
+            return True
+        if "_" in line and _line_is_expiry(re.sub(r"_+", " ", line)):
+            return True
+    return False
+
+
+def classify_run(code, stderr_text):
+    """restic's exit code, refined by its stderr. Mirrors classifyExit in js/engine/restic.js."""
+    kind = KIND_BY_CODE.get(code, "UNKNOWN")
+    if kind in REFINABLE_KINDS and auth_expired(stderr_text):
+        return "AUTH_EXPIRED"
+    return kind
+
+
+# ---- source-kind vocabulary -------------------------------------------------
+#
+# These mirror js/core/sources-container.js and js/core/sources-libvirt.js. The
+# JavaScript decides what a source *means*; this helper only has to agree with
+# it, and tests/integration/hangar-run-sources.test.js is what keeps the two
+# copies from drifting.
+
+CONTAINER_RUNTIMES = ("podman", "docker")
+DEFAULT_RUNTIME = "podman"
+CONTAINER_MODES = ("none", "pause", "stop", "command")
+DEFAULT_CONSISTENCY = "none"
+
+# Both runtimes enforce this for volume and container names, so the allowlist is
+# the runtime's own rule rather than us being strict. It also happens to exclude
+# every shell metacharacter, whitespace and NUL, and forbids the leading dash
+# that argv would read as a flag.
+#
+# \Z and not $: in Python '$' also matches just before a TRAILING NEWLINE, so
+# "assets\n" would pass a '$'-anchored allowlist. JavaScript's '$' does not, so
+# the same name is rejected by the editor and accepted here — the two halves must
+# not disagree about what a legal name is, least of all in the permissive
+# direction.
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
+
+# Deliberately permissive about case and length within reason: distros disagree
+# (useradd's NAME_REGEX, trailing '$' machine accounts). The job is to keep a
+# shell metacharacter or a leading dash out of argv, not to re-implement getpwnam.
+USER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9._-]{0,31}\Z")
+
+# execve truncates an argument at the first NUL rather than refusing it, so an
+# argument carrying one is not the argument the journal says we passed.
+NUL = "\x00"
+
+# Substring hints, not exact names: real containers are called "app-postgres-1",
+# "mongo_primary", "prod.redis". A false positive costs one journal line; a false
+# negative costs an unrestorable database backup. Mirrors DATABASE_HINTS in
+# js/core/sources-container.js, and the integration test pins the two together.
+DATABASE_HINTS = ("mongo", "postgres", "mysql", "mariadb", "redis",
+                  "elastic", "kafka", "cassandra", "clickhouse")
+
+LIBVIRT_QUIESCE = ("none", "agent", "shutdown")
+DEFAULT_URI = "qemu:///system"
+
+# Job and repository ids name files under CONF_DIR. Same rule as ID_RE in
+# js/core/sources.js, and \Z for the same reason NAME_RE uses it.
+ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+
+# Same rejection set as UNSAFE_DOMAIN_RE in js/core/sources-libvirt.js. A domain
+# name also becomes a file name under LIBVIRT_XML_DIR, hence '/' as well.
+UNSAFE_DOMAIN_RE = re.compile(r"[;&|<>`$(){}\[\]*?!~\"'\\/\x00-\x1f\x7f]")
+
+# What a disk source has to look like before it can be handed to restic: an
+# absolute path, or a scheme for a network disk (rbd:, nbd:, nvme:). Anything
+# else is virsh diagnostics on stdout, and treating it as a path is how "error:
+# failed to get domain" becomes a positional argument.
+DISK_SOURCE_RE = re.compile(r"^(?:/|[A-Za-z][A-Za-z0-9+.-]*:)")
+
+
+def log(level, msg, **fields):
+    """Structured line to stderr; systemd routes it to the journal.
+
+    SYSLOG_IDENTIFIER is set by the unit, so we only need the priority prefix that
+    systemd's <N> syntax understands.
+    """
+    prio = {"debug": 7, "info": 6, "warning": 4, "error": 3}.get(level, 6)
+    payload = {"msg": msg}
+    payload.update(fields)
+    sys.stderr.write("<%d>%s\n" % (prio, json.dumps(payload, sort_keys=True)))
+    sys.stderr.flush()
+
+
+def die(code, msg, **fields):
+    log("error", msg, **fields)
+    sys.exit(code)
+
+
+def read_json(path):
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except FileNotFoundError:
+        die(1, "config file not found", path=path)
+    except json.JSONDecodeError as e:
+        die(1, "config file is not valid JSON", path=path, error=str(e))
+    except OSError as e:
+        die(1, "cannot read config file", path=path, error=str(e))
+
+
+def password_file(repo_id):
+    """Prefer the systemd credential when running under a unit.
+
+    LoadCredential= puts the key in $CREDENTIALS_DIRECTORY with a private bind mount,
+    which is strictly better than reading /etc directly. Fall back to the on-disk key
+    so the helper still works when run by hand for debugging.
+    """
+    creds = os.environ.get("CREDENTIALS_DIRECTORY")
+    if creds:
+        cand = os.path.join(creds, "hangar-repo-%s" % repo_id)
+        if os.path.exists(cand):
+            return cand
+    return os.path.join(CONF_DIR, "repos", "%s.key" % repo_id)
+
+
+def _join_two(scheme, name, prefix):
+    """Optional second segment shared by b2 / azure / gs / rclone: "<name>:<prefix>".
+
+    An empty prefix must NOT leave a trailing colon — "b2:bucket:" is a different
+    repository to "b2:bucket" as far as restic is concerned.
+    """
+    prefix = "" if prefix is None else str(prefix)
+    return "%s:%s%s" % (scheme, name, "" if prefix == "" else ":" + prefix)
+
+
+def repo_url(repo):
+    """Mirror of HangarRepos.buildUrl in js/core/repos.js.
+
+    Kept deliberately small and duplicated rather than shelling out to node: this
+    helper must work with no Cockpit session present. tests/integration/hangar-run
+    asserts the two implementations agree for every backend, which is what stops the
+    duplication drifting.
+
+    Note the field naming: 'path' is a filesystem path (local, sftp), while 'prefix'
+    is a key prefix inside a bucket or container (s3, b2, azure, gs, rclone). They are
+    genuinely different things and must not be conflated.
+    """
+    kind = repo.get("kind", "local")
+    if kind == "local":
+        return repo["path"]
+    if kind == "sftp":
+        user = repo.get("user") or ""
+        return "sftp:%s%s:%s" % (user + "@" if user else "", repo["host"], repo["path"])
+    if kind == "rest":
+        return "rest:%s" % repo["url"]
+    if kind == "s3":
+        prefix = repo.get("prefix") or ""
+        return "s3:%s/%s%s" % (repo["endpoint"], repo["bucket"],
+                               "" if prefix == "" else "/" + prefix)
+    if kind == "b2":
+        return _join_two("b2", repo["bucket"], repo.get("prefix"))
+    if kind == "azure":
+        return _join_two("azure", repo["container"], repo.get("prefix"))
+    if kind == "gs":
+        return _join_two("gs", repo["bucket"], repo.get("prefix"))
+    if kind == "rclone":
+        return _join_two("rclone", repo["remote"], repo.get("prefix"))
+    die(1, "unknown repository kind", kind=kind)
+
+
+def backend_env(repo):
+    env = {}
+    creds = repo.get("credentials") or {}
+    for key, value in creds.items():
+        # Credential names are fixed by restic's backends; pass them through as-is.
+        env[str(key)] = str(value)
+    return env
+
+
+# ---- small helpers shared by the source kinds -------------------------------
+
+
+def dedupe(items):
+    seen, out = set(), []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out
+
+
+def str_list(value, field, sid):
+    if value is None:
+        return []
+    if isinstance(value, str):
+        # Not iterated: `for x in "abc"` yields characters, so a bare string here
+        # would silently become one --exclude per letter.
+        die(1, "field must be a list of strings", source=sid, field=field)
+    if not isinstance(value, list) or any(not isinstance(v, str) for v in value):
+        die(1, "field must be a list of strings", source=sid, field=field)
+    for v in value:
+        if NUL in v:
+            die(1, "field contains a NUL byte", source=sid, field=field)
+    return [v for v in value if v != ""]
+
+
+def one_or_many(value):
+    """A field the config may spell as one string or as a list of them."""
+    return [value] if isinstance(value, str) else value
+
+
+def restic_flags(src, sid):
+    """The --exclude/--tag pairs every source kind shares.
+
+    Routed through str_list rather than `for x in src.get(...) or []` because a
+    non-string entry cannot be handed to execve at all — it raises inside
+    subprocess, from a systemd timer, with no useful record of which field.
+    """
+    flags = []
+    for pat in str_list(src.get("excludes"), "excludes", sid):
+        flags.extend(["--exclude", pat])
+    for tag in str_list(src.get("tags"), "tags", sid):
+        flags.extend(["--tag", tag])
+    return flags
+
+
+def check_argv(argv, what, **fields):
+    """The invariant every command in the plan has to satisfy.
+
+    Names, paths and the dump command all reach a command line, and each one must
+    travel as exactly one argv element. Nothing here can quote or escape its way
+    out of a mistake, so this refuses instead: a non-string element would raise
+    inside subprocess, and a NUL would make execve pass a silently shorter
+    argument than the one we logged.
+    """
+    for index, arg in enumerate(argv):
+        if not isinstance(arg, str):
+            die(1, "command holds an argument that is not a string",
+                where=what, index=index, **fields)
+        if NUL in arg:
+            die(1, "command holds an argument containing a NUL byte",
+                where=what, index=index, **fields)
+    return argv
+
+
+def warn(out, sid, code, message, **fields):
+    """Record a consistency warning in the plan and put it in the journal.
+
+    These warnings are the only thing standing between a user and a backup that
+    will not restore. The editor shows them at the moment of choosing; the
+    journal has to repeat them at the moment of running, because a job is
+    configured once and then runs unattended for years. Codes are spelled exactly
+    as js/core/sources-*.js spells them, so an operator comparing the journal
+    with the UI is not made to translate.
+    """
+    entry = {"source": sid, "code": code, "message": message}
+    entry.update(fields)
+    out.append(entry)
+    log("warning", message, source=sid, code=code, **fields)
+    return entry
+
+
+def canonical_path(p):
+    """Collapse slash runs and drop the trailing slash.
+
+    Mirrors HangarSources.canonicalPath: without it "/vol/" and "/vol" are two
+    paths, and restic would store the same tree twice.
+    """
+    if not isinstance(p, str) or p == "":
+        return ""
+    collapsed = re.sub(r"/{2,}", "/", p)
+    return collapsed.rstrip("/") if len(collapsed) > 1 else collapsed
+
+
+def last_line(text):
+    lines = [l.strip() for l in (text or "").splitlines() if l.strip()]
+    return lines[-1] if lines else ""
+
+
+def step(sid, argv, capture=None):
+    """One pre- or post-backup command.
+
+    `capture` names a file that the command's stdout is written to — that is how
+    `virsh dumpxml` becomes a file restic can back up without a shell redirect.
+    """
+    return {"source": sid, "argv": list(argv), "capture": capture}
+
+
+def run_capture(argv, env=None):
+    """Run a short helper command and return (exit code, stdout, stderr).
+
+    Every failure mode is turned into a value rather than an exception so the
+    caller can say which volume or domain it was asking about — "could not
+    inspect" with no name is useless in a journal.
+    """
+    try:
+        res = subprocess.run(argv, env=env, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True, timeout=CMD_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return 124, "", "no answer within %gs" % CMD_TIMEOUT
+    except FileNotFoundError:
+        return 127, "", "%s: command not found" % argv[0]
+    except OSError as e:
+        return 126, "", str(e)
+    except (ValueError, TypeError) as e:
+        # An argument subprocess refuses to marshal — an embedded NUL, or a
+        # non-string that slipped past check_argv. A value, not a traceback:
+        # the caller names the volume or domain it was asking about.
+        return 126, "", str(e)
+    return res.returncode, res.stdout or "", res.stderr or ""
+
+
+# ---- filesystem sources -----------------------------------------------------
+
+
+def filesystem_source(src, sid):
+    paths = str_list(src.get("paths"), "paths", sid)
+    flags = []
+    for pat in str_list(src.get("excludes"), "excludes", sid):
+        flags.extend(["--exclude", pat])
+    # The editor stores excludeFile as a LIST — core/sources.js normalises it to
+    # one — while a hand-written job may still spell it as a single string.
+    # Splicing the list itself into argv is not a path, it is a TypeError raised
+    # from a timer at 3am.
+    for f in str_list(one_or_many(src.get("excludeFile")), "excludeFile", sid):
+        flags.extend(["--exclude-file", f])
+    if src.get("oneFileSystem"):
+        flags.append("--one-file-system")
+    for tag in str_list(src.get("tags"), "tags", sid):
+        flags.extend(["--tag", tag])
+    return {
+        "id": sid, "kind": "filesystem",
+        "paths": paths, "flags": flags, "pre": [], "post": [], "warnings": [],
+    }
+
+
+# ---- container sources ------------------------------------------------------
+
+
+def as_user(user, argv):
+    """Wrap a runtime command so it runs as the user who owns that runtime.
+
+    Rootless podman keeps its volumes in the *user's* store. hangar-run is root
+    under a systemd unit, and root's podman is a DIFFERENT store which would
+    answer about nothing — the failure mode is a backup that reports success and
+    contains no data. runuser (not sudo, not su) because it is in util-linux on
+    every target distro, needs no password when already root, and '--' stops
+    option parsing dead.
+    """
+    if user in (None, "", "root"):
+        return list(argv)
+    if not isinstance(user, str) or not USER_RE.match(user):
+        die(1, "not a valid user name", user=str(user))
+    return ["runuser", "-u", user, "--"] + list(argv)
+
+
+def database_hint(name):
+    """The first hint this container name matches, or "". Table order is advice."""
+    lower = name.lower()
+    for hint in DATABASE_HINTS:
+        if hint in lower:
+            return hint
+    return ""
+
+
+def check_names(names, noun, sid):
+    for name in names:
+        if not NAME_RE.match(name):
+            die(1, "unsafe %s name" % noun, source=sid, name=name)
+    return names
+
+
+def parse_volume_inspect(text):
+    """Objects out of `<rt> volume inspect` output.
+
+    `--format json` is not portable — podman emits an array, docker's --format
+    is a Go template that emits one object per line — so only the bare inspect
+    is ever called. It answers with an array on both, but a docker user reaching
+    for `--format '{{json .}}'` produces the line-per-object shape, so tolerate
+    both rather than fail on a difference that costs three lines to absorb.
+    """
+    values = []
+    try:
+        values.append(json.loads(text))
+    except (json.JSONDecodeError, TypeError):
+        for line in (text or "").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                values.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+    out = []
+
+    def push(v):
+        if isinstance(v, list):
+            for item in v:
+                push(item)
+        elif isinstance(v, dict):
+            out.append(v)
+
+    for v in values:
+        push(v)
+    return out
+
+
+def mountpoint_of(entries, wanted):
+    """Mount point of the named volume, or "".
+
+    Matched by name, never "the first entry": an inspect that answered about
+    something else must not be silently backed up in place of what was asked for.
+    """
+    for entry in entries:
+        name = entry.get("Name") or entry.get("name")
+        if name != wanted:
+            continue
+        mp = entry.get("Mountpoint") or entry.get("mountpoint") or entry.get("MountPoint")
+        mp = canonical_path(mp) if isinstance(mp, str) else ""
+        # JSON can carry a NUL that no path the kernel accepts ever could, and
+        # execve truncates at one. Dropping it here surfaces as "volume has no
+        # mount point", which names the volume the operator has to look at.
+        if mp.startswith("/") and NUL not in mp:
+            return mp
+    return ""
+
+
+def resolve_volume_paths(runtime, user, volumes, sid):
+    """Ask the runtime where each volume's bytes actually live.
+
+    Never derived from a hardcoded directory: rootless podman, rootful podman and
+    docker all store volumes somewhere different, and only the runtime knows
+    which. One inspect per volume rather than one batched call, because a batch
+    fails whole and "which volume is gone" is exactly what has to be reported.
+    """
+    paths = []
+    for name in volumes:
+        argv = as_user(user, [runtime, "volume", "inspect", name])
+        code, out, err = run_capture(argv)
+        if code != 0:
+            die(1, "could not inspect container volume", source=sid, volume=name,
+                runtime=runtime, user=user or "root", exit_code=code,
+                error=last_line(err))
+        mp = mountpoint_of(parse_volume_inspect(out), name)
+        if not mp:
+            die(1, "volume has no mount point in the runtime's inspect output",
+                source=sid, volume=name, runtime=runtime, user=user or "root")
+        paths.append(mp)
+    return sorted(dedupe(paths))
+
+
+def container_source(src, sid):
+    runtime = src.get("runtime") or DEFAULT_RUNTIME
+    if runtime not in CONTAINER_RUNTIMES:
+        die(1, "unknown container runtime", source=sid, runtime=str(runtime),
+            known=list(CONTAINER_RUNTIMES))
+
+    user = src.get("user") or ""
+    if user and (not isinstance(user, str) or not USER_RE.match(user)):
+        die(1, "not a valid user name", source=sid, user=str(user))
+
+    # Volumes are a set, so sorting them keeps the restic path vector — and with
+    # it `forget --group-by host,paths` — independent of click order.
+    volumes = check_names(sorted(dedupe(str_list(src.get("volumes"), "volumes", sid))),
+                          "volume", sid)
+    if not volumes:
+        die(1, "container source lists no volumes", source=sid)
+
+    # Containers keep author order: that is dependency order (app before its
+    # database), and sorting would silently reorder a shutdown.
+    containers = check_names(dedupe(str_list(src.get("containers"), "containers", sid)),
+                             "container", sid)
+
+    mode = src.get("consistency") or DEFAULT_CONSISTENCY
+    if mode not in CONTAINER_MODES:
+        die(1, "unknown consistency mode", source=sid, consistency=str(mode),
+            known=list(CONTAINER_MODES))
+    command = src.get("command") or ""
+    # The command is the one field that legitimately carries shell syntax — it
+    # runs under `sh -c` inside the container, so pipes and redirection are the
+    # point. It still has to be a string, and a NUL still cannot survive execve.
+    if not isinstance(command, str):
+        die(1, "the dump command must be a shell command string", source=sid)
+    if NUL in command:
+        die(1, "the dump command contains a NUL byte", source=sid)
+    if mode == "command" and not command:
+        die(1, "consistency mode 'command' needs a command to run", source=sid)
+    if mode != "none" and not containers:
+        die(1, "consistency mode needs at least one container to act on",
+            source=sid, consistency=mode)
+
+    warnings = []
+    if runtime == "podman" and not user:
+        # The single most likely reason a container backup comes back empty: this
+        # process is root, and rootless volumes live in their owner's own store.
+        warn(warnings, sid, "no-user",
+             "no user is recorded for this podman source, so root's container "
+             "store is used; rootless volumes will not be found there",
+             runtime=runtime)
+    if mode == "none":
+        for name in containers:
+            hint = database_hint(name)
+            if hint:
+                warn(warnings, sid, "live-database",
+                     "container %r looks like a database and its files are being "
+                     "copied while it runs — the backup may not restore" % name,
+                     container=name, match=hint, consistency=mode)
+
+    paths = resolve_volume_paths(runtime, user, volumes, sid)
+
+    flags = restic_flags(src, sid)
+
+    def rt(rest):
+        return step(sid, as_user(user, [runtime] + rest))
+
+    pre, post = [], []
+    if mode == "pause":
+        pre = [rt(["pause", c]) for c in containers]
+        post = [rt(["unpause", c]) for c in reversed(containers)]
+    elif mode == "stop":
+        pre = [rt(["stop", c]) for c in containers]
+        post = [rt(["start", c]) for c in reversed(containers)]
+    elif mode == "command":
+        # `sh -c` because the useful dump commands are pipelines
+        # ("pg_dump db | gzip > /backup/db.sql.gz"), writing into one of the
+        # volumes being backed up. Nothing is changed outside the container, so
+        # there is nothing to undo afterwards.
+        pre = [rt(["exec", c, "sh", "-c", command]) for c in containers]
+
+    return {
+        "id": sid, "kind": "container", "runtime": runtime, "user": user,
+        "consistency": mode, "volumes": volumes, "containers": containers,
+        "paths": paths, "flags": flags, "pre": pre, "post": post,
+        "warnings": warnings,
+    }
+
+
+# ---- libvirt sources --------------------------------------------------------
+
+
+def virsh_argv(uri, args):
+    return ["virsh", "-c", uri] + list(args)
+
+
+def parse_blklist(text):
+    """Rows of `virsh domblklist --details`.
+
+    Two shapes are dropped here rather than downstream, because both would make
+    `restic backup` fail on a path that does not exist:
+      * source '-'    — an empty drive (a CD-ROM with no medium) has no file;
+      * device cdrom  — an attached ISO is installation media, not VM state, and
+                        is routinely deleted once the guest is installed.
+    Source is the last column and may contain spaces, so the split is bounded at
+    three separators rather than done blindly.
+    """
+    rows = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if line == "" or (re.match(r"^[-\s]+$", line) and "-" in line):
+            continue
+        m = re.match(r"^(\S+)\s+(\S+)\s+(\S+)\s+(\S[\s\S]*)$", line)
+        if not m:
+            continue
+        typ, device, target, source = m.group(1), m.group(2), m.group(3), m.group(4).strip()
+        if (typ.lower(), device.lower(), target.lower()) == ("type", "device", "target"):
+            continue
+        if device.lower() == "cdrom":
+            continue
+        if source == "-" or not DISK_SOURCE_RE.match(source):
+            continue
+        rows.append({"type": typ, "device": device, "target": target, "source": source})
+    return rows
+
+
+def resolve_domain_disks(uri, domain, sid):
+    # LC_ALL=C because domblklist's column titles are translated, and a header
+    # row we fail to recognise would be parsed as a disk called "Ziel".
+    env = dict(os.environ)
+    env["LC_ALL"] = "C"
+    code, out, err = run_capture(virsh_argv(uri, ["domblklist", "--details", domain]), env)
+    if code != 0:
+        # Degrade with a report, never a hang: on hosts where qemu:///system is
+        # wedged this is the only thing standing between the operator and a unit
+        # that never finishes.
+        die(1, "could not list domain disks", source=sid, domain=domain, uri=uri,
+            exit_code=code, error=last_line(err))
+    return [row["source"] for row in parse_blklist(out)]
+
+
+def libvirt_source(src, sid):
+    uri = src.get("uri") or DEFAULT_URI
+    if not isinstance(uri, str) or uri.strip() == "" or NUL in uri:
+        die(1, "libvirt source needs a connection URI", source=sid)
+
+    domains = sorted(dedupe(str_list(src.get("domains"), "domains", sid)))
+    if not domains:
+        die(1, "libvirt source lists no domains", source=sid)
+    for d in domains:
+        # A leading dash would be read as an option by virsh rather than as the
+        # domain it names; the rest of the set would escape LIBVIRT_XML_DIR or
+        # change the meaning of a command line.
+        if d.startswith("-") or UNSAFE_DOMAIN_RE.search(d):
+            die(1, "unsafe domain name", source=sid, domain=d)
+
+    quiesce = src.get("quiesce") or "none"
+    if quiesce not in LIBVIRT_QUIESCE:
+        die(1, "unknown quiesce mode", source=sid, quiesce=str(quiesce),
+            known=list(LIBVIRT_QUIESCE))
+
+    # Absent means true: a disk image without its domain XML is not a restorable
+    # VM, it is a file that happens to contain a filesystem.
+    include_xml = True if src.get("includeXml") is None else bool(src.get("includeXml"))
+
+    warnings = []
+    if quiesce == "none":
+        warn(warnings, sid, "quiesce-crash-consistent",
+             "disks are copied while the VM runs, so the image is crash-consistent "
+             "at best — the restored guest sees it as if the power was cut",
+             quiesce=quiesce)
+    elif quiesce == "agent":
+        # Fails open on purpose: domfsfreeze errors when the agent is absent, and
+        # a run that degrades to a live copy while claiming to be consistent is
+        # the worst of both worlds. The pre-step failure would abort the backup,
+        # but the operator should know the dependency before that happens.
+        warn(warnings, sid, "quiesce-agent-required",
+             "freezing needs qemu-guest-agent running inside the guest; without "
+             "it the freeze fails and the copy is only crash-consistent",
+             quiesce=quiesce)
+    if not include_xml:
+        warn(warnings, sid, "no-xml",
+             "the domain XML is not included, so the disk images restore as files "
+             "rather than as a VM that can be started",
+             includeXml=False)
+
+    disks = []
+    for d in domains:
+        disks.extend(resolve_domain_disks(uri, d, sid))
+    # Two disks can share a backing file (a data disk attached to two domains),
+    # and restic would otherwise store the same tree twice.
+    disks = sorted(dedupe(disks))
+
+    pre, xml_paths = [], []
+    if include_xml:
+        for d in domains:
+            path = os.path.join(LIBVIRT_XML_DIR, d + ".xml")
+            xml_paths.append(path)
+            pre.append(step(sid, virsh_argv(uri, ["dumpxml", d]), capture=path))
+    xml_paths.sort()
+
+    post = []
+    if quiesce == "agent":
+        pre.extend(step(sid, virsh_argv(uri, ["domfsfreeze", d])) for d in domains)
+        post = [step(sid, virsh_argv(uri, ["domfsthaw", d])) for d in reversed(domains)]
+    elif quiesce == "shutdown":
+        pre.extend(step(sid, virsh_argv(uri, ["shutdown", d])) for d in domains)
+        post = [step(sid, virsh_argv(uri, ["start", d])) for d in reversed(domains)]
+
+    flags = restic_flags(src, sid)
+
+    return {
+        "id": sid, "kind": "libvirt", "uri": uri, "quiesce": quiesce,
+        "domains": domains, "includeXml": include_xml, "xml": xml_paths,
+        # Disks before XML: a reader of `journalctl` sees the payload first and
+        # the metadata after it.
+        "paths": disks + xml_paths, "flags": flags, "pre": pre, "post": post,
+        "warnings": warnings,
+    }
+
+
+# ---- dispatch ---------------------------------------------------------------
+
+SOURCE_KINDS = {
+    "filesystem": filesystem_source,
+    "container": container_source,
+    "libvirt": libvirt_source,
+}
+
+
+def build_sources(sources):
+    out = []
+    for index, src in enumerate(sources):
+        if not isinstance(src, dict):
+            die(1, "a backup source must be an object", index=index)
+        kind = src.get("kind", "filesystem")
+        build = SOURCE_KINDS.get(kind) if isinstance(kind, str) else None
+        if build is None:
+            # Silently skipping an unknown kind would produce a backup that looks
+            # successful while containing nothing the user asked for.
+            die(1, "unsupported source kind", kind=str(kind),
+                known=sorted(SOURCE_KINDS))
+        out.append(build(src, src.get("id") or ("source-%d" % index)))
+    return out
+
+
+def retention_args(policy):
+    if not policy:
+        return []
+    if not isinstance(policy, dict):
+        die(1, "retention policy must be an object", retention=str(policy))
+    args = []
+    for key, flag in (
+        ("last", "--keep-last"),
+        ("hourly", "--keep-hourly"),
+        ("daily", "--keep-daily"),
+        ("weekly", "--keep-weekly"),
+        ("monthly", "--keep-monthly"),
+        ("yearly", "--keep-yearly"),
+    ):
+        val = policy.get(key)
+        if val:
+            args.extend([flag, str(val)])
+    if policy.get("within"):
+        args.extend(["--keep-within", str(policy["within"])])
+    for tag in str_list(policy.get("tags"), "retention.tags", "-"):
+        args.extend(["--keep-tag", tag])
+    if not args:
+        # A policy that keeps nothing would delete every snapshot. Refuse loudly.
+        die(1, "retention policy would keep no snapshots — refusing to prune")
+    args.extend(["--group-by", "host,paths"])
+    return args
+
+
+# ---- the size guard ---------------------------------------------------------
+#
+# A mirror of js/core/sizeguard.js, duplicated for the same reason repo_url and
+# auth_expired are: this helper runs from a systemd timer with no Cockpit session
+# and no node present. tests/integration/hangar-run-sizeguard.test.js drives both
+# implementations over one corpus, which is what stops the copies drifting.
+#
+# Three facts fix the shape, and none of them can be re-derived by reading restic's
+# --help (see the header of js/core/sizeguard.js):
+#
+#   1. restic has NO size or quota option. `forget` offers counts and durations.
+#      Everything here is hangar's own logic on top.
+#   2. `stats` DEFAULTS to --mode restore-size, which sums the sizes of restored
+#      FILES, not the bytes the repository occupies. Measured on a real 2.0 MB
+#      repository the default reported 5.9 MB. A guard fed that number believes the
+#      repository is several times its real size and deletes snapshots that were
+#      never the problem, so --mode raw-data is not a refinement, it is the whole
+#      measurement.
+#   3. Deduplication makes freed space unpredictable — neighbouring snapshots share
+#      blobs — so how many snapshots to delete CANNOT be computed up front. One
+#      snapshot per pass, then prune, then measure again.
+
+# Decimal for a bare letter ("500G"), binary only when spelled with the 'i'.
+# Mirrors UNIT_BYTES in js/core/sizeguard.js; the two are pinned by the tests.
+GUARD_UNIT_BYTES = {
+    "": 1,
+    "b": 1,
+    "k": 10 ** 3, "kb": 10 ** 3, "kib": 1024,
+    "m": 10 ** 6, "mb": 10 ** 6, "mib": 1024 ** 2,
+    "g": 10 ** 9, "gb": 10 ** 9, "gib": 1024 ** 3,
+    "t": 10 ** 12, "tb": 10 ** 12, "tib": 1024 ** 4,
+    "p": 10 ** 15, "pb": 10 ** 15, "pib": 1024 ** 5,
+}
+
+# \Z rather than $ for the reason NAME_RE gives: in Python '$' also matches before a
+# trailing newline, so "500 GB\n" would pass a '$'-anchored pattern that the
+# JavaScript refuses. The two halves must not disagree about what a size is, least
+# of all in the permissive direction.
+#
+# re.ASCII for the same reason, found by the corpus rather than by review: Python's
+# \d matches EVERY Unicode decimal digit, JavaScript's matches 0-9 only. Without it
+# a limit typed in Arabic-Indic digits is refused by the editor and silently obeyed
+# by the runner — a size limit only one half of the product can see.
+GUARD_SIZE_RE = re.compile(r"^(-?)(\d+(?:\.\d+)?)[ \t]*([A-Za-z]{0,3})\Z", re.ASCII)
+
+# Must match DISPLAY_UNITS in js/core/sizeguard.js and UNITS in the three
+# feature modules; tests/integration cross-checks this formatter against the
+# JavaScript one, value for value.
+GUARD_DISPLAY_UNITS = ("B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB")
+GUARD_DISPLAY_STEP = 1024
+
+# JavaScript numbers stop being exact here, and a limit that does not survive a
+# JSON round trip is no longer the number the user typed.
+MAX_SAFE_INT = 2 ** 53 - 1
+
+DEFAULT_MIN_SNAPSHOTS = 3
+DEFAULT_MAX_ITERATIONS = 20
+
+EPOCH_DATE = datetime.date(1970, 1, 1)
+
+GUARD_TIME_RE = re.compile(
+    r"^(\d{4})-(\d{2})-(\d{2})"
+    r"(?:[Tt ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?"
+    r"(?:([Zz])|([+-])(\d{2}):?(\d{2}))?)?\Z", re.ASCII)
+
+
+def js_round(x):
+    """Math.round: half rounds towards +infinity, and an integer comes back as is.
+
+    Two different traps, and both were live here:
+
+      - Python's round() is banker's rounding. round(2.5) is 2, Math.round(2.5)
+        is 3, so round() cannot be used at all.
+      - floor(x + 0.5) is not Math.round either. Past 2**52 the "+ 0.5" is not
+        representable and rounds up on its own: floor(9007199254740991 + 0.5) is
+        9007199254740992, one past MAX_SAFE_INT, so parse_size() refused the
+        largest limit the editor accepts. ECMA-262 returns an integral argument
+        unchanged, and so does this.
+
+    A limit that differs between the editor and the runner is a limit nobody can
+    reason about, which is why the corpus test drives both over the same strings.
+    """
+    if isinstance(x, int):
+        return x
+    if math.isfinite(x) and float(x).is_integer():
+        return int(x)
+    return int(math.floor(x + 0.5))
+
+
+def is_number(v):
+    """A finite JSON number. bool is excluded first: it is an int in Python, so an
+    unguarded True would become a one-byte limit."""
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def is_safe_int(v):
+    """Number.isSafeInteger, for a value that arrived from JSON."""
+    if not is_number(v):
+        return False
+    if isinstance(v, float) and not v.is_integer():
+        return False
+    return abs(int(v)) <= MAX_SAFE_INT
+
+
+def parse_size(value):
+    """Bytes, or None when the text is not a size. Mirrors parseSize.
+
+    NEVER a guess: a misparsed limit is not a cosmetic bug, it is a decision to
+    delete backups. Zero and negatives DO parse — they are readable sizes that are
+    merely unusable as a limit — and are refused later, where the refusal can say
+    which of the two it was.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        if not math.isfinite(value):
+            return None
+        n = js_round(value)
+        return n if abs(n) <= MAX_SAFE_INT else None
+    if not isinstance(value, str):
+        return None
+
+    t = value.strip()
+    if not t:
+        return None
+    m = GUARD_SIZE_RE.match(t)
+    if not m:
+        return None
+
+    unit = m.group(3).lower()
+    if unit not in GUARD_UNIT_BYTES:
+        return None
+    try:
+        magnitude = float(m.group(2))
+    except (ValueError, OverflowError):
+        return None
+    # 400 digits of "9" parse to inf. A limit nobody can represent is not a limit.
+    if not math.isfinite(magnitude):
+        return None
+    product = magnitude * GUARD_UNIT_BYTES[unit]
+    if not math.isfinite(product):
+        return None
+    n = js_round(product)
+    if m.group(1) == "-":
+        n = -n
+    return n if abs(n) <= MAX_SAFE_INT else None
+
+
+def format_size(n):
+    """Binary, matching formatSize in js/core/sizeguard.js and every screen.
+
+    hangar showed the same repository in GiB on two screens and GB on a third,
+    which made three correct-but-different measurements look like a
+    contradiction. One convention everywhere, and it is restic's own.
+    """
+    if not is_number(n) or n <= 0:
+        return "0 B"
+    value = min(float(n), float(MAX_SAFE_INT))
+    if value < GUARD_DISPLAY_STEP:
+        return "%d B" % js_round(value)
+    unit = 0
+    while value >= GUARD_DISPLAY_STEP and unit < len(GUARD_DISPLAY_UNITS) - 1:
+        value /= float(GUARD_DISPLAY_STEP)
+        unit += 1
+    rounded = js_round(value * 10) / 10.0
+    text = "%d" % rounded if float(rounded).is_integer() else "%.1f" % rounded
+    return "%s %s" % (text, GUARD_DISPLAY_UNITS[unit])
+
+
+def guard_over_by(current_bytes, limit_bytes):
+    """Bytes over the limit, or 0. Anything unreadable is "not over", which is the
+    answer that deletes nothing."""
+    if not is_number(current_bytes) or not is_number(limit_bytes):
+        return 0
+    over = current_bytes - limit_bytes
+    return over if over > 0 else 0
+
+
+def effective_floor(min_snapshots):
+    """The floor actually applied, which is not simply what the config asked for:
+    no value may push it below 1, so this helper cannot plan the deletion of the
+    last remaining backup whatever a hand-edited file says."""
+    if min_snapshots is None or not is_safe_int(min_snapshots):
+        return DEFAULT_MIN_SNAPSHOTS
+    n = int(min_snapshots)
+    return 1 if n < 1 else n
+
+
+def effective_budget(max_iterations):
+    if max_iterations is None or not is_safe_int(max_iterations):
+        return DEFAULT_MAX_ITERATIONS
+    n = int(max_iterations)
+    return 0 if n < 0 else n
+
+
+def iterations_done(v):
+    return int(v) if is_safe_int(v) and v >= 0 else 0
+
+
+def snapshot_time_ms(snapshot):
+    """Epoch milliseconds for a snapshot, or None when it cannot be dated.
+
+    A bare NUMBER is refused on purpose, exactly as timeOf() refuses it: restic
+    emits RFC 3339 strings, and a raw number could be epoch seconds or epoch
+    milliseconds. A factor of 1000 between those two silently reorders the whole
+    list and picks the newest snapshot as the oldest.
+    """
+    t = snapshot.get("time")
+    if not isinstance(t, str):
+        return None
+    t = t.strip()
+    if not t:
+        return None
+    m = GUARD_TIME_RE.match(t)
+    if not m:
+        return None
+
+    year, month, day = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    has_time = m.group(4) is not None
+    hour = int(m.group(4) or 0)
+    minute = int(m.group(5) or 0)
+    second = int(m.group(6) or 0)
+    frac = m.group(7) or ""
+    millis = int((frac + "000")[:3]) if frac else 0
+
+    if minute > 59 or second > 59:
+        return None
+    # 24:00:00 is midnight at the end of the day — legal in ISO 8601 and accepted
+    # by Date.parse, so accepted here rather than left as a silent disagreement.
+    day_carry = 0
+    if hour == 24:
+        if minute or second or millis:
+            return None
+        hour, day_carry = 0, 1
+    elif hour > 23:
+        return None
+
+    # The month is validated, the day is RANGE-checked and then allowed to roll
+    # over, because that is what Date.parse does: "2026-02-30" is 2 March, not an
+    # error. Refusing it here would make the same snapshot datable in the browser
+    # and undatable in the runner, and an undatable snapshot is one the guard
+    # refuses to delete.
+    if not 1 <= month <= 12 or not 1 <= day <= 31:
+        return None
+    try:
+        date = (datetime.date(year, month, 1)
+                + datetime.timedelta(days=day - 1 + day_carry))
+    except (ValueError, OverflowError):
+        return None
+
+    if m.group(8):                                  # Z
+        offset_ms = 0
+    elif m.group(9):                                # +HH:MM / -HH:MM
+        oh, om = int(m.group(10)), int(m.group(11))
+        if oh > 23 or om > 59:
+            return None
+        offset_ms = (oh * 3600 + om * 60) * 1000
+        if m.group(9) == "-":
+            offset_ms = -offset_ms
+    elif has_time:
+        # A date-time with no offset is LOCAL time, as Date.parse reads it. Wrong
+        # by an hour at worst, and never wrong about which snapshot is older.
+        try:
+            naive = datetime.datetime(date.year, date.month, date.day, hour, minute, second)
+            return js_round(naive.timestamp() * 1000) + millis
+        except (ValueError, OverflowError, OSError):
+            return None
+    else:
+        # A date with no time at all is UTC midnight, again as Date.parse reads it.
+        offset_ms = 0
+
+    days = (date - EPOCH_DATE).days
+    total = (days * 86400 + hour * 3600 + minute * 60 + second) * 1000 + millis
+    return total - offset_ms
+
+
+def trim_decision(action, snapshot, reason, remaining):
+    return {"action": action, "snapshot": snapshot, "reason": reason, "remaining": remaining}
+
+
+def plan_trim(cfg):
+    """The SINGLE next step of a trim loop. Mirrors planTrim in js/core/sizeguard.js.
+
+      {currentBytes, limitBytes, snapshots, minSnapshots, iterations, maxIterations}
+        -> {action, snapshot, reason, remaining}
+
+    Exactly one snapshot per call. A batch is tempting and wrong: deduplication
+    means the space a forget frees cannot be known in advance, so a batch overshoots
+    by an unknowable amount — and an overshoot here is destroyed history.
+
+    Every uncertain input resolves to "delete nothing", never to a guess.
+    """
+    if not isinstance(cfg, dict):
+        cfg = {}
+
+    limit_bytes = cfg.get("limitBytes")
+    if not is_number(limit_bytes) or limit_bytes <= 0:
+        return trim_decision("none", None, "no-limit", 0)
+
+    # An unmeasurable size is the input most likely to be wrong in the dangerous
+    # direction, so a caller handing over a failed `stats` gets "nothing deleted".
+    current_bytes = cfg.get("currentBytes")
+    if not is_number(current_bytes) or current_bytes < 0:
+        return trim_decision("none", None, "unknown-size", 0)
+
+    remaining = guard_over_by(current_bytes, limit_bytes)
+    if remaining == 0:
+        return trim_decision("none", None, "under-limit", 0)
+
+    snapshots = cfg.get("snapshots")
+    present = [s for s in snapshots if isinstance(s, dict)] if isinstance(snapshots, list) else []
+    if not present:
+        return trim_decision("floor-reached", None, "no-snapshots", remaining)
+
+    # Counted against every snapshot that EXISTS, not only the ones we could name:
+    # the floor is about how much history survives, and an entry we cannot read is
+    # still surviving history.
+    floor = effective_floor(cfg.get("minSnapshots"))
+    if len(present) <= floor:
+        return trim_decision("floor-reached", None, "floor", remaining)
+
+    # After the floor, deliberately: when both apply the floor is the durable
+    # condition, and "budget spent" would invite an operator to raise the budget and
+    # re-run, which cannot help.
+    if iterations_done(cfg.get("iterations")) >= effective_budget(cfg.get("maxIterations")):
+        return trim_decision("exhausted", None, "budget", remaining)
+
+    # A candidate must be nameable (restic forgets by id) and datable (we must know
+    # it is the oldest). Input ORDER is never a fallback: callers sort and filter,
+    # and trusting an assumed order is how a guard deletes the newest snapshot.
+    best = None
+    for s in present:
+        sid = s.get("id")
+        if not isinstance(sid, str) or not sid:
+            continue
+        ms = snapshot_time_ms(s)
+        if ms is None:
+            continue
+        # Ties break on id so a shuffled list cannot change the outcome.
+        if best is None or ms < best[1] or (ms == best[1] and sid < best[2]):
+            best = (s, ms, sid)
+
+    if best is None:
+        return trim_decision("floor-reached", None, "undatable", remaining)
+    return trim_decision("forget", best[0], "oldest", remaining)
+
+
+def guard_settings(repo, warnings):
+    """The three size-guard fields, wherever this repository keeps them.
+
+    FLAT is the shape the product writes. formStateToRepo() in
+    js/features/repos-ui.js saves `sizeLimit` and `minSnapshots` beside `kind` and
+    `path`, and validate()/describe() in js/core/repos.js read them from there.
+    This helper used to look only for a nested `sizeGuard` object, which nothing
+    has ever written — so every size limit configured in the editor was silently
+    ignored and the guard never ran on a real host. The failure was invisible from
+    both ends: the editor echoed "Understood as 500 GB" and the runner reported a
+    clean backup.
+
+    The nested object is still read, second, so a hand-written or older
+    repository file keeps working. Flat wins if somehow both are present: it is
+    the one the editor will overwrite on the next save, so it is the one the user
+    is looking at.
+    """
+    nested = repo.get("sizeGuard")
+    if nested is not None and nested != "" and nested != {} and not isinstance(nested, dict):
+        warn(warnings, "size-guard", "guard-not-object",
+             "the repository's size guard is not an object, so no size limit is "
+             "enforced and no snapshots will be deleted for size")
+        nested = None
+    if not isinstance(nested, dict):
+        nested = {}
+
+    def field(flat_key, nested_key):
+        v = repo.get(flat_key)
+        return nested.get(nested_key) if v is None or v == "" else v
+
+    return (field("sizeLimit", "limit"),
+            field("minSnapshots", "minSnapshots"),
+            field("maxIterations", "maxIterations"))
+
+
+def guard_config(repo, warnings):
+    """The repository's size guard, or None when it has none.
+
+    An unusable limit is a WARNING, not a die(): refusing to run would turn a typo
+    in one optional field into a host with no backups at all, and the guard's own
+    rule is that every uncertain input resolves to deleting nothing. So the backup
+    still happens, nothing is deleted for size, and the reason is in the plan and in
+    the journal where an operator can see it.
+    """
+    raw, min_snapshots, max_iterations = guard_settings(repo, warnings)
+    if raw is None or raw == "":
+        return None
+
+    limit_bytes = parse_size(raw)
+    if limit_bytes is None:
+        warn(warnings, "size-guard", "limit-unparseable",
+             "the repository's size limit %r cannot be read as a size, so no size "
+             "limit is enforced and no snapshots will be deleted for size" % (raw,),
+             limit=str(raw))
+        return None
+    if limit_bytes <= 0:
+        warn(warnings, "size-guard", "limit-not-positive",
+             "the repository's size limit %r is not greater than zero, so no size "
+             "limit is enforced and no snapshots will be deleted for size" % (raw,),
+             limit=str(raw))
+        return None
+
+    return {
+        "limit": str(raw),
+        "limitBytes": limit_bytes,
+        "minSnapshots": effective_floor(min_snapshots),
+        "maxIterations": effective_budget(max_iterations),
+    }
+
+
+def build_plan(job, repo):
+    try:
+        url = repo_url(repo)
+    except (KeyError, TypeError, AttributeError) as e:
+        die(1, "repository definition is incomplete",
+            repo=str(repo.get("id")), kind=str(repo.get("kind")), field=str(e))
+    pwfile = password_file(repo["id"])
+    sources = build_sources(job.get("sources") or [])
+
+    paths, flags, pre, warnings = [], [], [], []
+    for src in sources:
+        paths.extend(src["paths"])
+        flags.extend(src["flags"])
+        pre.extend(src["pre"])
+        warnings.extend(src.get("warnings") or [])
+    # Reverse of pre, across sources as well as within one: unwinding in the
+    # opposite order is the only thing that keeps a partial failure recoverable
+    # by re-running the post half.
+    post = []
+    for src in reversed(sources):
+        post.extend(src["post"])
+
+    if not paths:
+        die(1, "job has no paths to back up")
+
+    # --cache-dir on every invocation, matching js/engine/restic.js CACHE_DIR.
+    # This runs from a systemd unit, which has neither $HOME nor $XDG_CACHE_HOME,
+    # and restic refuses to start without somewhere to put its cache:
+    #   unable to locate cache directory: neither $XDG_CACHE_HOME nor $HOME
+    # It exits 1 before reading a byte of the repository, so a scheduled backup
+    # would fail every night while the same command typed at a shell worked.
+    base = ["restic", "-r", url, "--password-file", pwfile,
+            "--cache-dir", RESTIC_CACHE_DIR]
+
+    backup = base + ["backup", "--json"] + flags + paths
+    for tag in str_list(job.get("tags"), "tags", job.get("id")):
+        backup.extend(["--tag", tag])
+
+    plan = {
+        "backup": backup, "forget": None, "guard": None, "env": backend_env(repo),
+        "sources": sources, "pre": pre, "post": post, "warnings": warnings,
+    }
+    ret = retention_args(job.get("retention"))
+    if ret:
+        # One command, not two. `forget` takes an EXCLUSIVE lock of its own —
+        # measured, after splitting it from --prune on the assumption that it
+        # did not — so separating them only creates a second operation that can
+        # be blocked by the same thing.
+        plan["forget"] = base + ["forget", "--json", "--prune"] + ret
+
+    guard = guard_config(repo, warnings)
+    if guard:
+        # --mode raw-data, always. The default (restore-size) sums the sizes of
+        # restored files: a real 2.0 MB repository measures 5.9 MB that way, and a
+        # guard reading that number deletes snapshots that were never the problem.
+        guard["stats"] = base + ["stats", "--json", "--mode", "raw-data"]
+        guard["snapshots"] = base + ["snapshots", "--json"]
+        # The snapshot id is appended at run time — which one it is cannot be known
+        # before the previous pass has been measured. --prune because forgetting
+        # alone frees nothing: it only unlinks the snapshot from its data.
+        guard["forget"] = base + ["forget", "--json", "--prune"]
+        plan["guard"] = guard
+
+    # Last gate before anything is executed. Every volume name, container name,
+    # domain name, dump command and discovered path has arrived here through a
+    # different route; this is the one place that holds all of them at once.
+    check_argv(plan["backup"], "backup")
+    if plan["forget"]:
+        check_argv(plan["forget"], "forget")
+    if plan["guard"]:
+        for key in ("stats", "snapshots", "forget"):
+            check_argv(plan["guard"][key], "guard-" + key)
+    for st in pre + post:
+        check_argv(st["argv"], "step", source=st.get("source"))
+        if st.get("capture") is not None:
+            check_argv([st["capture"]], "capture", source=st.get("source"))
+    return plan
+
+
+def run_hook(name, command, env):
+    if not command:
+        return
+    log("info", "running hook", hook=name)
+    # Hooks are intentionally shell — that is their purpose (dumping a database
+    # before backup, cleaning up after). The job file is root-owned 0644 under
+    # /etc, so writing it already requires root.
+    res = subprocess.run(command, shell=True, env=env)
+    if res.returncode != 0:
+        die(4, "hook failed", hook=name, exit_code=res.returncode)
+
+
+def run_step(st, env):
+    """Execute one source step; return (exit code, message).
+
+    Steps are argv vectors, never shell strings — every element came from a
+    validated name or from a path the runtime itself reported.
+    """
+    argv, capture = st["argv"], st.get("capture")
+    log("info", "running source step", source=st.get("source"), argv=argv, capture=capture)
+    try:
+        if capture:
+            os.makedirs(os.path.dirname(capture), mode=0o750, exist_ok=True)
+            with open(capture, "w", encoding="utf-8") as fh:
+                res = subprocess.run(argv, env=env, stdout=fh, stderr=subprocess.PIPE,
+                                     text=True, timeout=CMD_TIMEOUT)
+        else:
+            res = subprocess.run(argv, env=env, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, text=True, timeout=CMD_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return 124, "no answer within %gs" % CMD_TIMEOUT
+    except FileNotFoundError:
+        return 127, "%s: command not found" % argv[0]
+    except OSError as e:
+        return 126, str(e)
+    except (ValueError, TypeError) as e:
+        # An argument subprocess refuses to marshal. Returned as a value so that
+        # a post step which cannot even start is still counted as a failure
+        # rather than aborting the unwind of the steps behind it.
+        return 126, str(e)
+    if res.returncode != 0:
+        return res.returncode, last_line(res.stderr)
+    return 0, ""
+
+
+def run_pre_steps(steps, env):
+    for st in steps:
+        code, message = run_step(st, env)
+        if code != 0:
+            # die() raises SystemExit, so the caller's `finally` still runs every
+            # post step. Continuing instead would back up a database that was
+            # never actually paused while telling the user it was.
+            die(4, "source pre-command failed", source=st.get("source"),
+                argv=st["argv"], exit_code=code, error=message)
+
+
+def run_post_steps(steps, env):
+    """Run every post step, whatever happened, and report how many failed.
+
+    Never aborts on the first failure: the steps still queued are the ones that
+    restart the remaining containers. A container left stopped, or a VM left
+    frozen, because a backup errored is a worse outcome than a failed backup.
+    """
+    failed = 0
+    for st in steps:
+        try:
+            code, message = run_step(st, env)
+        except Exception as e:              # noqa: BLE001 — deliberately total
+            # The steps still queued are the ones that start the remaining
+            # containers and thaw the remaining guests. Whatever one step manages
+            # to raise, it must not take the rest of the unwind down with it.
+            code, message = 1, "%s: %s" % (type(e).__name__, e)
+        if code != 0:
+            failed += 1
+            log("error", "source post-command failed", source=st.get("source"),
+                argv=st["argv"], exit_code=code, error=message)
+    return failed
+
+
+class Interrupted(Exception):
+    """SIGTERM or SIGINT arrived while the backup was running."""
+
+    def __init__(self, signum):
+        super().__init__("interrupted by signal %d" % signum)
+        self.signum = signum
+
+
+def install_signal_handlers():
+    """Turn a termination signal into an exception, so the unwind still happens.
+
+    This is not defensive programming, it is the common case: `systemctl stop`,
+    a unit that overruns TimeoutStartSec, and a host shutdown during a nightly
+    run all deliver SIGTERM. Python's default disposition for SIGTERM kills the
+    process outright — no `finally`, so the containers that were stopped for the
+    copy are never started again and the frozen guests are never thawed. That is
+    precisely the outcome this design calls worse than a failed backup, and it is
+    reachable by an operator typing a perfectly ordinary command.
+
+    One-shot: the handler restores the default disposition before raising, so a
+    second signal from an operator who means it still kills us immediately rather
+    than being swallowed by an unwind that is itself stuck.
+    """
+    def handler(signum, _frame):
+        signal.signal(signum, signal.SIG_DFL)
+        log("warning", "interrupted, unwinding", signal=signum)
+        raise Interrupted(signum)
+
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        try:
+            signal.signal(sig, handler)
+        except (ValueError, OSError):
+            # Not the main thread, or a platform without that signal. Losing one
+            # of them must not stop the helper from running at all.
+            pass
+
+
+# restic takes a lock for almost everything it does, and `prune` needs an
+# EXCLUSIVE one — so any other restic touching the repository makes retention
+# fail. The other restic is usually ours: an open Hangar tab polls `stats` and
+# `diff` every few seconds, and a Logbook mount holds a lock for as long as it
+# is mounted. Measured on a real repository: retention failed after a perfectly
+# good backup, night after night, purely because a browser tab was open.
+#
+# Failing outright is the wrong answer to a lock that will be gone in seconds.
+# Old snapshots then accumulate silently, which is the failure nobody notices
+# until a disk is full.
+#
+# Only lock errors are retried. Everything else fails at once, as it should.
+# Overridable so the tests can exercise the retry without waiting two minutes
+# for it. Not documented as a knob: the defaults are the behaviour.
+PRUNE_LOCK_RETRIES = int(os.environ.get("HANGAR_PRUNE_LOCK_RETRIES", "6"))
+PRUNE_LOCK_WAIT = float(os.environ.get("HANGAR_PRUNE_LOCK_WAIT", "20"))
+
+
+# hangar's own Logbook mount, which holds a repository lock for as long as
+# somebody is browsing. Named here rather than imported because this helper
+# shares no code with the browser side; core/logbook.js builds the same name.
+MOUNT_UNIT_PREFIX = "hangar-mount-"
+
+
+def release_own_mount(repo_id):
+    """Stop the Logbook mount for this repository, if one is running.
+
+    Only ever hangar's own unit, and only after a lock has actually blocked the
+    prune: a browsing session should not be interrupted on the off-chance. The
+    Logbook remounts on the next click and heals a mount that went away, so the
+    cost is a moment's delay for whoever is browsing — against retention that
+    would otherwise never run at all while a tab stays open.
+    """
+    if not isinstance(repo_id, str) or not ID_RE.match(repo_id):
+        return False
+    unit = MOUNT_UNIT_PREFIX + repo_id + ".service"
+    try:
+        active = subprocess.run(["systemctl", "is-active", "--quiet", unit],
+                                check=False).returncode == 0
+        if not active:
+            return False
+        log("info", "stopping the Logbook mount so retention can run", unit=unit)
+        subprocess.run(["systemctl", "stop", unit], check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except OSError:
+        return False        # no systemctl, or it cannot be run: not fatal
+
+
+def unlock_stale(forget_argv, env):
+    """Remove locks whose owning process is gone. Never touches a live one."""
+    # The global options are everything before the subcommand, so the unlock
+    # speaks to the same repository with the same credentials.
+    try:
+        cut = forget_argv.index("forget")
+    except ValueError:
+        return False
+    argv = forget_argv[:cut] + ["unlock"]
+    try:
+        code, _s, _e, _err = stream_restic(argv, env, "unlock")
+    except Exception:
+        return False
+    if code == 0:
+        log("info", "removed locks left behind by processes that are gone")
+        return True
+    return False
+
+
+def forget_with_lock_retry(argv, env, repo_id=None):
+    """Run the retention forget, waiting out a lock somebody else is holding."""
+    attempt = 0
+    released = False
+    while True:
+        code, summary, errors, stderr = stream_restic(argv, env, "forget")
+        if code != EXIT_REPO_LOCKED or attempt >= PRUNE_LOCK_RETRIES:
+            return code, summary, errors, stderr
+        # First lock wins two free attempts, because the usual holders are ours
+        # and not alive:
+        #
+        #  - our own Logbook mount, which holds a lock while somebody browses;
+        #  - a lock left behind by a process that died without removing it.
+        #    Seen here: a lock thirteen hours old whose PID was long gone,
+        #    blocking every retention run in between. `restic unlock` removes
+        #    exactly those — it leaves a lock alone while its owner lives — so
+        #    it is safe to run unattended.
+        if not released:
+            released = True
+            freed = release_own_mount(repo_id)
+            if unlock_stale(argv, env):
+                freed = True
+            if freed:
+                continue
+        attempt += 1
+        log("info", "repository is locked, waiting to prune",
+            attempt=attempt, of=PRUNE_LOCK_RETRIES, seconds=PRUNE_LOCK_WAIT)
+        time.sleep(PRUNE_LOCK_WAIT)
+
+
+def stream_restic(argv, env, label):
+    """Run restic, folding its JSON-lines stream into a final summary.
+
+    Returns (exit code, summary, errors, stderr text). The stderr text is handed
+    back rather than only logged because it is the sole evidence for failures
+    restic has no exit code for — an expired cloud authorisation being the one
+    that otherwise repeats silently every night.
+
+    Unknown message types are passed over rather than treated as errors: restic adds
+    new ones between releases and a backup must not fail because we did not
+    recognise a progress message.
+    """
+    log("info", "starting %s" % label)
+    try:
+        proc = subprocess.Popen(
+            argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, bufsize=1,
+        )
+    except (OSError, ValueError) as e:
+        # restic not installed is the usual one. A returned code rather than a
+        # raise, so the caller's `finally` stays in charge of the unwind: a VM
+        # frozen for a backup that could not start must still be thawed, and a
+        # traceback out of here would be reported as a crash instead of a
+        # failure with a reason.
+        log("error", "could not start restic", label=label, error=str(e))
+        return 1, None, [], ""
+    summary, errors, last_report = None, [], 0.0
+
+    try:
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # non-JSON noise on stdout is not fatal
+            # Not every restic command streams JSON *lines*. `forget --json` emits a
+            # single JSON ARRAY document, and `.get()` on a list raises — which used
+            # to end the run with a traceback AFTER the snapshot had been written,
+            # and worse, killed restic mid-forget and left an exclusive lock behind,
+            # so every subsequent run failed with REPO_LOCKED until someone
+            # intervened. There is nothing to stream from a document form: the
+            # caller only needs the exit code, and the UI parses the same output
+            # with HangarRestic.parseForget when it wants the detail.
+            if not isinstance(msg, dict):
+                continue
+            mtype = msg.get("message_type")
+            if mtype == "summary":
+                summary = msg
+            elif mtype == "error":
+                errors.append(msg)
+                log("warning", "restic reported an error",
+                    item=msg.get("item"), during=msg.get("during"),
+                    error=(msg.get("error") or {}).get("message") or msg.get("message"))
+            elif mtype == "status":
+                # Throttle: restic emits status many times a second and the journal is
+                # not the right place for that volume.
+                now = time.monotonic()
+                if now - last_report >= 10.0:
+                    last_report = now
+                    log("info", "progress",
+                        percent=round((msg.get("percent_done") or 0) * 100, 1),
+                        files_done=msg.get("files_done"),
+                        bytes_done=msg.get("bytes_done"))
+    except BaseException:
+        # We are leaving this function early — a signal, almost always. restic must
+        # not outlive us: the post steps are about to start the containers again,
+        # and a backup still reading their volumes while they restart is worse than
+        # either outcome on its own.
+        proc.kill()
+        proc.wait()
+        raise
+
+    stderr_text = proc.stderr.read() or ""
+    proc.wait()
+    code = proc.returncode
+
+    for eline in stderr_text.splitlines():
+        eline = eline.strip()
+        if not eline:
+            continue
+        try:
+            emsg = json.loads(eline)
+        except json.JSONDecodeError:
+            log("warning", "restic stderr", text=eline)
+            continue
+        if emsg.get("message_type") == "exit_error":
+            log("error", "restic exit_error",
+                code=emsg.get("code"), error=emsg.get("message"))
+
+    return code, summary, errors, stderr_text
+
+
+# ---- running the size guard -------------------------------------------------
+
+
+def run_reader(argv, env):
+    """Run a restic command that answers with one JSON document; return (code, stdout, stderr).
+
+    Deliberately NOT bounded by CMD_TIMEOUT. That deadline exists for `volume
+    inspect` and `virsh`, which answer in milliseconds or are wedged; `stats` and
+    `snapshots` legitimately take minutes on a large remote repository — exactly the
+    repositories a size limit is set on — and killing them at 20s would report
+    "size could not be measured" on every one of them.
+
+    Popen rather than subprocess.run so a signal arriving mid-read still takes
+    restic with it, as stream_restic does: a restic left running against the
+    repository would hold the lock after we have gone.
+    """
+    try:
+        proc = subprocess.Popen(argv, env=env, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True)
+    except FileNotFoundError:
+        return 127, "", "%s: command not found" % argv[0]
+    except (OSError, ValueError, TypeError) as e:
+        return 126, "", str(e)
+    try:
+        out, err = proc.communicate()
+    except BaseException:
+        proc.kill()
+        proc.wait()
+        raise
+    return proc.returncode, out or "", err or ""
+
+
+def json_document(text):
+    """The single JSON document restic answered with, or None.
+
+    Tolerant of a stray non-JSON line in front of it (a backend notice, a progress
+    line on a terminal) for the reason parse_volume_inspect is tolerant: absorbing
+    that costs three lines, and failing on it would read as "size unmeasurable" and
+    silently disable the guard.
+    """
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        pass
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line or line[0] not in "[{":
+            continue
+        try:
+            return json.loads(line)
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
+def measure_repo(guard, env):
+    """(bytes, snapshot count) for the repository, or (None, None).
+
+    None is a real answer here and must stay distinct from 0: plan_trim reads an
+    unknown size as "delete nothing", and a 0 would read as "wildly under the
+    limit" — the same outcome by luck rather than by rule.
+
+    The snapshot count rides along because the same JSON document already carries
+    it and js/core/reposize.js shows it next to the size. It is allowed to be
+    None on its own: an old restic that omits the field must not cost us a size
+    we did measure.
+    """
+    code, out, err = run_reader(guard["stats"], env)
+    if code != 0:
+        log("warning", "could not measure the repository size",
+            exit_code=code, error=last_line(err))
+        return None, None
+    doc = json_document(out)
+    if not isinstance(doc, dict):
+        log("warning", "restic stats did not answer with a JSON document",
+            text=last_line(out))
+        return None, None
+    total = doc.get("total_size")
+    if not is_number(total) or total < 0:
+        log("warning", "restic stats answered with no usable total_size")
+        return None, None
+    count = doc.get("snapshots_count")
+    return total, count if is_number(count) and count >= 0 else None
+
+
+def remember_repo_size(repo_id, size, snapshots):
+    """Leave the measured size where the Overview can find it.
+
+    The size guard has just paid for a `stats` call. The browser would otherwise
+    pay for its own — fifty seconds to two minutes against a remote repository —
+    to display the same number. Writing it here means a machine that backs up
+    nightly has a fresh size on screen without anyone ever waiting for one.
+
+    Best effort by design: this runs AFTER a successful backup, and a cache file
+    that could not be written is not a reason to report the backup differently.
+    Mirrors js/core/reposize.js — same path, same field names, same 0644, so the
+    two implementations stay swappable.
+    """
+    if not isinstance(repo_id, str) or not ID_RE.match(repo_id):
+        return False
+    # None here means the measurement failed. A cache entry saying 0, or saying
+    # nothing while carrying tonight's date, would be worse than no file at all.
+    if not is_number(size) or size < 0:
+        return False
+    entry = {
+        "size": size,
+        "snapshots": snapshots if is_number(snapshots) else None,
+        # Milliseconds, because the browser reads this with Date and every other
+        # timestamp hangar hands the UI is in milliseconds too.
+        "at": int(time.time() * 1000),
+    }
+    path = os.path.join(STATE_DIR, "size-%s.json" % repo_id)
+    try:
+        os.makedirs(STATE_DIR, mode=0o755, exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(entry, fh)
+            fh.write("\n")
+        os.chmod(tmp, 0o644)
+        # Atomic, so a browser reading this file never sees half of it.
+        os.replace(tmp, path)
+        return True
+    except OSError as e:
+        log("warning", "could not record the repository size", path=path, error=str(e))
+        return False
+
+
+def list_snapshots(guard, env):
+    """Every snapshot in the repository, or None when the list could not be read.
+
+    None, again, is not []: an empty list is "there is nothing left to delete",
+    which is a conclusion, while a failed listing is the absence of one.
+    """
+    code, out, err = run_reader(guard["snapshots"], env)
+    if code != 0:
+        log("warning", "could not list snapshots for the size guard",
+            exit_code=code, error=last_line(err))
+        return None
+    doc = json_document(out)
+    if not isinstance(doc, list):
+        log("warning", "restic snapshots did not answer with a JSON array",
+            text=last_line(out))
+        return None
+    return [s for s in doc if isinstance(s, dict)]
+
+
+def short_id_of(snapshot):
+    sid = snapshot.get("short_id")
+    if isinstance(sid, str) and sid:
+        return sid
+    sid = snapshot.get("id")
+    return sid[:8] if isinstance(sid, str) else ""
+
+
+def guard_stop(reason, remaining, error):
+    """A stop this helper invented rather than one plan_trim returned.
+
+    Always spelled 'unknown-size', never a reason of our own: describeOutcome in
+    js/core/sizeguard.js is the only thing that turns this record into a sentence,
+    and its fallthrough for an unrecognised 'none' reason is "the repository is
+    within its size limit" — a success sentence for a run that failed to measure or
+    failed to delete. 'unknown-size' renders as "nothing was changed", which is
+    true of every one of these stops. The precise cause travels in `error` and in
+    the journal warning beside it.
+    """
+    out = trim_decision("none", None, "unknown-size", remaining)
+    out["error"] = error
+    return out
+
+
+def run_size_guard(guard, env, repo_id=None):
+    """Keep the repository under its size limit; return the record, or None.
+
+    The shape is forced by deduplication: forget the oldest -> prune -> measure ->
+    ask again. How much a forget frees cannot be known before it is done, so the
+    loop measures instead of predicting.
+
+    The normal path — a repository under its limit — costs exactly one `stats` call
+    and says nothing at all. Nothing else runs, not even the snapshot listing.
+
+    This function never raises and never fails the run. The snapshot was already
+    written; failing the unit because a later cleanup could not reach a target would
+    train the operator to ignore red.
+    """
+    if not guard:
+        return None
+
+    limit = guard["limitBytes"]
+    started = time.time()
+    start_bytes = None
+    current = None
+    # Bound before the try: an Interrupted raised inside measure_repo would
+    # otherwise leave this name undefined, and the record written on the way out
+    # would die with a NameError instead of reporting the interruption.
+    snapshot_count = None
+    iterations = 0
+    forgotten = []
+
+    # Interrupted is caught around the WHOLE loop, not only around the forget: a
+    # `stats` or `snapshots` on a large remote repository takes long enough for an
+    # operator to give up on it, and letting the exception out here would end a
+    # SUCCESSFUL backup with a traceback and exit 1. The unwind has already
+    # happened — the post steps ran before the guard started — so there is nothing
+    # left to undo, only something to record.
+    try:
+        start_bytes, snapshot_count = measure_repo(guard, env)
+        current = start_bytes
+        if start_bytes is None:
+            outcome = guard_stop("unknown-size", 0, "the repository size could not be measured")
+        else:
+            while True:
+                if guard_over_by(current, limit) == 0:
+                    outcome = trim_decision("none", None, "under-limit", 0)
+                    break
+
+                # Only a repository that is OVER ever pays for this call.
+                snapshots = list_snapshots(guard, env)
+                if snapshots is None:
+                    outcome = guard_stop("unknown-size", guard_over_by(current, limit),
+                                         "the snapshots could not be listed")
+                    break
+
+                outcome = plan_trim({
+                    "currentBytes": current,
+                    "limitBytes": limit,
+                    "snapshots": snapshots,
+                    "minSnapshots": guard["minSnapshots"],
+                    "iterations": iterations,
+                    "maxIterations": guard["maxIterations"],
+                })
+                if outcome["action"] != "forget":
+                    break
+
+                snapshot = outcome["snapshot"]
+                short = short_id_of(snapshot)
+                log("info", "over the size limit, forgetting the oldest snapshot",
+                    snapshot=short, size=format_size(current), limit=guard["limit"],
+                    over=format_size(outcome["remaining"]), pass_number=iterations + 1)
+
+                code, _summary, _errors, _stderr = stream_restic(
+                    guard["forget"] + [snapshot["id"]], env, "size guard forget")
+                iterations += 1
+                if code != 0:
+                    outcome = guard_stop(
+                        "unknown-size", guard_over_by(current, limit),
+                        "forgetting %s failed with exit %d" % (short or "a snapshot", code))
+                    break
+                forgotten.append(short)
+
+                measured, snapshot_count = measure_repo(guard, env)
+                if measured is None:
+                    outcome = guard_stop("unknown-size", guard_over_by(current, limit),
+                                         "the repository size could not be measured after pruning")
+                    break
+                current = measured
+    except Interrupted as e:
+        outcome = guard_stop("unknown-size", guard_over_by(current, limit),
+                             "interrupted by signal %d" % e.signum)
+
+    remaining = outcome.get("remaining") or 0
+    record = {
+        # These three are spelled exactly as describeOutcome() in
+        # js/core/sizeguard.js reads them, so the UI renders the sentence straight
+        # from this record instead of translating it first.
+        "action": outcome["action"],
+        "reason": outcome["reason"],
+        "remaining": remaining,
+        "limit": guard["limit"],
+        "limit_bytes": limit,
+        "start_bytes": start_bytes,
+        "size_bytes": current,
+        "forgotten": forgotten,
+        "iterations": iterations,
+        "min_snapshots": guard["minSnapshots"],
+        "max_iterations": guard["maxIterations"],
+        "seconds": round(time.time() - started, 3),
+    }
+    if outcome.get("error"):
+        record["error"] = outcome["error"]
+
+    # Whatever the guard concluded, it measured — and the last measurement is
+    # still the truth about this repository. Recorded even when the guard gave up
+    # over the limit: a size the operator needs to see is exactly the size that
+    # made it give up. `current` is None when nothing could be measured, and
+    # remember_repo_size is what decides that is not worth writing down.
+    remember_repo_size(repo_id, current, snapshot_count)
+
+    if remaining > 0:
+        # The load-bearing report. A run that stopped while still over the limit is
+        # not a success, and the operator has to be told in words how far short it
+        # is — a status code in a state file nobody opens is not a warning.
+        log("warning", "the repository is still %s over its size limit" % format_size(remaining),
+            reason=record["reason"], action=record["action"], limit=guard["limit"],
+            size=format_size(current), over_bytes=remaining,
+            deleted=len(forgotten), passes=iterations,
+            min_snapshots=guard["minSnapshots"], max_iterations=guard["maxIterations"],
+            error=record.get("error"))
+    elif forgotten:
+        log("info", "the repository is within its size limit again",
+            size=format_size(current), limit=guard["limit"],
+            deleted=len(forgotten), passes=iterations)
+
+    return record
+
+
+def write_state(job_id, record):
+    try:
+        os.makedirs(STATE_DIR, mode=0o755, exist_ok=True)
+        path = os.path.join(STATE_DIR, "%s.json" % job_id)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(record, fh, sort_keys=True, indent=2)
+            fh.write("\n")
+        os.replace(tmp, path)   # atomic: the UI must never read a half-written file
+    except OSError as e:
+        # Losing the state marker must not fail an otherwise good backup.
+        log("warning", "could not write state file", error=str(e))
+
+
+def main(argv):
+    if len(argv) < 2:
+        die(1, "usage: hangar-run <job-id> [--print-plan]")
+    job_id = argv[1]
+    print_plan = "--print-plan" in argv[2:]
+
+    # Both ids are interpolated into a path under CONF_DIR. The editor already
+    # enforces this shape, but the job file is the untrusted half of the pair:
+    # a repo of "../../etc/shadow" would otherwise be opened and parsed.
+    if not ID_RE.match(job_id):
+        die(1, "not a usable job id", job=job_id)
+
+    job = read_json(os.path.join(CONF_DIR, "jobs", "%s.json" % job_id))
+    if not isinstance(job, dict):
+        die(1, "job file is not an object", job=job_id)
+    repo_id = job.get("repo")
+    if not repo_id:
+        die(1, "job does not name a repository", job=job_id)
+    if not isinstance(repo_id, str) or not ID_RE.match(repo_id):
+        die(1, "not a usable repository id", job=job_id, repo=str(repo_id))
+    repo = read_json(os.path.join(CONF_DIR, "repos", "%s.json" % repo_id))
+    if not isinstance(repo, dict):
+        die(1, "repository file is not an object", repo=repo_id)
+    repo.setdefault("id", repo_id)
+
+    plan = build_plan(job, repo)
+
+    if print_plan:
+        # Machine-readable dry run. The node integration tests use this to assert the
+        # helper and js/core/* agree on how a job becomes a restic command line.
+        json.dump(plan, sys.stdout, sort_keys=True, indent=2)
+        sys.stdout.write("\n")
+        return 0
+
+    env = dict(os.environ)
+    env.update(plan["env"])
+
+    started = time.time()
+    hooks = job.get("hooks") or {}
+    run_hook("pre", hooks.get("pre"), env)
+
+    # Installed here rather than at import: --print-plan must stay a pure dry run,
+    # and nothing before this point has changed the state of a container or a VM.
+    install_signal_handlers()
+
+    # try/finally, not sequence: whether the pre steps fail, the backup fails or
+    # restic is killed outright, the containers still have to be started again
+    # and the guests still have to be thawed.
+    post_failures = 0
+    interrupted = None
+    try:
+        run_pre_steps(plan["pre"], env)
+        code, summary, errors, stderr_text = stream_restic(plan["backup"], env, "backup")
+    except Interrupted as e:
+        # Folded into restic's own "cancelled" code rather than a new exit status:
+        # a run stopped by an operator is the same outcome however it was stopped,
+        # and the UI already knows what CANCELLED means.
+        interrupted = e
+        code, summary, errors, stderr_text = EXIT_CANCELLED, None, [], ""
+    finally:
+        post_failures = run_post_steps(plan["post"], env)
+
+    kind = classify_run(code, stderr_text)
+
+    if code not in (0, EXIT_READ_ERRORS):
+        write_state(job_id, {
+            "job": job_id, "status": "failed", "kind": kind,
+            "started": started, "finished": time.time(), "exit_code": code,
+            "post_failures": post_failures,
+        })
+        if interrupted is not None:
+            # Said as what it was. "backup failed" for a run an operator stopped
+            # is the kind of wrong report that teaches people to ignore the log.
+            die(2, "backup was interrupted", exit_code=code, kind=kind,
+                signal=interrupted.signum, post_failures=post_failures)
+        if kind == "AUTH_EXPIRED":
+            # The state file above is what the UI reads in the morning, and it
+            # carries the kind — so the destination shows as needing a new
+            # sign-in without anyone re-running the backup to find out. The exit
+            # status stays 2: this IS a failed backup, and the unit must fail.
+            die(2, "the cloud destination's authorisation has expired — "
+                   "re-authorise it in hangar and the next run will work",
+                exit_code=code, kind=kind)
+        die(2, "backup failed", exit_code=code, kind=kind)
+
+    status = "partial" if code == EXIT_READ_ERRORS else "ok"
+    if status == "partial":
+        log("warning", "backup completed but some files were unreadable",
+            error_count=len(errors))
+
+    record = {
+        "job": job_id, "status": status, "kind": kind,
+        "started": started, "finished": time.time(), "exit_code": code,
+        "snapshot": (summary or {}).get("snapshot_id"),
+        "files_new": (summary or {}).get("files_new"),
+        "files_changed": (summary or {}).get("files_changed"),
+        "data_added": (summary or {}).get("data_added"),
+        "unreadable": len(errors),
+        "post_failures": post_failures,
+    }
+
+    if plan["forget"]:
+        fcode, _fsummary, _ferrors, fstderr = forget_with_lock_retry(plan["forget"], env, repo_id)
+        if fcode != 0:
+            record["status"] = "prune-failed"
+            record["prune_exit_code"] = fcode
+            # The backup itself succeeded, so record["kind"] stays what the backup
+            # was. The prune's own kind is recorded beside it: an authorisation
+            # that lapsed between the two calls is still worth a button.
+            record["prune_kind"] = classify_run(fcode, fstderr)
+            write_state(job_id, record)
+            run_hook("post", hooks.get("post"), env)
+            die(3, "retention/prune failed after a successful backup", exit_code=fcode)
+
+    # After the retention forget, deliberately: retention is the policy the user
+    # asked for, and the guard only exists to catch what that policy did not keep
+    # small enough. Running it first would delete snapshots retention would have
+    # removed for free.
+    guard_record = run_size_guard(plan.get("guard"), env, repo_id)
+    if guard_record:
+        record["size_guard"] = guard_record
+        if guard_record["remaining"] > 0:
+            # A distinct status, not "ok" and not "failed". The snapshot was
+            # written, so the unit succeeds — but a repository still over its limit
+            # after the guard has done all it may is a state the operator has to be
+            # able to see in the morning without reading the journal. It replaces
+            # "partial" as well; the read errors are still in `kind` and
+            # `unreadable`, while the shortfall has no other field the UI reads.
+            record["status"] = "size-limit-exceeded"
+
+    write_state(job_id, record)
+    run_hook("post", hooks.get("post"), env)
+    if post_failures:
+        # The snapshot is written and recorded, so this is not a backup failure —
+        # but a container that did not come back up must not be reported as a
+        # clean run, or nobody will look until the service is missed.
+        die(4, "source post-command failed", count=post_failures,
+            snapshot=record.get("snapshot"))
+    log("info", "backup complete", status=record["status"], snapshot=record.get("snapshot"))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

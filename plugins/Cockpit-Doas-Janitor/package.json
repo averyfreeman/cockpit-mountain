@@ -1,0 +1,54 @@
+{
+  "name": "cockpit-sudo-manager",
+  "description": "Cockpit plugin for managing sudo rules safely",
+  "version": "0.2.1",
+  "type": "module",
+  "main": "index.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/josephoaks/Cockpit-SUDO-Manager.git"
+  },
+  "author": "Joseph Oaks",
+  "license": "Apache-2.0",
+  "bugs": {
+    "url": "https://github.com/josephoaks/Cockpit-SUDO-Manager/issues"
+  },
+  "homepage": "https://github.com/josephoaks/Cockpit-SUDO-Manager#readme",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "watch": "ESBUILD_WATCH='true' ./build.js",
+    "build": "./build.js",
+    "stylelint": "stylelint src/*.{css,scss}",
+    "stylelint:fix": "stylelint --fix src/*.{css,scss}",
+    "lint": "oxlint src/",
+    "lint:fix": "oxlint --fix src/"
+  },
+  "devDependencies": {
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "esbuild-wasm": "0.27.2",
+    "qunit": "2.25.0",
+    "stylelint": "17.1.0",
+    "stylelint-config-recommended-scss": "17.0.0",
+    "stylelint-config-standard": "40.0.0",
+    "stylelint-config-standard-scss": "17.0.0",
+    "stylelint-formatter-pretty": "4.0.1",
+    "typescript": "catalog:",
+    "oxlint": "catalog:"
+  },
+  "dependencies": {
+    "@patternfly/patternfly": "catalog:",
+    "@patternfly/react-core": "catalog:",
+    "@patternfly/react-icons": "catalog:",
+    "@patternfly/react-styles": "catalog:",
+    "@patternfly/react-table": "catalog:",
+    "argparse": "2.0.1",
+    "esbuild": "catalog:",
+    "esbuild-sass-plugin": "3.6.0",
+    "gettext-parser": "9.0.1",
+    "react": "catalog:",
+    "react-dom": "catalog:"
+  }
+}

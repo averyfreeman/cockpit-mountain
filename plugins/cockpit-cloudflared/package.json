@@ -1,0 +1,49 @@
+{
+  "name": "cloudflared",
+  "description": "Cloudflare tunnels application for Cockpit",
+  "main": "dist/index.js",
+  "repository": "git@github.com:spotsnel/cockpit-cloudflared.git",
+  "author": "Gerard Braad <me@gbraad.nl>",
+  "version": "v0.0.2",
+  "license": "LGPL-2.1",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite --host 0.0.0.0",
+    "rpm": "make rpm",
+    "watch": "vite build --watch",
+    "link": "mkdir -p ~/.local/share/cockpit && ln -s $PWD/dist ~/.local/share/cockpit/cloudflared",
+    "unlink": "rm ~/.local/share/cockpit/cloudflared",
+    "linkusr": "sudo mkdir -p /usr/local/share/cockpit && sudo ln -s $PWD/dist /usr/local/share/cockpit/cloudflared",
+    "unlinkusr": "sudo rm ~/.local/share/cockpit/cloudflared",
+    "cockpit": "sudo runuser -u cockpit-wsinstance -- /usr/libexec/cockpit-ws --port=9090 --for-tls-proxy",
+    "lint": "oxlint src/"
+  },
+  "devDependencies": {
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "argparse": "^2.0.1",
+    "chrome-remote-interface": "^0.32.1",
+    "htmlparser": "^1.7.7",
+    "jed": "^1.1.1",
+    "po2json": "^1.0.0-alpha",
+    "qunit": "^2.9.3",
+    "sass": "^1.63.6",
+    "sizzle": "^2.3.3",
+    "typescript": "catalog:",
+    "oxlint": "catalog:",
+    "vite": "catalog:",
+    "@vitejs/plugin-react": "catalog:"
+  },
+  "dependencies": {
+    "@patternfly/patternfly": "catalog:",
+    "@patternfly/react-core": "catalog:",
+    "@patternfly/react-icons": "catalog:",
+    "@patternfly/react-styles": "catalog:",
+    "@patternfly/react-table": "catalog:",
+    "react": "catalog:",
+    "react-dom": "catalog:"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

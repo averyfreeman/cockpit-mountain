@@ -1,0 +1,28 @@
+# Managed by Cockpit Sudo Manager
+# System observability services
+#
+# Scope:
+#   - Time synchronization
+#   - Logging
+#   - Audit visibility
+
+# ==========================================================
+# Time synchronization
+# ==========================================================
+Cmnd_Alias SYSTEM_TIME = \
+  /usr/bin/systemctl status chronyd, \
+  /usr/bin/systemctl restart chronyd
+
+# ==========================================================
+# Logging
+# ==========================================================
+Cmnd_Alias SYSTEM_LOGGING = \
+  /usr/bin/systemctl status systemd-journald, \
+  /usr/bin/systemctl restart systemd-journald
+
+# ==========================================================
+# Audit
+# ==========================================================
+Cmnd_Alias SYSTEM_AUDIT = \
+  /usr/bin/systemctl status auditd, \
+  /usr/bin/systemctl restart auditd

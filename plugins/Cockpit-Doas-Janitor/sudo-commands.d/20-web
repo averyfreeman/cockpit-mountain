@@ -1,0 +1,16 @@
+# Managed by Cockpit Sudo Manager
+# Web service sudo policy
+#
+# Scope:
+#   - NGINX service control
+#   - Configuration validation
+#   - No shell or file write access
+
+# ==========================================================
+# Command aliases – web services
+# ==========================================================
+Cmnd_Alias WEB_NGINX = \
+  /usr/bin/systemctl status nginx, \
+  /usr/bin/systemctl reload nginx, \
+  /usr/bin/systemctl restart nginx, \
+  /usr/sbin/nginx -t

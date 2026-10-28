@@ -1,0 +1,940 @@
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/common/pywrap", sys.argv)
+# SPDX-License-Identifier: LGPL-2.1-or-later
+#
+# Copyright (C) 2021 Red Hat, Inc.
+import os
+import time
+import xml.etree.ElementTree as ET
+
+import machineslib
+import testlib
+from dialoglib import DialogHelpers
+
+
+@testlib.nondestructive
+class TestMachinesConsoles(machineslib.VirtualMachinesCase):
+
+    def waitDownloadFile(self, filename: str, expected_size: int | None = None, content: str | None = None) -> None:
+        filepath = self.browser.driver.download_dir / filename
+        testlib.wait(filepath.exists)
+
+        if expected_size is not None:
+            testlib.wait(lambda: filepath.stat().st_size == expected_size)
+
+        if content is not None:
+            self.assertEqual(filepath.read_text(), content)
+
+        os.unlink(filepath)
+
+    def waitViewerDownload(self, kind, host, port=5900):
+        self.browser.allow_download()
+        self.browser.click('.vm-console-footer button:contains("Launch viewer")')
+        content = f"""[virt-viewer]
+type={kind}
+host={host}
+port={port}
+delete-this-file=1
+fullscreen=0
+"""
+        self.waitDownloadFile("console.vv", content=content, expected_size=len(content))
+
+    def wait_for_alpine_greeting(self, name: str) -> None:
+        b = self.browser
+
+        # WebGL2 is not supported in firefox headless mode
+        if b.browser != "firefox":
+            testlib.wait(lambda: "Welcome to Alpine Linux" in
+                b.text(f"#{name}-terminal .xterm-accessibility-tree"))
+        else:
+            # check that empty state is shown instead of console
+            b.wait_in_text(".vm-console .pf-v6-c-empty-state", "Terminal not available")
+
+    @testlib.skipImage('SPICE not supported on RHEL', "rhel-*", "centos-*")
+    def testExternalConsole(self):
+        b = self.browser
+
+        self.createVm("subVmTest1", graphics="spice")
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+        self.waitVmRow("subVmTest1")
+
+        b.wait_in_text("#vm-subVmTest1-system-state", "Running")  # running or paused
+        self.goToVmPage("subVmTest1")
+
+        # VNC is not defined for this VM, so we get the empty SPICE state
+        b.wait_in_text(".consoles-card", "This machine has a SPICE graphical console")
+        b.click(".vm-console-footer .pf-v6-c-button.pf-m-link")
+        b.wait_in_text(".ct-remote-viewer-popover", f"spice://{b.address}:5900")
+
+        # Pixel testing the popover is slightly tricky. We need to
+        # avoid its round corners by only looking at the body, and it
+        # moves around asynchronously when changing layout.
+
+        def reset_popover():
+            b.click(".vm-console-footer .pf-v6-c-button.pf-m-link")
+            b.wait_not_present(".ct-remote-viewer-popover")
+            b.click(".vm-console-footer .pf-v6-c-button.pf-m-link")
+            b.wait_visible(".ct-remote-viewer-popover")
+
+        b.assert_pixels("#popover-remote-viewer-info-body", "popover",
+                        layout_change_hook=reset_popover)
+
+        b.click(".vm-console-footer .pf-v6-c-button.pf-m-link")
+        b.wait_not_present(".ct-remote-viewer-popover")
+
+        self.waitViewerDownload("spice", b.address)
+
+    def testInlineConsole(self, urlroot=""):
+        b = self.browser
+
+        args = self.createVm("subVmTest1", "vnc")
+
+        if urlroot != "":
+            self.machine.write("/etc/cockpit/cockpit.conf", f"[WebService]\nUrlRoot={urlroot}")
+
+        self.login_and_go("/machines", urlroot=urlroot)
+        self.waitPageInit()
+        self.waitVmRow("subVmTest1")
+
+        b.wait_in_text("#vm-subVmTest1-system-state", "Running")  # running or paused
+        self.goToVmPage("subVmTest1")
+
+        # since VNC is defined for this VM, the view for "In-Browser Viewer" is rendered by default
+        b.wait_visible(".vm-console-vnc canvas")
+
+        # make sure the log file is full - then empty it and reboot the VM - the log file should fill up again
+        self.waitGuestBooted(args['logfile'])
+
+        self.machine.execute(f"echo '' > {args['logfile']}")
+        b.click("#vnc-actions")
+        b.click("#ctrl-alt-Delete")
+        self.waitLogFile(args['logfile'], "reboot: Restarting system")
+
+    def testInlineConsoleWithUrlRoot(self, urlroot=""):
+        self.testInlineConsole(urlroot="/webcon")
+
+    def testSerialConsole(self):
+        b = self.browser
+        m = self.machine
+        name = "vmWithSerialConsole"
+
+        # Restrict number of remembered console card states to
+        # two. This way we can test the automatic closing of channels
+        # when more than two machines are visited.
+
+        override = "/etc/cockpit/machines.override.json"
+        self.write_file(override,
+                        """{ "config": { "MaxConsoleCardStates": 2 } }\n""")
+
+        self.createVm(name, graphics='vnc', ptyconsole=True)
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+        self.waitVmRow(name)
+
+        self.goToVmPage(name)
+        b.wait_in_text(f"#vm-{name}-system-state", "Running")
+
+        b.click(".consoles-card .pf-v6-c-toggle-group button:contains(Serial)")
+
+        # WebGL2 is not supported in firefox headless mode
+        if b.browser != "firefox":
+            # In case the OS already finished booting, press Enter into the console to re-trigger the login prompt
+            # Sometimes, pressing Enter one time doesn't take effect, so loop to press Enter to make sure
+            # the console has accepted it.
+            for _ in range(0, 60):
+                b.focus(f"#{name}-terminal .xterm-accessibility-tree")
+                b.key("Enter")
+                if "Welcome to Alpine Linux" in b.text(f"#{name}-terminal .xterm-accessibility-tree"):
+                    break
+                time.sleep(1)
+
+        # Make sure the content of console is expected
+        self.wait_for_alpine_greeting(name)
+
+        # Make sure the console keeps their content when navigating
+        # around
+
+        b.click(".consoles-card button:contains(Expand)")
+        b.wait_visible(".consoles-page-expanded")
+        self.wait_for_alpine_greeting(name)
+
+        b.click(".consoles-card button:contains(Compress)")
+        b.wait_visible(".consoles-card")
+        self.wait_for_alpine_greeting(name)
+
+        b.go("/machines#/")
+        self.waitPageInit()
+        self.waitVmRow(name)
+        self.goToVmPage(name)
+        b.wait_visible(f"#{name}-terminal")
+        self.wait_for_alpine_greeting(name)
+
+        # Test re-connecting
+
+        b.click(".consoles-card button:contains(Disconnect)")
+        b.wait_in_text(".consoles-card", "Disconnected")
+
+        b.click('.consoles-card button:contains("Connect")')
+        if b.browser != "firefox":
+            b.wait_in_text(f"#{name}-terminal .xterm-accessibility-tree > div:nth-child(1)",
+                           f"Connected to domain '{name}'")
+        else:
+            b.wait_in_text(".vm-console .pf-v6-c-empty-state", "Terminal not available")
+
+        # WebGL2 is not supported in firefox headless mode
+        # Skip multiple console channel tests in firefox
+        if b.browser == "firefox":
+            return
+
+        def channel_is_open_predicate(tag):
+            pattern = f"virsh -c [q]emu:///system console vmWithSerialConsole {tag}"
+            return lambda: m.execute(f"(ps aux | grep '{pattern}') || true") != ""
+
+        # Add a second serial console, selector changes from toggle group to dropdown menu
+        m.execute("""
+            virsh destroy vmWithSerialConsole;
+            virt-xml --add-device vmWithSerialConsole --console pty,target_type=virtio;
+            virsh start vmWithSerialConsole""")
+        b.select_PF(".consoles-card .pf-v6-c-menu-toggle", "Serial (serial0)")
+        b.wait(channel_is_open_predicate("serial0"))
+        b.select_PF(".consoles-card .pf-v6-c-menu-toggle", "Serial (console1)")
+        b.wait(channel_is_open_predicate("console1"))
+
+        # Add multiple serial consoles
+        # Remove all console firstly
+        m.execute("virsh destroy vmWithSerialConsole")
+        m.execute("virt-xml --remove-device vmWithSerialConsole --console all")
+        # Add console1 ~ console5
+        m.execute("""
+                  for i in {1..5}; do
+                    virt-xml vmWithSerialConsole --add-device --console pty,target.type=virtio;
+                  done
+                  virsh start vmWithSerialConsole
+                  """)
+
+        for i in range(0, 6):
+            tag = "serial" if i == 0 else "console"
+            b.select_PF(".consoles-card .pf-v6-c-menu-toggle", f"Serial ({tag}{i})")
+            b.wait(channel_is_open_predicate(f"{tag}{i}"))
+
+        def count_console_channels():
+            return int(m.execute("ps aux | grep 'virsh -c [q]emu:///system console vmWithSerialConsole' | wc -l"))
+
+        # Now we should have 6 channels open
+        b.wait(lambda: count_console_channels() == 6)
+
+        # Create two more machines navigate to them. Because we have
+        # set MaxConsoleCardStates to 2 at the start of the test, this
+        # will close all channels to the first machine.
+
+        def create_and_visit_machine(name):
+            self.createVm(name, graphics='vnc', ptyconsole=True, running=False)
+            b.go("/machines#/")
+            self.waitPageInit()
+            self.waitVmRow(name)
+            self.goToVmPage(name)
+
+        create_and_visit_machine(name + "2")
+
+        # Channels for the first machine should still be open, but no
+        # new ones should have been opened.
+        b.wait(lambda: count_console_channels() == 6)
+
+        create_and_visit_machine(name + "3")
+
+        # Now no channels should be open anymore.
+        b.wait(lambda: count_console_channels() == 0)
+
+        # disconnecting the serial console closes the pty channel
+        self.allow_journal_messages("connection unexpectedly closed by peer",
+                                    ".*Connection reset by peer")
+        self.allow_browser_errors("Disconnection timed out.",
+                                  "Failed when connecting: Connection closed")
+        self.allow_journal_messages(".* couldn't shutdown fd: Transport endpoint is not connected")
+        self.allow_journal_messages("127.0.0.1:5900: couldn't read: Connection refused")
+
+    def testBasic(self):
+        b = self.browser
+        name = "subVmTest1"
+
+        self.createVm(name, graphics="vnc", ptyconsole=True)
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+
+        self.waitVmRow(name)
+        self.goToVmPage(name)
+        b.wait_in_text(f"#vm-{name}-system-state", "Running")
+
+        # test switching console from serial to graphical
+        b.wait_visible(".consoles-card")
+        b.wait_visible(".vm-console-vnc canvas")
+
+        b.click(".consoles-card .pf-v6-c-toggle-group button:contains(Serial)")
+        b.wait_not_present(".vm-console-vnc canvas")
+        b.wait_visible(f"#{name}-terminal")
+
+        # Go back to Vnc console
+        b.click(".consoles-card .pf-v6-c-toggle-group button:contains(Graphical)")
+        b.wait_not_present(f"#{name}-terminal")
+        b.wait_visible(".vm-console-vnc canvas")
+
+        # Test message is present if VM is not running
+        self.performAction(name, "forceOff", checkExpectedState=False)
+
+        b.wait_in_text(".consoles-card", "Start the virtual machine")
+
+        # Start it via the text
+        b.click(".consoles-card .pf-v6-c-button:contains(Start)")
+        b.wait_in_text(f"#vm-{name}-system-state", "Running")
+
+        self.allow_journal_messages("connection unexpectedly closed by peer")
+        self.allow_browser_errors("Disconnection timed out.",
+                                  "Failed when connecting: Connection closed")
+
+    @testlib.skipBeiboot("multi-host config not supported in beiboot scenario")
+    def testMultiHostExternalConsole(self):
+        b = self.browser
+
+        my_ip = "172.27.0.15"
+        name = "subVmTest1"
+
+        self.setup_ssh_auth()
+        self.machine.execute(f"ssh-keyscan {my_ip} > /etc/ssh/ssh_known_hosts")
+        self.enable_multihost(self.machine)
+        self.machine.write("/etc/cockpit/cockpit.conf", "[Session]\nWarnBeforeConnecting=false\n", append=True)
+
+        self.createVm(name, graphics="vnc")
+
+        self.machine.start_cockpit()
+
+        # Direct login via SSH
+
+        b.open(f"/={my_ip}/machines")
+        b.set_val('#login-user-input', "admin")
+        b.set_val('#login-password-input', "foobar")
+        b.click("#login-button")
+
+        self.waitPageInit()
+        b.become_superuser()
+        b.enter_page("/machines")
+        self.waitVmRow(name)
+
+        self.goToVmPage(name)
+        b.wait_in_text(f"#vm-{name}-system-state", "Running")
+
+        b.click(".consoles-card .pf-v6-c-toggle-group button:contains(Graphical)")
+        b.click(".vm-console-footer .pf-v6-c-button.pf-m-link")
+        b.wait_in_text(".ct-remote-viewer-popover", f"vnc://{my_ip}:5900")
+        b.click(".vm-console-footer .pf-v6-c-button.pf-m-link")
+        b.wait_not_present(".ct-remote-viewer-popover")
+
+        self.waitViewerDownload("vnc", my_ip)
+
+        # Login from Shell via SSH
+
+        b.logout()
+        b.login_and_go("/system")
+
+        host = f"admin@{my_ip}"
+
+        b.add_machine(host, password=None, known_host=True, expect_warning=False)
+
+        b.go(f"/@{host}/machines")
+        b.enter_page("/machines", host=host)
+        self.waitPageInit()
+        b.become_superuser()
+        b.enter_page("/machines", host=host)
+        self.waitVmRow(name)
+
+        self.goToVmPage(name)
+        b.wait_in_text(f"#vm-{name}-system-state", "Running")
+
+        b.click(".consoles-card .pf-v6-c-toggle-group button:contains(Graphical)")
+        b.click(".vm-console-footer .pf-v6-c-button.pf-m-link")
+        b.wait_in_text(".ct-remote-viewer-popover", f"vnc://{my_ip}:5900")
+        b.click(".vm-console-footer .pf-v6-c-button.pf-m-link")
+        b.wait_not_present(".ct-remote-viewer-popover")
+
+        self.waitViewerDownload("vnc", my_ip)
+
+    def testAddEditVNC(self):
+        b = self.browser
+
+        # Create a machine without any consoles
+
+        name = "subVmTest1"
+        self.createVm(name)
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+        self.waitVmRow(name)
+        self.goToVmPage(name)
+
+        def assert_state(text):
+            b.wait_in_text(f"#vm-{name}-consoles .pf-v6-c-empty-state", text)
+
+        def assert_not_state(text):
+            b.wait_not_in_text(f"#vm-{name}-consoles .pf-v6-c-empty-state", text)
+
+        # "Console" card shows empty state
+
+        assert_state("Graphical console support not enabled")
+        b.assert_pixels(".consoles-card", "no-vnc")
+
+        b.click(".consoles-card .pf-v6-c-empty-state button:contains(Add VNC)")
+
+        assert_state("Restart this virtual machine to access its graphical console")
+        b.wait_visible(f"#vm-{name}-needs-shutdown")
+        b.assert_pixels(".consoles-card", "needs-shutdown")
+
+        root = ET.fromstring(self.machine.execute(f"virsh dumpxml --inactive --security-info {name}"))
+        graphics = root.find('devices').findall('graphics')
+        self.assertEqual(len(graphics), 1)
+        self.assertEqual(graphics[0].get('port'), "-1")
+        self.assertEqual(graphics[0].get('passwd'), None)
+
+        d = DialogHelpers(b, "#vnc-edit-dialog")
+
+        b.click(".vm-console-footer .pf-v6-c-button.pf-m-link")
+        b.click(".ct-remote-viewer-popover button:contains('Edit VNC settings')")
+        b.wait_not_present(".ct-remote-viewer-popover")
+        b.wait_visible("#vnc-edit-dialog")
+        b.assert_pixels("#vnc-edit-dialog", "add")
+        d.set_TextInput("port", "5000")
+        b.click(d.apply_button())
+        b.wait_in_text(d.helper_text("port"), "Port must be 5900 or larger.")
+        d.set_TextInput("port", "Hamburg")
+        b.wait_in_text(d.helper_text("port"), "Port must be a number.")
+        d.set_TextInput("port", "100000000000")  # for testing failed libvirt calls
+        d.set_TextInput("password", "foobarfoobar")
+        b.wait_in_text(d.helper_text("password"), "Password must be at most 8 characters")
+        d.set_TextInput("password", "foobar")
+        b.click(d.apply_button())
+        b.wait_in_text(d.error(), "VNC settings could not be saved")
+        # Exact error messages vary, but they all contain the wrong number
+        b.wait_in_text(d.error(), "100000000000")
+        d.set_TextInput("port", "5901")
+        b.click(d.apply_button())
+        b.wait_not_present("#vnc-edit-dialog")
+
+        root = ET.fromstring(self.machine.execute(f"virsh dumpxml --inactive --security-info {name}"))
+        graphics = root.find('devices').findall('graphics')
+        self.assertEqual(len(graphics), 1)
+        self.assertEqual(graphics[0].get('port'), "5901")
+        self.assertEqual(graphics[0].get('passwd'), "foobar")
+
+        # Shut down machine
+
+        self.performAction("subVmTest1", "forceOff")
+        assert_state("Start the virtual machine to access the console")
+        b.assert_pixels(".consoles-card", "shutoff")
+
+        # Remove VNC from the outside and add it back while the machine is off
+
+        self.machine.execute(f"virt-xml --remove-device --graphics vnc {name}")
+
+        assert_state("Graphical console support not enabled")
+
+        b.click(".consoles-card .pf-v6-c-empty-state button:contains(Add VNC)")
+        assert_not_state("Graphical console support not enabled")
+        assert_state("Start the virtual machine to access the console")
+
+    def testAddSerial(self):
+        b = self.browser
+        m = self.machine
+
+        # Create a machine without any serial consoles
+
+        name = "subVmTest1"
+        self.createVm(name, running=False, ptyconsole=True)
+        m.execute(f"virt-xml --remove-device {name} --serial all")
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+        self.waitVmRow(name)
+        self.goToVmPage(name)
+
+        def assert_state(text):
+            b.wait_in_text(f"#vm-{name}-consoles .pf-v6-c-empty-state", text)
+
+        # Switch to Serial console
+
+        b.click('.consoles-card .pf-v6-c-toggle-group button:contains("Serial")')
+
+        # "Console" card shows empty state
+
+        assert_state("Serial console support not enabled")
+        b.assert_pixels(".consoles-card", "no-serial")
+
+        b.click(".consoles-card .pf-v6-c-empty-state button:contains(Add serial console)")
+
+        assert_state("Start the virtual machine to access the console")
+
+        self.performAction(name, "run")
+        self.wait_for_alpine_greeting(name)
+
+        # Shutdown, remove, start, and add it while VM is running
+        self.performAction(name, "forceOff")
+        assert_state("Start the virtual machine to access the console")
+        m.execute(f"virt-xml --remove-device {name} --serial all")
+        self.performAction(name, "run")
+        b.wait_in_text(f"#vm-{name}-system-state", "Running")
+
+        b.click('.consoles-card .pf-v6-c-toggle-group button:contains("Serial")')
+        assert_state("Serial console support not enabled")
+        b.click(".consoles-card .pf-v6-c-empty-state button:contains(Add serial console)")
+
+        assert_state("Restart this virtual machine to access its serial console")
+        b.wait_visible(f"#vm-{name}-needs-shutdown")
+        b.assert_pixels(".consoles-card", "needs-shutdown")
+
+        self.performAction("subVmTest1", "forceOff")
+        assert_state("Start the virtual machine to access the console")
+        self.performAction(name, "run")
+        self.wait_for_alpine_greeting(name)
+
+    def waitForStableVNC(self):
+        initial_remote = 1280
+        if self.machine.image in ["rhel-8-10"]:
+            initial_remote = 1024
+        with self.browser.wait_timeout(60):
+            self.browser.wait_attr(".vm-console-vnc canvas", "width", str(initial_remote))
+        return initial_remote
+
+    def testExpandedConsole(self):
+        b = self.browser
+
+        # Create a machine without any serial consoles
+
+        name = "subVmTest1"
+        self.createVm(name, graphics="vnc", ptyconsole=True)
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+        self.waitVmRow(name)
+        self.goToVmPage(name)
+
+        b.click(".consoles-card button:contains(Expand)")
+        b.wait_visible(".consoles-page-expanded")
+        self.waitForStableVNC()
+        b.assert_pixels(".consoles-card", "expanded", ignore=[".vm-console-vnc"], chrome_hack_double_shots=True)
+
+        # Disconnect VNC, switch to Serial
+
+        b.click(".consoles-card button:contains(Disconnect)")
+        b.wait_in_text(".consoles-card", "Disconnected")
+        b.click('.consoles-card .pf-v6-c-toggle-group button:contains("Serial")')
+        b.wait_visible(".consoles-card .vm-terminal")
+
+        # Compress, Serial should still be selected and VNC should stay
+        # disconnected
+
+        b.click(".consoles-card button:contains(Compress)")
+        b.wait_visible("#vm-details")
+        b.wait_visible(".consoles-card .vm-terminal")
+        b.click('.consoles-card .pf-v6-c-toggle-group button:contains("Graphical")')
+        b.wait_in_text(".consoles-card", "Disconnected")
+
+        # Connect VNC
+        b.click(".consoles-card button:contains(Connect)")
+        b.wait_visible(".vm-console-vnc canvas")
+
+    @testlib.skipImage('SPICE not supported on RHEL', "rhel-*", "centos-*")
+    def testSpice(self):
+        b = self.browser
+
+        # Create a machine with a spice console, and no vnc.
+
+        name = "subVmTest1"
+        self.createVm(name, graphics="spice")
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+        self.waitVmRow(name)
+        self.goToVmPage(name)
+
+        def assert_state(text):
+            b.wait_in_text(f"#vm-{name}-consoles .pf-v6-c-empty-state", text)
+
+        assert_state("This machine has a SPICE graphical console that can not be shown here.")
+
+        b.click(".consoles-card .pf-v6-c-empty-state button:contains(Replace with VNC)")
+        b.wait_text(".pf-v6-c-modal-box__title-text", f"Replace SPICE devices in VM {name}")
+        b.click("#replace-spice-dialog-confirm")
+        b.wait_not_present(".pf-v6-c-modal-box")
+        assert_state("Restart this virtual machine to access its graphical console")
+        b.click(f"#vm-{name}-consoles .pf-v6-c-empty-state .pf-v6-c-button:contains(Shutdown and restart)")
+        b.click("#vm-restart-dialog-force-restart")
+        b.wait_visible(".vm-console-vnc canvas")
+
+    @testlib.skipImage('No virtio video', "arch", "opensuse-*", "rhel-8-*")
+    def testScaleResize(self):
+        b = self.browser
+
+        name = "subVmTest1"
+        self.createVm(name, graphics="vnc")
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+        self.waitVmRow(name)
+        self.goToVmPage(name)
+
+        # The "width" and "height" HTML attributes of the NoVNC canvas
+        # always reflect the size of the remote framebuffer.  If we
+        # request a remote resize and it is rejected, these attributes
+        # will not change.  Thus, we don't actually have to log into
+        # the guest and do stuff like looking at
+        # /sys/class/drm/<foo>/modes to see how big the actual
+        # framebuffer is.
+
+        # Local scaling is done by NoVNC by setting the width and
+        # height style properties of the canvas element.  The browser
+        # will then scale the content of the canvas to make it as
+        # large as requested by its style.
+
+        def wait_widths(func):
+            def pred():
+                remote = int(b.attr(".vm-console-vnc canvas", "width"))
+                local = b.eval_js('document.querySelector(".vm-console-vnc canvas").offsetWidth')
+                ui = b.eval_js('document.querySelector(".vm-console-vnc").offsetWidth')
+                print("Widths: remote", remote, "local", local, "ui", ui)
+                return remote > 0 and local > 0 and ui > 0 and func(remote, local, ui)
+            testlib.wait(pred)
+
+        b.click(".consoles-card button:contains(Expand)")
+        b.wait_visible(".consoles-page-expanded")
+
+        # We want a small browser so that the remote framebuffer is
+        # initially wider than the console UI.
+
+        b.set_layout("medium")
+
+        # Initially we are in "No scaling or resizing" mode. The
+        # remote width is determined by the guest OS somehow, the
+        # local width is the same as remote and the UI is smaller than
+        # that.
+
+        initial_remote = 1280
+
+        b.wait_text("#vm-console-vnc-scaling", "No scaling or resizing")
+        wait_widths(lambda remote, local, ui: remote == initial_remote and local == remote and local > ui)
+
+        # When switching to "Local scaling", the remote width stays
+        # unchanged, but the local width is now smaller than the ui.
+
+        b.select_PF("#vm-console-vnc-scaling", "Local scaling")
+        wait_widths(lambda remote, local, ui: remote == initial_remote and local <= ui)
+
+        # When switching to "Remote resizing", the remote and local
+        # width become equal to the UI.
+
+        b.select_PF("#vm-console-vnc-scaling", "Remote resizing")
+        wait_widths(lambda remote, local, ui: remote == ui and local == ui)
+
+        # When collapsing and expanding again, nothing should have
+        # changed.
+
+        b.click(".consoles-card button:contains(Compress)")
+        b.wait_visible("#vm-details")
+        b.wait_not_present("#vm-console-vnc-scaling")
+        b.click(".consoles-card button:contains(Expand)")
+        b.wait_visible(".consoles-page-expanded")
+
+        b.wait_text("#vm-console-vnc-scaling", "Remote resizing")
+        wait_widths(lambda remote, local, ui: remote == ui and local == ui)
+
+    def testDetached(self):
+        b = self.browser
+        m = self.machine
+
+        # We use a name with funny characters to test that this
+        # doesn't trip up anything.
+
+        name = "subVm#Test.1"
+        self.createVm(name, graphics="vnc")
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+        self.waitVmRow(name)
+        self.goToVmPage(name)
+
+        b2 = self.new_browser()
+        cookie = b.cookie("cockpit")
+
+        width = self.waitForStableVNC()
+
+        href = b.attr(".consoles-card a:contains(Detach)", "href")
+        b.click(".consoles-card a:contains(Detach)")
+
+        # HACK - We can't control the new window that was opened by
+        # the click on "Detach" because of limitations in our
+        # testlib. So we open a second one explicitly with a new
+        # Browser instance. But there is a debug message that will
+        # tell us what the click on "Detach" has done.
+
+        def is_detach_message(msg):
+            return (msg.startswith("> debug: Detaching VNC: ") and
+                    href in msg and
+                    f"width={width}" in msg)
+
+        testlib.wait(lambda: any(is_detach_message(msg) for msg in b.get_js_log()))
+
+        b2.open("/cockpit/@localhost/machines/index.html" + href, cookie=cookie)
+        with b2.wait_timeout(60):
+            b2.wait_attr(".vm-console-vnc canvas", "width", str(width))
+
+        # The embedded console has been disconnected now, but we can
+        # connect again.
+
+        b.wait_in_text(".consoles-card", "Disconnected")
+        b.click('.consoles-card button:contains("Connect")')
+        b.wait_visible(".vm-console-vnc canvas")
+
+        # But if we switch the detached console into "Remote
+        # resizing", the embedded one will be disconnected again
+        # because the detached now uses a non-shared connection. (On
+        # images that have the necessary cockpit-ws fix.)
+
+        b2.select_PF("#vm-console-vnc-scaling", "Remote resizing")
+
+        if m.image not in ["debian-trixie"]:
+            # Cockpit will make a non-shared connection.  The embedded
+            # console will be forcefully disconnected.
+            b.wait_in_text(".consoles-card", "Disconnected")
+        else:
+            # If Cockpit doesn't make a non-shared connection, check
+            # that we can re-connect.
+            b.click('.consoles-card button:contains("Disconnect")')
+            b.wait_in_text(".consoles-card", "Disconnected")
+            b.click('.consoles-card button:contains("Connect")')
+            b.wait_visible(".vm-console-vnc canvas")
+
+        # Logging out should close both of the detached windows, the
+        # one in "b" from the click on "Detach", and the explicitly
+        # opened one in "b2".  We detect this by looking for another
+        # debug message.
+
+        b.logout()
+        testlib.wait(lambda: "> debug: Closing detached VNC" in b.get_js_log())
+        testlib.wait(lambda: "> debug: Closing detached VNC" in b2.get_js_log())
+
+        # cleanup expects self.browser to be logged in.
+        self.login_and_go("/machines")
+
+    def waitForAuthenticationFailed(self):
+        # There is a bug in cockpit-ws that makes it forget to send
+        # the last few messages when a external websocket channel is
+        # closed on the server side:
+        #
+        #   https://github.com/cockpit-project/cockpit/issues/23790
+        #
+        # The "authentical failed" error is the second to last
+        # message, and it will not be sent with some probability. In
+        # that case, we don't get the expected "Authentication failed"
+        # error message in the UI, but the generic "Failed to connect"
+        # one.  Thus, we allow both.
+
+        try:
+            self.browser.wait_in_text(".consoles-card", "Authentication failed")
+        except testlib.Error:
+            if "Failed to connect" in self.browser.text(".consoles-card"):
+                print("WARNING: VNC authentication error message lost in cockpit-ws.")
+            else:
+                raise
+
+    def testGlobalVNCPassword(self):
+        b = self.browser
+        m = self.machine
+
+        # Configure a global password
+
+        self.write_file("/etc/libvirt/qemu.conf", '\nvnc_password = "barfoo"\n', append=True)
+        m.execute(f"systemctl restart {self.getLibvirtServiceName()}")
+
+        name = "subVmTest1"
+        self.createVm(name, graphics="vnc")
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+        self.waitVmRow(name)
+        self.goToVmPage(name)
+
+        # VNC viewer should be connected and should have a password
+        b.wait_visible(".vm-console-vnc canvas")
+        self.assertIn("password=on", m.execute(f"grep ^-vnc /var/log/libvirt/qemu/{name}.log"))
+
+        # Change global password, but without restarting the VM. This
+        # means that Cockpit will use the new password when
+        # connecting, but the VM still expects the old.
+        m.execute("sed -i -e 's/vnc_password = \"barfoo\"/vnc_password = \"foobar\"/' /etc/libvirt/qemu.conf")
+
+        # We are still connected, but reconnecting will fail.
+
+        b.click(".consoles-card button:contains(Disconnect)")
+        b.wait_in_text(".consoles-card", "Disconnected")
+
+        b.click(".consoles-card button:contains(Connect)")
+        self.waitForAuthenticationFailed()
+
+    def testLibvirtUserUnprivileged(self):
+        m = self.machine
+
+        # Configure a global VNC password. A unprivileged user can not
+        # read it and Cockpit should not crash because of that.
+
+        self.write_file("/etc/libvirt/qemu.conf", '\nvnc_password = "barfoo"\n', append=True)
+        m.execute(f"systemctl restart {self.getLibvirtServiceName()}")
+
+        user = self.createUser(user_group='libvirt')
+
+        name = "subVmTest1"
+        self.createVm(name, graphics='vnc')
+
+        self.login_and_go("/machines", user=user, superuser=False)
+
+        self.waitPageInit()
+        self.waitVmRow(name)
+        self.goToVmPage(name)
+
+        # VNC should be configured and use a password, but the
+        # connection should fail with "Authentication failed" since
+        # Cockpit can't read qemu.conf to discover the password.
+
+        self.assertIn("password=on", m.execute(f"grep ^-vnc /var/log/libvirt/qemu/{name}.log"))
+        self.waitForAuthenticationFailed()
+
+    @testlib.skipImage("cockpit-ws too old",
+                       "rhel-9-*", "centos-9-*", "ubuntu-*", "debian-trixie", "opensuse-tumbleweed")
+    def testNonSharedExternal(self):
+        b = self.browser
+        m = self.machine
+
+        name = "subVmTest1"
+        self.createVm(name, graphics="vnc")
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+        self.waitVmRow(name)
+        self.goToVmPage(name)
+
+        # VNC viewer should be connected
+        b.wait_visible(".vm-console-vnc canvas")
+
+        # Start external non-shared viewer.  We use Cockpit itself, in
+        # "Remote resizing" mode.
+        b2 = self.new_browser()
+        cookie = b.cookie("cockpit")
+        b2.open(f"/cockpit/@localhost/machines/index.html#/vm/vnc?name={name}&connection=system", cookie=cookie)
+
+        # Allow extra time for the page to initialize itself. It's a
+        # whole instance of cockpit-machines that has to list all VMs
+        # and all node devices...
+        #
+        # See https://issues.redhat.com/browse/COCKPIT-1302
+        with b2.wait_timeout(60):
+            b2.select_PF("#vm-console-vnc-scaling", "Remote resizing")
+
+        # Our viewer should disconnect cleanly
+        b.wait_in_text(".consoles-card", "Disconnected")
+
+        def count_vnc_connections():
+            # Two open ports on localhost per connection
+            return int(m.execute("ss -tn | grep 5900 | wc -l")) / 2
+
+        # There should be a single VNC connection (for the detached viewer)
+        testlib.wait(lambda: count_vnc_connections() == 1)
+
+        # Trying to reconnect should fail while the external viewer is running
+        b.click('.consoles-card button:contains("Connect")')
+        b.wait_in_text(".consoles-card", "Failed to connect")
+
+        # Stopping the external viewer should allow us to connect again
+        b2.go("#/")
+        testlib.wait(lambda: count_vnc_connections() == 0)
+
+        b.click('.consoles-card button:contains("Retry")')
+        b.wait_visible(".vm-console-vnc canvas")
+        testlib.wait(lambda: count_vnc_connections() == 1)
+
+    @testlib.skipImage("No sscg", "arch", "opensuse-tumbleweed")
+    def testVNCTLS(self):
+        b = self.browser
+        m = self.machine
+
+        # Make some random certs
+        m.execute("""
+          mkdir -p /etc/pki/libvirt
+          cd /etc/pki/libvirt/
+          sscg --force --ca-file=ca-cert.pem --cert-file=server-cert.pem --cert-key-file=server-key.pem
+          chmod a+r /etc/pki/libvirt/*
+        """)
+
+        # Configure VNC to use TLS
+        self.write_file("/etc/libvirt/qemu.conf", """
+vnc_tls = 1
+vnc_tls_x509_cert_dir = "/etc/pki/libvirt"
+        """, append=True)
+
+        m.execute(f"systemctl restart {self.getLibvirtServiceName()}")
+
+        name = "subVmTest1"
+        self.createVm(name, graphics="vnc")
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+        self.waitVmRow(name)
+        self.goToVmPage(name)
+
+        # VNC viewer should not be connected, with a helpful message
+        b.wait_in_text(".consoles-card", "VNC with TLS is not supported")
+
+    def testVncAutoconnect(self):
+        b = self.browser
+        m = self.machine
+
+        name = "subVmTest1"
+        self.createVm(name, graphics="vnc")
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+        self.waitVmRow(name)
+        self.goToVmPage(name)
+
+        # VNC viewer should initially be connected
+        b.wait_visible(".vm-console-vnc canvas")
+
+        # Switching the machine off and on again should connect
+        # automatically reconnect
+        self.performAction(name, "forceOff")
+        b.wait_not_present(".vm-console-vnc canvas")
+        b.wait_in_text(".consoles-card", "Start the virtual machine")
+        self.performAction(name, "run")
+        b.wait_visible(".vm-console-vnc canvas")
+
+        # Same for resuming after a pause
+        self.performAction(name, "pause")
+        b.wait_not_present(".vm-console-vnc canvas")
+        b.wait_in_text(".consoles-card", "Start the virtual machine")
+        self.performAction(name, "resume")
+        b.wait_visible(".vm-console-vnc canvas")
+
+        # Same for reverting an internal snapshot
+        m.execute(f"virsh snapshot-create-as {name} snapshot1")
+        m.execute(f"virsh snapshot-revert {name} snapshot1")
+        time.sleep(5)
+        b.wait_visible(".vm-console-vnc canvas")
+
+        # Same for reverting an external snapshot
+        # (libvirt in  rhel-8-10 does not support reverting external snapshots...)
+        if m.image not in ["rhel-8-10"]:
+            m.execute(f"virsh snapshot-create-as {name} snapshot2 --memspec /var/lib/libvirt/images/{name}.mem")
+            m.execute(f"virsh snapshot-revert {name} snapshot2")
+            time.sleep(5)
+            b.wait_visible(".vm-console-vnc canvas")
+
+
+if __name__ == '__main__':
+    testlib.test_main()

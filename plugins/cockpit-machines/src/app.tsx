@@ -1,0 +1,289 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ *
+ * Copyright (C) 2016 Red Hat, Inc.
+ */
+
+import { useState } from 'react';
+
+import type { ConnectionName } from './types';
+import { appState } from './state';
+
+import { AlertGroup, type AlertProps } from "@patternfly/react-core/dist/esm/components/Alert";
+import { Button } from "@patternfly/react-core/dist/esm/components/Button";
+import { EmptyState, EmptyStateBody, EmptyStateActions, EmptyStateFooter } from "@patternfly/react-core/dist/esm/components/EmptyState";
+import { Page, PageSection, } from "@patternfly/react-core/dist/esm/components/Page";
+import { Progress, ProgressMeasureLocation } from "@patternfly/react-core/dist/esm/components/Progress";
+import { Content, } from "@patternfly/react-core/dist/esm/components/Content";
+import { ExclamationCircleIcon, VirtualMachineIcon } from '@patternfly/react-icons';
+import { superuser } from "superuser.js";
+import cockpit from 'cockpit';
+
+import { EmptyStatePanel } from "cockpit-components-empty-state.jsx";
+import { HostVmsList } from "./components/vms/hostvmslist.jsx";
+import { StoragePoolList } from "./components/storagePools/storagePoolList.jsx";
+import { NetworkList } from "./components/networks/networkList.jsx";
+import { VmDetailsPage } from './components/vm/vmDetailsPage.jsx';
+import { ConsoleCardStates } from './components/vm/consoles/consoles.jsx';
+import { CreateVmAction } from "./components/create-vm-dialog/createVmDialog.jsx";
+import { dummyVmsFilter, vmId } from "./helpers.js";
+import { InlineNotification } from 'cockpit-components-inline-notification.jsx';
+import { useEvent, useOn, usePageLocation, useInit } from "hooks";
+
+const _ = cockpit.gettext;
+
+superuser.reload_page_on_change();
+
+export interface Notification {
+    text: string;
+    detail: string;
+    type?: AlertProps["variant"];
+    resourceId?: string;
+}
+
+function getInlineNotifications(resourceId?: string) {
+    const notes = appState.notifications.map((notification, index) => {
+        if (!resourceId || notification.resourceId == resourceId) {
+            return (
+                <InlineNotification
+                    key={index}
+                    type={notification.type || 'danger'}
+                    isLiveRegion
+                    isInline={false}
+                    onDismiss={() => appState.dismissNotification(index)}
+                    text={notification.text}
+                    detail={notification.detail}
+                />
+            );
+        } else
+            return null;
+    }).filter(Boolean);
+    if (notes.length > 0) {
+        return (
+            <AlertGroup isToast>
+                {notes}
+            </AlertGroup>
+        );
+    } else
+        return null;
+}
+
+export const App = () => {
+    useOn(appState, "changed");
+
+    const [ignoreDisabledVirtualization, setIgnoreDisabledVirtualization] = useState(() => {
+        const ignored = localStorage.getItem('virtualization-disabled-ignored');
+        const defaultValue = false;
+
+        return ignored !== null ? JSON.parse(ignored) : defaultValue;
+    });
+
+    useEvent(superuser, "changed");
+    const { path } = usePageLocation();
+
+    const consoleCardStates = useInit(() => new ConsoleCardStates());
+
+    // Trigger global initializations.  When we are on the details page for a
+    // single VM, only that VM is loaded.  Otherwise, all VMs are
+    // loaded.  We load all VMs even when we are on the page for
+    // storage pools etc, since that way we don't have to worry
+    // whether or not they use the list of global VMs.
+
+    let showVM: false | { name: string, connection: ConnectionName } = false;
+
+    appState.init();
+    if (path.length > 0 && path[0] == 'vm') {
+        const { name, connection } = cockpit.location.options;
+        if (typeof name == "string" && (connection == "system" || connection == "session")) {
+            showVM = { name, connection };
+            appState.initVM(name, connection);
+        }
+    } else {
+        appState.initAllVMs();
+    }
+
+    let body = null;
+    if (appState.loadingResources) {
+        body = <AppLoading />;
+    } else if (!appState.hardwareVirtEnabled && !ignoreDisabledVirtualization) {
+        body = <AppVirtDisabled setIgnored={setIgnoreDisabledVirtualization} />;
+    } else if (superuser.allowed && appState.systemSocketInactive) {
+        body = <AppServiceNotRunning />;
+    } else if (path.length == 0 || (path.length > 0 && path[0] == 'vms')) {
+        body = <AppVMs />;
+    } else if (showVM) {
+        body = <AppVM consoleCardStates={consoleCardStates} {...showVM} />;
+    } else if (path.length > 0 && path[0] == 'storages') {
+        body = <AppStoragePools />;
+    } else if (path.length > 0 && path[0] == 'networks') {
+        body = <AppNetworks />;
+    }
+
+    return body;
+};
+
+const AppVirtDisabled = ({
+    setIgnored,
+} : {
+    setIgnored: (val: boolean) => void,
+}) => {
+    return (
+        <Page className="pf-m-no-sidebar">
+            <PageSection hasBodyWrapper={false}>
+                <EmptyState headingLevel="h4" icon={VirtualMachineIcon} titleText={_("Hardware virtualization is disabled")} className="virtualization-disabled-empty-state">
+                    <EmptyStateBody>
+                        <Content>
+                            <Content component="p">{_("Enable virtualization support in BIOS/EFI settings.")}</Content>
+                            <Content component="p">
+                                {_("Changing BIOS/EFI settings is specific to each manufacturer. It involves pressing a hotkey during boot (ESC, F1, F12, Del). Enable a setting called \"virtualization\", \"VM\", \"VMX\", \"SVM\", \"VTX\", \"VTD\". Consult your computer's manual for details.")}
+                            </Content>
+                        </Content>
+                    </EmptyStateBody>
+                    <EmptyStateFooter>
+                        <EmptyStateActions>
+                            <Button id="ignore-hw-virtualization-disabled-btn" variant="secondary" onClick={() => {
+                                setIgnored(true);
+                                localStorage.setItem('virtualization-disabled-ignored', "true");
+                            }}>{_("Ignore")}</Button>
+                        </EmptyStateActions>
+                    </EmptyStateFooter>
+                </EmptyState>
+            </PageSection>
+        </Page>
+    );
+};
+
+const AppLoading = () => {
+    return (
+        <Page className="pf-m-no-sidebar">
+            <PageSection hasBodyWrapper={false}>
+                <EmptyStatePanel title={ _("Loading resources") } loading />
+            </PageSection>
+        </Page>
+    );
+};
+
+const AppServiceNotRunning = () => {
+    return (
+        <Page className="pf-m-no-sidebar">
+            <PageSection hasBodyWrapper={false}>
+                <EmptyStatePanel
+                    icon={ ExclamationCircleIcon }
+                    title={ _("Virtualization service (libvirt) is not active") }
+                    action={_("Troubleshoot")}
+                    actionVariant="link"
+                    onAction={() => cockpit.jump("/system/services")}
+                />
+            </PageSection>
+        </Page>
+    );
+};
+
+const AppVMs = () => {
+    const { vms, uivms, storagePools, networks } = appState;
+
+    const createVmAction = <CreateVmAction mode='create' />;
+    const importDiskAction = <CreateVmAction mode='import' />;
+    const vmActions = <> {importDiskAction} {createVmAction} </>;
+
+    return (
+        <>
+            {getInlineNotifications()}
+            <HostVmsList
+                vms={vms}
+                uivms={uivms}
+                storagePools={storagePools}
+                networks={networks}
+                actions={vmActions}
+            />
+        </>
+    );
+};
+
+const AppVM = ({
+    consoleCardStates,
+    name,
+    connection,
+} : {
+    consoleCardStates: ConsoleCardStates,
+    name: string,
+    connection: ConnectionName,
+}) => {
+    const { vms, uivms, storagePools, networks } = appState;
+    const combinedVms = [...vms, ...dummyVmsFilter(vms, uivms)];
+
+    const vm = combinedVms.find(vm => vm.name == name && vm.connectionName == connection);
+    if (!vm) {
+        return (
+            <>
+                {getInlineNotifications()}
+                <EmptyStatePanel title={ cockpit.format(_("VM $0 does not exist on $1 connection"), name, connection) }
+                    action={_("Go to VMs list")}
+                    actionVariant="link"
+                    onAction={() => cockpit.location.go(["vms"])}
+                    icon={ExclamationCircleIcon} />
+            </>
+        );
+    } else if (vm.isUi && vm.createInProgress) {
+        return (
+            <>
+                {getInlineNotifications()}
+                <EmptyStatePanel
+                    title={cockpit.format(vm.downloadProgress ? _("Downloading image for VM $0") : _("Creating VM $0"), name)}
+                    action={_("Go to VMs list")}
+                    actionVariant="link"
+                    onAction={() => cockpit.location.go(["vms"])}
+                    paragraph={vm.downloadProgress && <Progress aria-label={_("Download progress")}
+                                                          value={Number(vm.downloadProgress)}
+                                                          measureLocation={ProgressMeasureLocation.outside} />}
+                    loading={!vm.downloadProgress}
+                />
+            </>
+        );
+    }
+
+    const connectionName = vm.connectionName;
+
+    // If vm.isUi is set we show a dummy placeholder until libvirt gets a real domain object for newly created V
+    const expandedContent = vm.isUi
+        ? null
+        : (
+            <>
+                {getInlineNotifications(vm.id)}
+                <VmDetailsPage
+                    vm={vm}
+                    consoleCardState={consoleCardStates.get(vm)}
+                    storagePools={(storagePools || []).filter(pool => pool && pool.connectionName == connectionName)}
+                    networks={(networks || []).filter(network => network && network.connectionName == connectionName)}
+                    nodeDevices={appState.nodeDevices.filter(device => device && device.connectionName == connectionName)}
+                    key={vmId(vm.name)}
+                />
+            </>
+        );
+    return expandedContent;
+};
+
+const AppStoragePools = () => {
+    const { vms, storagePools } = appState;
+
+    return (
+        <>
+            {getInlineNotifications()}
+            <StoragePoolList
+                storagePools={storagePools}
+                vms={vms}
+            />
+        </>
+    );
+};
+
+const AppNetworks = () => {
+    const { networks } = appState;
+
+    return (
+        <>
+            {getInlineNotifications()}
+            <NetworkList networks={networks} />;
+        </>
+    );
+};

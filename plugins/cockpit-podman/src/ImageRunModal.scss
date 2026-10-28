@@ -1,0 +1,99 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
+@use "global-variables" as *;
+@use "@patternfly/patternfly/components/Form/form.scss" as pf-form;
+
+// TODO @Venefilyn: This is needed as on mobile without it you won't get any spacing
+// between the right side of the screen - it also creates a width that's wider than
+// the current viewport, which we definitely want to disallow
+//
+// Check if this can be supported in a better way - currently it's suboptimal due
+// to not working well with transform and desktop for example.
+// Ensure the width fits within the screen boundaries (with padding on the sides)
+.pf-v6-c-menu {
+    // 3xl is the left+right padding for an iPhone SE;
+    // this works on other screen sizes as well
+    max-inline-size: calc(100vw - var(--pf-t--global--spacer--3xl));
+}
+
+// PF4 does not yet support multiple form fields for the same label
+.ct-input-group-spacer-sm.pf-v6-l-flex {
+    // Limit width for select entries and inputs in the input groups otherwise they take up the whole space
+    > .pf-v6-c-select, .pf-v6-c-form-control:not(.pf-v6-c-select__toggle-typeahead) {
+      max-inline-size: 10ch;
+    }
+
+    // arrow down icon has wrong color in chromium
+    // upstream report: https://github.com/patternfly/patternfly-react/issues/12107
+    #memory-unit-select + .pf-v6-c-form-control__utilities .pf-v6-c-form-control__toggle-icon {
+      color: var(--pf-t--global--icon--color--on-disabled);
+    }
+}
+
+// HACK: A local copy of pf-m-horizontal (as ct-m-horizontal),
+// but applied at the FormGroup level instead of Form
+@media (min-width: $pf-v6-global--breakpoint--md) {
+    .pf-v6-c-form__group.ct-m-horizontal {
+        display: grid;
+        column-gap: var(--pf-v6-c-form--m-horizontal__group-label--md--GridColumnGap);
+        grid-template-columns: var(--pf-v6-c-form--m-horizontal__group-label--md--GridColumnWidth) var(--pf-v6-c-form--m-horizontal__group-control--md--GridColumnWidth);
+    }
+}
+
+// NOTE @Venefilyn: We need to get the checkbox aligned with the other inputs
+// This has been reported upstream https://github.com/patternfly/patternfly/issues/7411
+.dynamic-form-group .pf-v6-c-form__group-control > .pf-v6-c-check {
+    block-size: calc(var(--pf-t--global--font--size--md) * var(--pf-t--global--font--line-height--body) + 12px);
+}
+
+.dynamic-form-group .remove-button-group {
+    display: flex;
+    flex-direction: row;
+    align-items: flex-end;
+
+    button {
+      margin-block-end: var(--pf-t--global--spacer--xs);
+    }
+}
+
+// HACK: It is not possible to mix vertical and horizontal areas within a form. So lets hack it until it is supported
+// upstream by utilizing the upstream code for the FormSection as well.
+// Issue exists since: 2025-08-29. PF v6.2.3
+// https://github.com/patternfly/patternfly/issues/7770
+.pf-v6-c-form__section {
+  &.pf-m-horizontal {
+    @include pf-form.pf-v6-c-form--m-horizontal {
+      --#{$form}__group-label--PaddingBlockEnd: 0;
+
+      .#{$form}__group {
+        display: grid;
+        grid-template-columns: var(--#{$form}--m-horizontal__group-label--md--GridColumnWidth) var(--#{$form}--m-horizontal__group-control--md--GridColumnWidth);
+        column-gap: var(--#{$form}--m-horizontal__group-label--md--GridColumnGap);
+      }
+
+      .#{$form}__group-label {
+        padding-block-start: var(--#{$form}--m-horizontal__group-label--md--PaddingBlockStart);
+
+        &.pf-m-no-padding-top {
+          --#{$form}--m-horizontal__group-label--md--PaddingBlockStart: var(--#{$form}--m-horizontal__group-label--m-no-padding--md--PaddingBlockStart);
+
+          transform: translateY(var(--#{$form}--m-horizontal__group-label--m-no-padding--md--TranslateY));
+        }
+
+        &.pf-m-info {
+          --#{$form}__group-label--m-info--Gap: var(--#{$form}--m-horizontal__group-label--m-info--Gap);
+
+          flex-direction: column;
+          align-items: flex-start;
+        }
+      }
+
+      .#{$form}__group-label-main {
+        flex-grow: 0;
+      }
+
+      .#{$form}__group-control {
+        grid-column: 2;
+      }
+    }
+  }
+}

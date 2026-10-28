@@ -1,0 +1,25 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    uses: RXTX4816/cockpit-plugin-base-react/.github/workflows/release-plugin.yml@main
+    with:
+      plugin-name: cockpit-compose
+      spec-file: cockpit-compose.spec
+      aur-pkgname: cockpit-compose
+      maintainer-name: RXTX4816
+      maintainer-email: RXTX4816@proton.me
+    secrets: inherit

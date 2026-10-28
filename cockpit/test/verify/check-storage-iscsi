@@ -1,0 +1,115 @@
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
+
+#
+# Copyright (C) 2015 Red Hat, Inc.
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
+
+import storagelib
+import testlib
+
+
+@testlib.skipImage("UDisks doesn't have support for iSCSI", "debian-*", "ubuntu-*", "arch")
+@testlib.skipImage("udisks2-iscsi not on image", "*-bootc")
+@testlib.nondestructive
+class TestStorageISCSI(storagelib.StorageCase):
+
+    def testISCSI(self):
+        m = self.machine
+        b = self.browser
+
+        self.restore_dir("/etc/iscsi")
+        self.restore_dir("/var/lib/iscsi")
+
+        # ensure that we generate a /etc/iscsi/initiatorname.iscsi
+        m.execute("systemctl start iscsid; systemctl stop iscsid")
+
+        target_iqn = "iqn.2015-09.cockpit.lan"
+        initiator_iqn = "iqn.2015-10.cockpit.lan"
+
+        # Increase the iSCSI timeouts for heavy load during our testing
+        self.sed_file(r"s|^\(node\..*log.*_timeout = \).*|\1 60|", "/etc/iscsi/iscsid.conf")
+
+        # Setup a iSCSI target with authentication for discovery and join
+        #
+        # HACK - some versions of targetcli crash when TERM is not set
+        #        and stdout is not a tty.
+        #
+        #        https://bugzilla.redhat.com/show_bug.cgi?id=1441121
+
+        m.execute(f"""
+                  export TERM=dumb
+                  targetcli /backstores/ramdisk create test 50M
+                  targetcli /iscsi set discovery_auth enable=1 userid=admin password=foobar
+                  targetcli /iscsi create {target_iqn}
+                  targetcli /iscsi/{target_iqn}/tpg1/luns create /backstores/ramdisk/test
+                  targetcli /iscsi/{target_iqn}/tpg1 set attribute authentication=1
+                  targetcli /iscsi/{target_iqn}/tpg1/acls create {initiator_iqn}
+                  targetcli /iscsi/{target_iqn}/tpg1/acls/{initiator_iqn} set auth userid=admin password=barfoo
+                  """)
+        self.addCleanup(m.execute, f"""
+            targetcli /iscsi delete {target_iqn}
+            iscsiadm -m node -o delete || true
+            targetcli /backstores/ramdisk delete test""")
+        # m.execute("targetcli ls")
+
+        self.login_and_go("/storage")
+
+        # Set initiator IQN
+        orig_iqn = m.execute("sed </etc/iscsi/initiatorname.iscsi -e '/^#/d' -e 's/^.*=//'").rstrip()
+        self.click_dropdown(self.card_header("Storage"), "Change iSCSI initiator name")
+        self.dialog(expect={"name": orig_iqn},
+                    values={"name": initiator_iqn})
+        new_iqn = m.execute("sed </etc/iscsi/initiatorname.iscsi -e '/^#/d' -e 's/^.*=//'").rstrip()
+        self.assertEqual(new_iqn, initiator_iqn)
+
+        # Access the target
+
+        self.click_dropdown(self.card_header("Storage"), "Add iSCSI portal")
+
+        self.dialog_wait_open()
+        self.dialog_set_val("address", "127.0.0.1")
+        self.dialog_set_val("username", "admin")
+        self.dialog_set_val("password", "foobar")
+        self.dialog_apply()
+        # The dialog closes and a new dialog opens but we can't get
+        # between that, so we just wait for the new fields to
+        # appear.
+        b.wait_visible(self.dialog_field("target"))
+        b.wait_in_text(self.dialog_field("target"), target_iqn)
+        self.dialog_apply()
+        # Login will fail and a new dialog opens
+        b.wait_visible(self.dialog_field("username"))
+        self.dialog_wait_val("username", "admin")
+        self.dialog_wait_val("password", "foobar")
+        self.dialog_set_val("password", "barfoo")
+        self.dialog_apply()
+        self.dialog_wait_close()
+
+        self.click_card_row("Storage", name=target_iqn)
+        b.wait_text(self.card_desc("iSCSI portal", "Address"), "127.0.0.1")
+        b.wait_text(self.card_desc("iSCSI portal", "Target"), target_iqn)
+        b.wait_in_text(self.card_row_col("iSCSI drives", 1, 1), "LIO-ORG test")
+
+        # Make a filesystem on it to prove that the disk really works.
+
+        self.click_card_row("iSCSI drives", 1)
+        self.click_card_dropdown("Unformatted data", "Format")
+        self.dialog({"type": "ext4",
+                     "name": "FILESYSTEM",
+                     "mount_point": "/data"})
+        # _netdev should have been prefilled
+        b.wait_in_text(self.card_desc("ext4 filesystem", "Mount point"), "after network")
+        b.click(self.card_parent_link())
+        b.wait_in_text(self.card_row_col("iSCSI drives", 1, 2), "ext4 filesystem")
+
+        self.click_card_dropdown("iSCSI portal", "Disconnect")
+        with b.wait_timeout(120):
+            b.wait_visible(self.card("Storage"))
+            b.wait_not_present(self.card_row("Storage", name=target_iqn))
+
+        b.wait_not_in_text(self.card("Storage"), "LIO-ORG test")
+
+
+if __name__ == '__main__':
+    testlib.test_main()

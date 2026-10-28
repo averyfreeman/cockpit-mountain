@@ -1,0 +1,36 @@
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
+
+#
+# Copyright (C) 2015 Red Hat, Inc.
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
+
+import storagelib
+import testlib
+
+
+class TestStorageScaling(storagelib.StorageCase):
+
+    def testScaling(self):
+        m = self.machine
+        b = self.browser
+
+        self.login_and_go("/storage")
+
+        def count_rows():
+            return b.count(self.card("Storage") + " tbody tr")
+
+        b.wait_visible(self.card_row("Storage", name="/dev/vda"))
+        # Wait on btrfs subvolumes on OS'es with the install on btrfs
+        if m.image.startswith('fedora') or m.image == "arch":
+            b.wait_in_text(self.card("Storage"), "lib/machines")
+        n_rows = count_rows()
+
+        m.execute("modprobe scsi_debug num_tgts=200")
+        with b.wait_timeout(60):
+            b.click(self.card_button("Storage", f"Show all {n_rows + 200} rows"))
+            b.wait(lambda: count_rows() == n_rows + 200)
+
+
+if __name__ == '__main__':
+    testlib.test_main()

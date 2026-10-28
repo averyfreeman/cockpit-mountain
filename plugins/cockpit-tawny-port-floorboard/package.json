@@ -1,0 +1,25 @@
+{
+  "name": "cockpit-port-forward",
+  "version": "1.0.0",
+  "description": "Cockpit plugin for managing firewalld port forwards",
+  "scripts": {
+    "build": "vite build",
+    "development": "vite --host 0.0.0.0 --port 8080",
+    "lint": "oxlint src/"
+  },
+  "devDependencies": {
+    "@patternfly/patternfly": "catalog:",
+    "@patternfly/react-table": "catalog:",
+    "oxlint": "catalog:",
+    "vite": "catalog:",
+    "@vitejs/plugin-react": "catalog:"
+  },
+  "dependencies": {
+    "@patternfly/react-core": "catalog:",
+    "react": "catalog:",
+    "react-dom": "catalog:"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

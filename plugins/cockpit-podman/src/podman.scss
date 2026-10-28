@@ -1,0 +1,117 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
+@use "ct-card.scss";
+@use "page.scss";
+@use "global-variables" as *;
+// For pf-v6-line-clamp
+@use "@patternfly/patternfly/sass-utilities/mixins.scss";
+
+#app .pf-v6-c-card.containers-containers, #app .pf-v6-c-card.containers-images {
+    @extend .ct-card;
+}
+
+#containers-images, #containers-containers {
+    // Decrease padding for the image/container toggle button list
+    .pf-v6-c-table.pf-m-compact .pf-v6-c-table__toggle {
+        padding-inline-start: 0;
+    }
+
+    // don't make the columns too narrow
+    th .pf-v6-c-table__text {
+        min-inline-size: fit-content;
+    }
+}
+
+.container-block {
+    display: flex;
+    flex-direction: column;
+    word-break: break-all;
+}
+
+.container-block small {
+    @include pf-v6-line-clamp("1");
+    color: var(--pf-t--global--text--color--subtle);
+}
+
+.container-name {
+    font-size: var(--pf-t--global--font--size--lg);
+    font-weight: 400;
+}
+
+.pf-v6-c-alert__description {
+    overflow-wrap: anywhere;
+}
+
+.listing-action {
+    inline-size: 100%;
+    display: flex;
+    justify-content: space-around;
+}
+
+.ct-badge-container-running, .ct-badge-pod-running {
+    background-color: var(--pf-t--global--color--status--info--default);
+    color: var(--pf-t--global--text--color--status--on-info--default);
+}
+
+.ct-badge-container-healthy {
+    background-color: var(--pf-t--global--border--color--status--success--default);
+    color: var(--pf-t--global--text--color--status--on-success--default);
+}
+
+.ct-badge-container-unhealthy {
+    background-color: var(--pf-t--global--border--color--status--danger--default);
+    color: var(--pf-t--global--text--color--status--on-danger--default);
+}
+
+.ct-badge-toolbox {
+    background-color: var(--pf-t--global--color--nonstatus--purple--default);
+    color: var(--pf-t--global--text--color--nonstatus--on-purple--default);
+}
+
+.ct-badge-distrobox {
+    background-color: var(--pf-t--global--color--nonstatus--green--default);
+    color: var(--pf-t--global--text--color--nonstatus--on-green--default);
+}
+
+.ct-badge-service {
+    background-color: var(--pf-t--global--color--nonstatus--blue--default);
+    color: var(--pf-t--global--text--color--nonstatus--on-blue--default);
+}
+
+.ct-grey-text {
+    color: var(--pf-t--global--text--color--subtle);
+}
+
+// HACK: PF should offer that: https://github.com/patternfly/patternfly/issues/6572
+.ct-numeric-column {
+    text-align: end;
+
+    .pf-v6-c-table__button {
+        // right-justify the button inside of the th
+        flex-direction: row-reverse;
+        margin-inline-start: 0;
+    }
+}
+
+.content-action {
+    text-align: end;
+    white-space: nowrap !important;
+}
+
+@media (max-width: $pf-v6-global--breakpoint--md - 1) {
+    .show-only-when-wide {
+        display: none;
+    }
+}
+
+@media (min-width: $pf-v6-global--breakpoint--md) {
+    .show-only-when-narrow {
+        display: none;
+    }
+}
+
+// Override table padding on mobile
+@media (max-width: $pf-v6-global--breakpoint--md) {
+    .health-logs.pf-m-grid-md.pf-v6-c-table tr:where(.pf-v6-c-table__tr):not(.pf-v6-c-table__expandable-row) {
+        padding: 0;
+    }
+}

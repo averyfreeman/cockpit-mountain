@@ -1,0 +1,2 @@
+# source contains NPM modules for building
+cockpit-podman source: source-is-missing *node/*

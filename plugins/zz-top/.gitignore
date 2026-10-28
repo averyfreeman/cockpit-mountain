@@ -1,0 +1,7 @@
+node_modules/
+package-lock.json
+dist/
+*.log
+test/e2e/out/
+docs/superpowers/
+ctop-*.zip

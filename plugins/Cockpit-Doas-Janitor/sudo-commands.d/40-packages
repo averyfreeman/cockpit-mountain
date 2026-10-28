@@ -1,0 +1,16 @@
+# Managed by Cockpit Sudo Manager
+# Package management sudo policy
+#
+# Scope:
+#   - Read-only inspection for ops
+#   - Explicit modification for admins
+
+# ==========================================================
+# Read-only package inspection
+# ==========================================================
+Cmnd_Alias PKG_READ = ZYPPER_READONLY
+
+# ==========================================================
+# Package modification
+# ==========================================================
+Cmnd_Alias PKG_ADMIN = ZYPPER_ADMIN

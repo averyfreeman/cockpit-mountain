@@ -1,0 +1,94 @@
+{
+    "schema_version": "45D_AP_V2.0",
+    "name": "cockpit-file-sharing",
+    "title": "Cockpit File Sharing",
+    "description": "A cockpit module to make file sharing with Samba and NFS easier.",
+    "version": "4.6.3",
+    "build_number": "1",
+    "stable": true,
+    "author": "Josh Boudreau <jboudreau@45drives.com>",
+    "git_url": "https://github.com/45Drives/cockpit-file-sharing",
+    "license": "GPL-3.0+",
+    "architecture": {
+        "ubuntu": "all",
+        "rocky": "noarch",
+        "debian": "all"
+    },
+    "defaults": {
+        "change_urgency": "medium"
+    },
+    "dependencies": {
+        "ubuntu_common": [
+            "cockpit-bridge",
+            "coreutils",
+            "curl",
+            "attr",
+            "findutils",
+            "hostname",
+            "iproute2",
+            "libc-bin",
+            "systemd",
+            "nfs-kernel-server",
+            "samba-common-bin",
+            "python3-botocore"
+        ],
+        "rocky_common": [
+            "cockpit-bridge",
+            "coreutils",
+            "curl",
+            "attr",
+            "findutils",
+            "hostname",
+            "iproute",
+            "glibc-common",
+            "systemd",
+            "nfs-utils",
+            "samba-common-tools",
+            "python3-botocore"
+        ]
+    },
+    "builds": [
+        {
+            "group": "ubuntu",
+            "os_name": "ubuntu-focal",
+            "image": "ci.cr.45d.io/ci/simple/ubuntu-focal:1"
+        },
+        {
+            "group": "debian",
+            "os_name": "debian-bookworm",
+            "image": "ci.cr.45d.io/ci/simple/ubuntu-jammy:1"
+        },
+        {
+            "group": "debian",
+            "os_name": "debian-trixie",
+            "image": "ci.cr.45d.io/ci/simple/debian-trixie:1"
+        },
+        {
+            "group": "ubuntu",
+            "os_name": "ubuntu-jammy",
+            "image": "ci.cr.45d.io/ci/simple/ubuntu-jammy:1"
+        },
+        {
+            "group": "rocky",
+            "os_name": "rocky-el8",
+            "image": "ci.cr.45d.io/ci/simple/rocky-el8:1"
+        },
+        {
+            "group": "rocky",
+            "os_name": "rocky-el9",
+            "image": "ci.cr.45d.io/ci/simple/rocky-el9:1"
+        }
+    ],
+    "repos": [
+        "community",
+        "enterprise"
+    ],
+    "changelog": {
+        "urgency": "medium",
+        "version": "4.6.3",
+        "build_number": "1",
+        "date": null,
+        "packager": "Josh Boudreau <jboudreau@45drives.com>",
+        "changes": []
+    }
+}

@@ -1,0 +1,21 @@
+# ide
+.vscode
+
+# packaging
+debian/cockpit-benchmark
+debian/cockpit-benchmark.substvars
+debian/cockpit-benchmark.postrm.debhelper
+debian/debhelper-build-stamp
+debian/files
+debian/.debhelper
+
+# build ouptut
+dist
+
+# yarn/node
+node_modules/
+.yarn/
+.yarnrc.yml
+yarn.lock
+
+upload.sh

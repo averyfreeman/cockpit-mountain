@@ -1,0 +1,94 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
+@use "page.scss";
+@use "ct-card.scss";
+/* Imports 'pf-u-pt-md' class used for Expander in Add Disk dialog */
+@use "../node_modules/@patternfly/patternfly/utilities/Spacing/spacing.css";
+
+ // for $alert
+@use "@patternfly/patternfly/components/Alert/alert.scss";
+
+/* for pf-v6-u-text-color-subtle */
+@use "@patternfly/patternfly/utilities/Text/text.css";
+
+/* Style the list cards as ct-cards */
+.pf-v6-c-page__main-section > .pf-v6-c-card {
+    @extend .ct-card;
+}
+
+.machines-listing-actions {
+    display: flex;
+    justify-content: flex-end;
+    margin-block: -0.25rem;
+    margin-inline: 0;
+}
+
+.machines-listing-actions button:not(.pf-v6-c-menu-toggle) {
+    margin-block: 0.25rem;
+    margin-inline: 0.5rem 0;
+}
+
+
+.pf-v6-c-table {
+    .btn-group {
+        align-items: center;
+    }
+
+    > tbody > tr:not(.pf-v6-c-table__expandable-row) > [data-label="Actions"] .pf-v6-c-button {
+        // vertical: compensate for padding; fixing alignment
+        // horizontal: add some needed padding
+        margin-block: -0.25rem;
+        margin-inline: 0.25rem;
+    }
+}
+
+.machines-connection-selector > .pf-v6-c-radio:first-child {
+    padding-inline-end: var(--pf-t--global--spacer--md);
+}
+
+// Limit width for GiB/MiB dropdowns and inputs
+.ct-machines-select-unit, .ct-machines-size-input {
+    max-inline-size: 5rem;
+}
+
+.ct-monospace {
+    font-family: var(--pf-t--global--font--family--mono);
+}
+
+// Do not add a box-shadow to a "subsection", while it's technically correct it looks weird.
+.pf-v6-c-page__main-section.pf-m-light.actions-pagesection {
+    box-shadow: none;
+}
+
+.virtualization-disabled-empty-state {
+  // Use a max width of 60 0-characters across and let it size for mobile too
+   --pf-v6-c-empty-state__content--MaxWidth: min(60ch, 100%);
+}
+
+// remove oversized gap between checkbox label and checkbox body
+#storage-pool-delete-modal span.pf-v6-c-check__body {
+    margin-block-start: 0;
+}
+
+.vm-description {
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
+}
+
+.pf-v6-c-modal-box__body .pf-v6-c-alert {
+    margin-block-end: var(--pf-t--global--spacer--md);
+}
+
+// FIXME: links in labels needs a redesign in the future
+.resource-state-text .pf-v6-c-button {
+    color: inherit;
+}
+
+// FIXME: Using an expandable content within a dialog would cause the card to be scrollable while nothing
+// would be in view. Makes it look like there is something to scroll to when there isn't anything.
+// PF deliberately makes expandable `[hidden]` content have `display: revert` which would make them have
+// `display: block` or whatever is default from the browser. They do this to make animations work.
+// Until fixed upstream we revert their `display: revert` rule.
+// https://github.com/patternfly/patternfly/issues/7746
+.pf-v6-c-modal-box__body .pf-v6-c-expandable-section__content:where([hidden]) {
+    display: none;
+}

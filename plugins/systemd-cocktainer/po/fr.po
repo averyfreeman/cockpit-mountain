@@ -1,0 +1,1415 @@
+# French translations for cockpit-nspawn
+# SPDX-License-Identifier: LGPL-2.1-or-later
+msgid ""
+msgstr ""
+"POT-Creation-Date: 2026-03-01 00:00+0000\n"
+"PO-Revision-Date: 2026-03-01 00:00+0000\n"
+"Language: fr\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=(n > 1);\n"
+
+#: src/app.jsx:93
+msgid "Loading containers..."
+msgstr "Chargement des conteneurs..."
+
+#: src/app.jsx:100
+msgid "Containers (nspawn)"
+msgstr "Conteneurs (nspawn)"
+
+#: src/app.jsx:75
+msgid "$0 started"
+msgstr "$0 démarré"
+
+#: src/app.jsx:76
+msgid "$0 stopped"
+msgstr "$0 arrêté"
+
+#: src/app.jsx:77
+msgid "$0 terminated"
+msgstr "$0 forcé à l'arrêt"
+
+#: src/app.jsx:78
+msgid "$0 removed"
+msgstr "$0 supprimé"
+
+#: src/app.jsx:80
+msgid "Failed to start $0"
+msgstr "Impossible de démarrer $0"
+
+#: src/app.jsx:81
+msgid "Failed to stop $0"
+msgstr "Impossible d'arrêter $0"
+
+#: src/app.jsx:82
+msgid "Failed to terminate $0"
+msgstr "Impossible de forcer l'arrêt de $0"
+
+#: src/app.jsx:83
+msgid "Failed to remove $0"
+msgstr "Impossible de supprimer $0"
+
+#: src/machines.jsx:93
+msgid "Filter containers..."
+msgstr "Filtrer les conteneurs..."
+
+#: src/machines.jsx:100
+msgid "Create container"
+msgstr "Créer un conteneur"
+
+#: src/machines.jsx:105
+msgid "Refresh"
+msgstr "Actualiser"
+
+#: src/machines.jsx:115
+msgid "Expand"
+msgstr "Développer"
+
+#: src/machines.jsx:116
+msgid "Name"
+msgstr "Nom"
+
+#: src/machines.jsx:117
+msgid "Status"
+msgstr "État"
+
+#: src/machines.jsx:118
+msgid "OS"
+msgstr "OS"
+
+#: src/machines.jsx:119
+msgid "IP address"
+msgstr "Adresse IP"
+
+#: src/machines.jsx:120
+msgid "Type"
+msgstr "Type"
+
+#: src/machines.jsx:121
+msgid "Actions"
+msgstr "Actions"
+
+#: src/machines.jsx:125
+msgid "No containers found"
+msgstr "Aucun conteneur trouvé"
+
+#: src/MachineActions.jsx:45
+msgid "Actions for $0"
+msgstr "Actions pour $0"
+
+#: src/MachineActions.jsx:54
+msgid "Start"
+msgstr "Démarrer"
+
+#: src/MachineActions.jsx:60
+msgid "Stop"
+msgstr "Arrêter"
+
+#: src/MachineActions.jsx:65
+msgid "Force stop"
+msgstr "Forcer l'arrêt"
+
+#: src/MachineActions.jsx:72
+msgid "Open terminal"
+msgstr "Ouvrir un terminal"
+
+#: src/MachineActions.jsx:82
+msgid "Show logs"
+msgstr "Afficher les journaux"
+
+#: src/MachineActions.jsx:88
+msgid "Export…"
+msgstr "Exporter…"
+
+#: src/MachineActions.jsx:94
+msgid "Hide details"
+msgstr "Masquer les détails"
+
+#: src/MachineActions.jsx:94
+msgid "Show details"
+msgstr "Afficher les détails"
+
+#: src/MachineActions.jsx:101
+msgid "Remove"
+msgstr "Supprimer"
+
+#: src/MachineActions.jsx:141
+msgid "Remove container"
+msgstr "Supprimer le conteneur"
+
+#: src/MachineActions.jsx:143
+msgid "Are you sure you want to remove $0? This action cannot be undone."
+msgstr "Êtes-vous sûr de vouloir supprimer $0 ? Cette action est irréversible."
+
+#: src/MachineActions.jsx:381
+msgid "Type $0 to confirm"
+msgstr "Saisissez $0 pour confirmer"
+
+#: src/MachineActions.jsx:151
+msgid "Cancel"
+msgstr "Annuler"
+
+#: src/MachineDetails.jsx:73
+msgid "Path"
+msgstr "Chemin"
+
+#: src/MachineDetails.jsx:80
+msgid "Operating system"
+msgstr "Système d'exploitation"
+
+#: src/MachineDetails.jsx:87
+msgid "IP addresses"
+msgstr "Adresses IP"
+
+#: src/MachineDetails.jsx:107
+msgid "Leader PID"
+msgstr "PID principal"
+
+#: src/MachineDetails.jsx:114
+msgid "Started"
+msgstr "Démarré"
+
+#: src/MachineDetails.jsx:120
+msgid "Shortcuts"
+msgstr "Raccourcis"
+
+#: src/MachineDetails.jsx:124
+msgid "System logs"
+msgstr "Journaux système"
+
+#: src/MachineDetails.jsx:129
+msgid "Files"
+msgstr "Fichiers"
+
+#: src/MachineLogs.jsx:20
+msgid "All levels"
+msgstr "Tous les niveaux"
+
+#: src/MachineLogs.jsx:21
+msgid "Emergency (0)"
+msgstr "Urgence (0)"
+
+#: src/MachineLogs.jsx:22
+msgid "Alert (1)"
+msgstr "Alerte (1)"
+
+#: src/MachineLogs.jsx:23
+msgid "Critical (2)"
+msgstr "Critique (2)"
+
+#: src/MachineLogs.jsx:24
+msgid "Error (3)"
+msgstr "Erreur (3)"
+
+#: src/MachineLogs.jsx:25
+msgid "Warning (4)"
+msgstr "Avertissement (4)"
+
+#: src/MachineLogs.jsx:26
+msgid "Info (6)"
+msgstr "Info (6)"
+
+#: src/MachineLogs.jsx:27
+msgid "Debug (7)"
+msgstr "Débogage (7)"
+
+#: src/MachineLogs.jsx:100
+msgid "Log error for $0"
+msgstr "Erreur de journal pour $0"
+
+#: src/MachineLogs.jsx:133
+msgid "Logs for $0"
+msgstr "Journaux de $0"
+
+#: src/MachineLogs.jsx:135
+msgid "Logs — $0"
+msgstr "Journaux — $0"
+
+#: src/MachineLogs.jsx:163
+msgid "Following real time"
+msgstr "Suivi en temps réel"
+
+#: src/MachineLogs.jsx:163
+msgid "Follow real time"
+msgstr "Suivre en temps réel"
+
+#: src/MachineLogs.jsx:168
+msgid "Clear"
+msgstr "Effacer"
+
+#: src/MachineLogs.jsx:172
+msgid "$0 line"
+msgid_plural "$0 lines"
+msgstr[0] "$0 ligne"
+msgstr[1] "$0 lignes"
+
+#: src/MachineLogs.jsx:191
+msgid "Waiting for logs..."
+msgstr "En attente des journaux..."
+
+#: src/MachineLogs.jsx:212
+msgid "Close"
+msgstr "Fermer"
+
+#: src/MachineTerminal.jsx:97
+msgid "Terminal for $0"
+msgstr "Terminal pour $0"
+
+#: src/MachineTerminal.jsx:100
+msgid "Terminal — $0"
+msgstr "Terminal — $0"
+
+#: src/ExportMachineDialog.jsx:117
+msgid "Export $0"
+msgstr "Exporter $0"
+
+#: src/ExportMachineDialog.jsx:121
+msgid "Creates the archive on the server and starts a browser download. Streams directly via HTTP, works for large files."
+msgstr "Crée l'archive sur le serveur et lance un téléchargement. Diffusé directement via HTTP, fonctionne pour les fichiers volumineux."
+
+#: src/ExportMachineDialog.jsx:125
+msgid "Temporary file:"
+msgstr "Fichier temporaire :"
+
+#: src/ExportMachineDialog.jsx:125
+msgid "(removed automatically)"
+msgstr "(supprimé automatiquement)"
+
+#: src/ExportMachineDialog.jsx:132
+msgid "Creating archive on server…"
+msgstr "Création de l'archive sur le serveur…"
+
+#: src/ExportMachineDialog.jsx:134
+msgid "written"
+msgstr "écrit"
+
+#: src/ExportMachineDialog.jsx:141
+msgid "Export complete — $0."
+msgstr "Export terminé — $0."
+
+#: src/ExportMachineDialog.jsx:143
+msgid "Click the button to start the download."
+msgstr "Cliquez sur le bouton pour lancer le téléchargement."
+
+#: src/ExportMachineDialog.jsx:145
+msgid "The file streams directly from the server. The temporary file is removed automatically after the download starts."
+msgstr "Le fichier est diffusé directement depuis le serveur. Le fichier temporaire est supprimé automatiquement après le début du téléchargement."
+
+#: src/ExportMachineDialog.jsx:217
+msgid "Downloading…"
+msgstr "Téléchargement en cours…"
+
+#: src/ExportMachineDialog.jsx:218
+msgid "transferred"
+msgstr "transféré"
+
+#: src/ExportMachineDialog.jsx:172
+msgid "Download failed"
+msgstr "Échec du téléchargement"
+
+#: src/ExportMachineDialog.jsx:223
+msgid "Download complete"
+msgstr "Téléchargement terminé"
+
+#: src/ExportMachineDialog.jsx:224
+msgid "Saved to your downloads folder:"
+msgstr "Enregistré dans le dossier Téléchargements :"
+
+#: src/ExportMachineDialog.jsx:147
+msgid "Export failed"
+msgstr "Échec de l'export"
+
+#: src/ExportMachineDialog.jsx:240
+msgid "Start export"
+msgstr "Démarrer l'export"
+
+#: src/ExportMachineDialog.jsx:246
+msgid "Download $0"
+msgstr "Télécharger $0"
+
+#: src/ExportMachineDialog.jsx:252
+msgid "Cancel export"
+msgstr "Annuler l'export"
+
+#: src/CreateMachineDialog.jsx:350
+msgid "Method"
+msgstr "Méthode"
+
+#: src/CreateMachineDialog.jsx:357
+msgid "Bootstrap (DNF)"
+msgstr "Bootstrap (DNF)"
+
+#: src/CreateMachineDialog.jsx:362
+msgid "Pull from URL"
+msgstr "Télécharger depuis URL"
+
+#: src/CreateMachineDialog.jsx:367
+msgid "Clone existing"
+msgstr "Cloner l'existant"
+
+#: src/CreateMachineDialog.jsx:376
+msgid "Container name"
+msgstr "Nom du conteneur"
+
+#: src/CreateMachineDialog.jsx:378
+msgid "my-container"
+msgstr "mon-conteneur"
+
+#: src/CreateMachineDialog.jsx:386
+msgid "Distribution"
+msgstr "Distribution"
+
+#: src/CreateMachineDialog.jsx:402
+msgid "Version"
+msgstr "Version"
+
+#: src/CreateMachineDialog.jsx:414
+msgid "Repo: $0"
+msgstr "Dépôt : $0"
+
+#: src/CreateMachineDialog.jsx:422
+msgid "Root password"
+msgstr "Mot de passe root"
+
+#: src/CreateMachineDialog.jsx:428
+msgid "Leave empty to set via terminal later"
+msgstr "Laisser vide pour définir via le terminal plus tard"
+
+#: src/CreateMachineDialog.jsx:432
+msgid "Can always be set afterwards via the terminal in this module"
+msgstr "Peut toujours être défini ultérieurement via le terminal dans ce module"
+
+#: src/CreateMachineDialog.jsx:437
+msgid "Network"
+msgstr "Réseau"
+
+#: src/CreateMachineDialog.jsx:440
+msgid "Private (NAT)"
+msgstr "Privé (NAT)"
+
+#: src/CreateMachineDialog.jsx:446
+msgid "Bridge (own LAN IP)"
+msgstr "Pont (IP LAN propre)"
+
+#: src/CreateMachineDialog.jsx:452
+msgid "Bridge name"
+msgstr "Nom du pont"
+
+#: src/CreateMachineDialog.jsx:458
+msgid "The network bridge must exist on the host"
+msgstr "Le pont réseau doit exister sur l'hôte"
+
+#: src/CreateMachineDialog.jsx:461
+msgid "The bridge $0 must be configured before the container starts."
+msgstr "Le pont $0 doit être configuré avant le démarrage du conteneur."
+
+#: src/CreateMachineDialog.jsx:463
+msgid "Create it under"
+msgstr "Créez-le sous"
+
+#: src/CreateMachineDialog.jsx:468
+msgid "Cockpit → Network → Add bridge"
+msgstr "Cockpit → Réseau → Ajouter un pont"
+
+#: src/CreateMachineDialog.jsx:470
+msgid "Note: does not work with WiFi adapter — requires wired network."
+msgstr "Remarque : ne fonctionne pas avec une carte WiFi — nécessite un réseau filaire."
+
+#: src/CreateMachineDialog.jsx:476
+msgid "Start container immediately after creation"
+msgstr "Démarrer le conteneur immédiatement après la création"
+
+#: src/CreateMachineDialog.jsx:498
+msgid "Automatic"
+msgstr "Automatique"
+
+#: src/CreateMachineDialog.jsx:506
+msgid "Name (optional)"
+msgstr "Nom (facultatif)"
+
+#: src/CreateMachineDialog.jsx:509
+msgid "Leave empty for automatic name from URL"
+msgstr "Laisser vide pour le nom automatique depuis l'URL"
+
+#: src/CreateMachineDialog.jsx:527
+msgid "Source"
+msgstr "Source"
+
+#: src/CreateMachineDialog.jsx:537
+msgid "New name"
+msgstr "Nouveau nom"
+
+#: src/CreateMachineDialog.jsx:541
+msgid "my-new-container"
+msgstr "mon-nouveau-conteneur"
+
+#: src/CreateMachineDialog.jsx:551
+msgid "Output"
+msgstr "Sortie"
+
+#: src/CreateMachineDialog.jsx:575
+msgid "Container created!"
+msgstr "Conteneur créé !"
+
+#: src/CreateMachineDialog.jsx:577
+msgid "$0 is ready to use."
+msgstr "$0 est prêt à être utilisé."
+
+#: src/CreateMachineDialog.jsx:579
+msgid "$0 has been cloned."
+msgstr "$0 a été cloné."
+
+#: src/CreateMachineDialog.jsx:581
+msgid "Container pulled and ready."
+msgstr "Conteneur téléchargé et prêt."
+
+#: src/CreateMachineDialog.jsx:586
+msgid "Error occurred"
+msgstr "Une erreur s'est produite"
+
+#: src/CreateMachineDialog.jsx:600
+msgid "Bootstrapping..."
+msgstr "Bootstrap en cours..."
+
+#: src/CreateMachineDialog.jsx:601
+msgid "Creating..."
+msgstr "Création en cours..."
+
+#: src/CreateMachineDialog.jsx:602
+msgid "Create"
+msgstr "Créer"
+
+#: src/CreateMachineDialog.jsx:149
+msgid "Container created"
+msgstr "Conteneur créé"
+
+#: src/CreateMachineDialog.jsx:155
+msgid "Container cloned"
+msgstr "Conteneur cloné"
+
+#: src/CreateMachineDialog.jsx:323
+msgid "Container $0 created"
+msgstr "Conteneur $0 créé"
+
+#: src/CreateMachineDialog.jsx:535
+msgid "NAT networking via NetworkManager"
+msgstr "Réseau NAT via NetworkManager"
+
+#: src/CreateMachineDialog.jsx:537
+msgid "Bootstrap will create a shared NAT bridge (br-nspawn, 10.99.0.1/24) on the host using NetworkManager. IP forwarding will be enabled. This only runs once — all subsequent NAT containers reuse the same bridge."
+msgstr "Le bootstrap créera un pont NAT partagé (br-nspawn, 10.99.0.1/24) sur l'hôte via NetworkManager. Le transfert IP sera activé. Ceci ne s'exécute qu'une seule fois — tous les conteneurs NAT suivants réutilisent le même pont."
+
+#: src/MachineActions.jsx:86
+msgid "Open display…"
+msgstr "Ouvrir l'affichage…"
+
+#: src/MachineRdpInfo.jsx
+msgid "Remote Desktop: $0"
+msgstr "Bureau distant : $0"
+
+#: src/MachineRdpInfo.jsx
+msgid "No IP address available"
+msgstr "Aucune adresse IP disponible"
+
+#: src/MachineRdpInfo.jsx
+msgid "The container does not have an IP address. Start it and wait a moment, then try again."
+msgstr "Le conteneur n'a pas d'adresse IP. Démarrez-le et attendez un moment, puis réessayez."
+
+#: src/MachineRdpInfo.jsx
+msgid "Connection address"
+msgstr "Adresse de connexion"
+
+#: src/MachineRdpInfo.jsx
+msgid "Copy"
+msgstr "Copier"
+
+#: src/MachineRdpInfo.jsx
+msgid "Copied"
+msgstr "Copié"
+
+#: src/MachineRdpInfo.jsx
+msgid "Username"
+msgstr "Nom d'utilisateur"
+
+#: src/MachineRdpInfo.jsx
+msgid "Password required"
+msgstr "Mot de passe requis"
+
+#: src/MachineRdpInfo.jsx
+msgid "RDP uses system authentication. Connect with the root password set during bootstrap. RDP encrypts the connection by default."
+msgstr "RDP utilise l'authentification système. Connectez-vous avec le mot de passe root défini lors du bootstrap. RDP chiffre la connexion par défaut."
+
+#: src/MachineRdpInfo.jsx
+msgid "Download $0.rdp"
+msgstr "Télécharger $0.rdp"
+
+#: src/MachineRdpInfo.jsx
+msgid "Open the .rdp file with Windows Remote Desktop (mstsc.exe), Remmina, or xfreerdp."
+msgstr "Ouvrez le fichier .rdp avec Bureau à distance Windows (mstsc.exe), Remmina ou xfreerdp."
+
+#: src/MachineRdpInfo.jsx
+msgid "Manual RDP setup (if not using bootstrap)"
+msgstr "Configuration RDP manuelle (sans utiliser le bootstrap)"
+
+#: src/CreateMachineDialog.jsx:662
+msgid "Desktop environment"
+msgstr "Environnement de bureau"
+
+#: src/CreateMachineDialog.jsx:664
+msgid "None (server only)"
+msgstr "Aucun (serveur uniquement)"
+
+#: src/CreateMachineDialog.jsx:687
+msgid "KDE Plasma availability on AlmaLinux"
+msgstr "Disponibilité de KDE Plasma sur AlmaLinux"
+
+#: src/CreateMachineDialog.jsx:689
+msgid "KDE Plasma is not officially supported on AlmaLinux. Installation requires EPEL and may result in an older Plasma version."
+msgstr "KDE Plasma n'est pas officiellement pris en charge sur AlmaLinux. L'installation nécessite EPEL et peut donner une version plus ancienne de Plasma."
+
+#: src/CreateMachineDialog.jsx:695
+msgid "Desktop environment installed after bootstrap"
+msgstr "Environnement de bureau installé après le bootstrap"
+
+#: src/CreateMachineDialog.jsx:697
+msgid "The desktop environment is installed inside the running container after bootstrap. The container will be started automatically."
+msgstr "L'environnement de bureau est installé dans le conteneur en cours d'exécution après le bootstrap. Le conteneur sera démarré automatiquement."
+
+#: src/CreateMachineDialog.jsx:703
+msgid "Enable automatic start at boot"
+msgstr "Activer le démarrage automatique au démarrage"
+
+#: src/EditNetworkDialog.jsx:115
+msgid "Change network: $0"
+msgstr "Modifier le réseau : $0"
+
+#: src/EditNetworkDialog.jsx:122
+msgid "Error"
+msgstr "Erreur"
+
+#: src/EditNetworkDialog.jsx:147
+msgid "A shared NAT bridge (br-nspawn, 10.99.0.1/24) will be created on the host if it does not already exist."
+msgstr "Un pont NAT partagé (br-nspawn, 10.99.0.1/24) sera créé sur l'hôte s'il n'existe pas déjà."
+
+#: src/MachineActions.jsx:90
+msgid "Change network…"
+msgstr "Modifier le réseau…"
+
+#: src/MachineActions.jsx:97
+msgid "Resource limits…"
+msgstr "Limites de ressources…"
+
+#: src/CreateMachineDialog.jsx:710
+msgid "Memory limit"
+msgstr "Limite mémoire"
+
+#: src/CreateMachineDialog.jsx:711
+msgid "e.g. 2G, 512M — leave empty for unlimited"
+msgstr "p.ex. 2G, 512M — laisser vide pour illimité"
+
+#: src/CreateMachineDialog.jsx:718
+msgid "CPU quota"
+msgstr "Quota CPU"
+
+#: src/CreateMachineDialog.jsx:719
+msgid "e.g. 100% = 1 core, 200% = 2 cores — leave empty for unlimited"
+msgstr "p.ex. 100% = 1 cœur, 200% = 2 cœurs — laisser vide pour illimité"
+
+#: src/CreateMachineDialog.jsx:722
+#: src/EditResourcesDialog.jsx:84
+msgid "unlimited"
+msgstr "illimité"
+
+#: src/EditResourcesDialog.jsx:70
+msgid "Resource limits: $0"
+msgstr "Limites de ressources : $0"
+
+#: src/CreateMachineDialog.jsx
+msgid "not available for this version"
+msgstr "non disponible pour cette version"
+
+#: src/CreateMachineDialog.jsx
+msgid "Desktop environments not available for AlmaLinux 10"
+msgstr "Environnements de bureau non disponibles pour AlmaLinux 10"
+
+#: src/CreateMachineDialog.jsx
+msgid "Desktop environment packages (XFCE, KDE, GNOME) and xrdp are not yet available in EPEL 10. Desktop environment bootstrap is not supported for AlmaLinux 10."
+msgstr "Les paquets d'environnement de bureau (XFCE, KDE, GNOME) et xrdp ne sont pas encore disponibles dans EPEL 10. Le bootstrap d'environnement de bureau n'est pas pris en charge pour AlmaLinux 10."
+
+#: src/CreateMachineDialog.jsx src/EditResourcesDialog.jsx
+msgid "Maximum RAM the container may use. If the limit is exceeded, processes inside the container are killed by the OOM killer."
+msgstr "RAM maximum que le conteneur peut utiliser. Si la limite est dépassée, les processus dans le conteneur sont tués par l'OOM killer."
+
+#: src/CreateMachineDialog.jsx src/EditResourcesDialog.jsx
+msgid "Examples:"
+msgstr "Exemples :"
+
+#: src/CreateMachineDialog.jsx src/EditResourcesDialog.jsx
+msgid "Leave empty for no limit."
+msgstr "Laisser vide pour aucune limite."
+
+#: src/CreateMachineDialog.jsx src/EditResourcesDialog.jsx
+msgid "Maximum CPU time the container may use. 100% equals one full CPU core."
+msgstr "Temps CPU maximum que le conteneur peut utiliser. 100% équivaut à un cœur complet."
+
+#: src/CreateMachineDialog.jsx src/EditResourcesDialog.jsx
+msgid "half a core"
+msgstr "un demi-cœur"
+
+#: src/CreateMachineDialog.jsx src/EditResourcesDialog.jsx
+msgid "one core"
+msgstr "un cœur"
+
+#: src/CreateMachineDialog.jsx src/EditResourcesDialog.jsx
+msgid "two cores"
+msgstr "deux cœurs"
+
+#: src/CreateMachineDialog.jsx src/EditResourcesDialog.jsx
+msgid "four cores"
+msgstr "quatre cœurs"
+
+#: src/CreateMachineDialog.jsx src/EditResourcesDialog.jsx
+msgid "More info for Memory limit"
+msgstr "Plus d'info sur la limite mémoire"
+
+#: src/CreateMachineDialog.jsx src/EditResourcesDialog.jsx
+msgid "More info for CPU quota"
+msgstr "Plus d'info sur le quota CPU"
+
+#: src/CreateMachineDialog.jsx
+msgid "Weston (Wayland)"
+msgstr "Weston (Wayland)"
+
+#: src/CreateMachineDialog.jsx
+msgid "Weston: minimal Wayland desktop"
+msgstr "Weston : bureau Wayland minimal"
+
+#: src/CreateMachineDialog.jsx
+msgid "Weston provides a minimal Wayland compositor accessible via RDP (port 3389). A terminal (weston-terminal) is available on the desktop. XFCE, KDE, and GNOME require X11 and are not available on Fedora 40+."
+msgstr "Weston fournit un compositeur Wayland minimal accessible via RDP (port 3389). Un terminal (weston-terminal) est disponible sur le bureau. XFCE, KDE et GNOME nécessitent X11 et ne sont pas disponibles sur Fedora 40+."
+
+#: src/CreateMachineDialog.jsx:995
+msgid "KDE Plasma (Wayland VNC)"
+msgstr "KDE Plasma (Wayland VNC)"
+
+#: src/CreateMachineDialog.jsx:1012
+msgid "KDE Plasma: headless Wayland desktop via VNC"
+msgstr "KDE Plasma : bureau Wayland sans affichage via VNC"
+
+#: src/CreateMachineDialog.jsx:1014
+msgid "KDE Plasma runs headlessly using labwc (Wayland compositor) and wayvnc. Connect with any VNC client (e.g. Remmina) to port 5900 — no password required. Resolution: 1920×1080. The session runs as user kdeuser."
+msgstr "KDE Plasma fonctionne sans affichage avec labwc (compositeur Wayland) et wayvnc. Connectez-vous avec un client VNC (ex. Remmina) sur le port 5900 — aucun mot de passe requis. Résolution : 1920×1080. La session s'exécute en tant qu'utilisateur kdeuser."
+
+#: src/CreateMachineDialog.jsx
+msgid "Keyboard layout"
+msgstr "Disposition du clavier"
+
+#: src/CreateMachineDialog.jsx
+msgid "Swedish (se)"
+msgstr "Suédois (se)"
+
+#: src/CreateMachineDialog.jsx
+msgid "English / US (us)"
+msgstr "Anglais / États-Unis (us)"
+
+#: src/CreateMachineDialog.jsx
+msgid "Spanish (es)"
+msgstr "Espagnol (es)"
+
+#: src/CreateMachineDialog.jsx
+msgid "German (de)"
+msgstr "Allemand (de)"
+
+# BackupDialog.jsx + backup badges
+
+#: src/BackupDialog.jsx
+msgid "Backup: $0"
+msgstr "Sauvegarde : $0"
+
+#: src/BackupDialog.jsx
+msgid "Backup configured for $0"
+msgstr "Sauvegarde configurée pour $0"
+
+#: src/BackupDialog.jsx
+msgid "Backup disabled for $0"
+msgstr "Sauvegarde désactivée pour $0"
+
+#: src/BackupDialog.jsx
+msgid "backup failed"
+msgstr "sauvegarde échouée"
+
+#: src/BackupDialog.jsx
+msgid "Backup in progress…"
+msgstr "Sauvegarde en cours…"
+
+#: src/BackupDialog.jsx
+msgid "Backup now"
+msgstr "Sauvegarder maintenant"
+
+#: src/BackupDialog.jsx
+msgid "backup OK"
+msgstr "sauvegarde OK"
+
+#: src/BackupDialog.jsx
+msgid "Backups are stored as NAME-YYYYMMDD-HHMMSS.tar.gz in this directory"
+msgstr "Les sauvegardes sont stockées sous NAME-YYYYMMDD-HHMMSS.tar.gz dans ce répertoire"
+
+#: src/BackupDialog.jsx
+msgid "Connection failed"
+msgstr "Connexion échouée"
+
+#: src/BackupDialog.jsx
+msgid "Connection successful"
+msgstr "Connexion réussie"
+
+#: src/BackupDialog.jsx
+msgid "Daily schedule"
+msgstr "Planification quotidienne"
+
+#: src/BackupDialog.jsx
+msgid "Disable backup"
+msgstr "Désactiver la sauvegarde"
+
+#: src/BackupDialog.jsx
+msgid "Failed to configure backup"
+msgstr "Échec de la configuration de la sauvegarde"
+
+#: src/BackupDialog.jsx
+msgid "Failed to disable backup"
+msgstr "Échec de la désactivation de la sauvegarde"
+
+#: src/BackupDialog.jsx
+msgid "Failed to start backup"
+msgstr "Échec du démarrage de la sauvegarde"
+
+#: src/BackupDialog.jsx
+msgid "Host is required"
+msgstr "L'hôte est requis"
+
+#: src/BackupDialog.jsx
+msgid "Key must be pre-authorized on the remote host (ssh-copy-id)"
+msgstr "La clé doit être pré-autorisée sur l'hôte distant (ssh-copy-id)"
+
+#: src/BackupDialog.jsx
+msgid "Last backup: $0$1"
+msgstr "Dernière sauvegarde : $0$1"
+
+#: src/BackupDialog.jsx
+msgid "Last backup failed: $0"
+msgstr "Dernière sauvegarde échouée : $0"
+
+#: src/BackupDialog.jsx
+msgid "Number of backup copies to keep on remote"
+msgstr "Nombre de copies à conserver sur l'hôte distant"
+
+#: src/BackupDialog.jsx
+msgid "Options"
+msgstr "Options"
+
+#: src/BackupDialog.jsx
+msgid "Recommended for containers running databases"
+msgstr "Recommandé pour les conteneurs avec des bases de données"
+
+#: src/BackupDialog.jsx
+msgid "Remote path"
+msgstr "Chemin distant"
+
+#: src/BackupDialog.jsx
+msgid "Retention"
+msgstr "Rétention"
+
+#: src/BackupDialog.jsx
+msgid "Save and enable"
+msgstr "Enregistrer et activer"
+
+#: src/BackupDialog.jsx
+msgid "Schedule must be in HH:MM format (e.g. 02:00)"
+msgstr "La planification doit être au format HH:MM (ex. 02:00)"
+
+#: src/BackupDialog.jsx
+msgid "SSH host"
+msgstr "Hôte SSH"
+
+#: src/BackupDialog.jsx
+msgid "SSH private key"
+msgstr "Clé privée SSH"
+
+#: src/BackupDialog.jsx
+msgid "SSH user"
+msgstr "Utilisateur SSH"
+
+#: src/BackupDialog.jsx
+msgid "Stop container during backup"
+msgstr "Arrêter le conteneur pendant la sauvegarde"
+
+#: src/BackupDialog.jsx
+msgid "Test connection"
+msgstr "Tester la connexion"
+
+#: src/BackupDialog.jsx
+msgid "This may take several minutes for large containers."
+msgstr "Cela peut prendre plusieurs minutes pour les conteneurs volumineux."
+
+#: src/BackupDialog.jsx
+msgid "Time in 24-hour format (HH:MM)"
+msgstr "Heure au format 24h (HH:MM)"
+
+# RestoreDialog + Resources column
+#: src/RestoreDialog.jsx
+msgid "Restore: $0"
+msgstr "Restaurer : $0"
+
+#: src/RestoreDialog.jsx
+msgid "List backups"
+msgstr "Lister les sauvegardes"
+
+#: src/RestoreDialog.jsx
+msgid "Restore"
+msgstr "Restaurer"
+
+#: src/RestoreDialog.jsx
+msgid "Available backups"
+msgstr "Sauvegardes disponibles"
+
+#: src/RestoreDialog.jsx
+msgid "Restore in progress…"
+msgstr "Restauration en cours…"
+
+#: src/RestoreDialog.jsx
+msgid "Downloading and extracting backup. This may take several minutes."
+msgstr "Téléchargement et extraction de la sauvegarde. Cela peut prendre plusieurs minutes."
+
+#: src/RestoreDialog.jsx
+msgid "$0 restored successfully"
+msgstr "$0 restauré avec succès"
+
+#: src/RestoreDialog.jsx
+msgid "No backups found on remote host."
+msgstr "Aucune sauvegarde trouvée sur l'hôte distant."
+
+#: src/RestoreDialog.jsx
+msgid "This will replace the container's current filesystem. This action cannot be undone."
+msgstr "Cela remplacera le système de fichiers actuel du conteneur. Cette action ne peut pas être annulée."
+
+#: src/RestoreDialog.jsx
+msgid "Restore failed"
+msgstr "Restauration échouée"
+
+#: src/machines.jsx
+msgid "Resources"
+msgstr "Ressources"
+
+
+# NspawnConfigDialog + Failed units
+#: src/NspawnConfigDialog.jsx
+msgid "nspawn config: $0"
+msgstr "Config nspawn : $0"
+
+#: src/NspawnConfigDialog.jsx
+msgid "Changes take effect after restart"
+msgstr "Les modifications prennent effet après le redémarrage"
+
+#: src/NspawnConfigDialog.jsx
+msgid "systemd-nspawn configuration. See man systemd.nspawn for all options."
+msgstr "Configuration systemd-nspawn. Voir man systemd.nspawn pour toutes les options."
+
+#: src/NspawnConfigDialog.jsx
+msgid "Config saved for $0"
+msgstr "Configuration enregistrée pour $0"
+
+#: src/NspawnConfigDialog.jsx
+msgid "Failed to save config"
+msgstr "Impossible d'enregistrer la configuration"
+
+#: src/NspawnConfigDialog.jsx
+msgid "Saving…"
+msgstr "Enregistrement…"
+
+#: src/MachineActions.jsx
+msgid "Edit config…"
+msgstr "Modifier la configuration…"
+
+#: src/MachineDetails.jsx
+msgid "Failed units"
+msgstr "Unités en échec"
+
+#: src/MachineDetails.jsx
+msgid "No failed units"
+msgstr "Aucune unité en échec"
+
+#: src/InstallCockpitDialog.jsx
+msgid "Install Cockpit in container"
+msgstr "Installer Cockpit dans le conteneur"
+
+#: src/InstallCockpitDialog.jsx
+msgid "Installs Cockpit inside the container and applies the required workarounds for running in a systemd-nspawn environment (static service users, crypto policy)."
+msgstr "Installe Cockpit dans le conteneur et applique les correctifs nécessaires pour fonctionner dans un environnement systemd-nspawn (utilisateurs de service statiques, politique de chiffrement)."
+
+#: src/InstallCockpitDialog.jsx
+msgid "Installing…"
+msgstr "Installation…"
+
+#: src/InstallCockpitDialog.jsx
+msgid "Install"
+msgstr "Installer"
+
+#: src/InstallCockpitDialog.jsx
+msgid "Installation failed"
+msgstr "Échec de l'installation"
+
+#: src/InstallCockpitDialog.jsx
+msgid "Cockpit installed successfully"
+msgstr "Cockpit installé avec succès"
+
+#: src/InstallCockpitDialog.jsx
+msgid "Cockpit installed. Connect to port 9090 on the container's IP address."
+msgstr "Cockpit installé. Connectez-vous au port 9090 sur l'adresse IP du conteneur."
+
+#: src/InstallCockpitDialog.jsx
+msgid "Install Cockpit…"
+msgstr "Installer Cockpit…"
+
+#: src/CreateMachineDialog.jsx
+msgid "Bridge interface $0 does not exist on this host. Create it first via Cockpit → Network → Add bridge."
+msgstr "L'interface bridge $0 n'existe pas sur cet hôte. Créez-la d'abord via Cockpit → Réseau → Ajouter un bridge."
+
+#: src/DeviceBindingEditor.jsx
+msgid "Device bindings"
+msgstr "Liaisons de périphériques"
+
+#: src/DeviceBindingEditor.jsx
+msgid "Select host device"
+msgstr "Sélectionner un périphérique hôte"
+
+#: src/DeviceBindingEditor.jsx
+msgid "No devices found on host"
+msgstr "Aucun périphérique trouvé sur l'hôte"
+
+#: src/DeviceBindingEditor.jsx
+msgid "Add selected device"
+msgstr "Ajouter le périphérique sélectionné"
+
+#: src/DeviceBindingEditor.jsx
+msgid "Add"
+msgstr "Ajouter"
+
+#: src/DeviceBindingEditor.jsx
+msgid "Custom device path"
+msgstr "Chemin de périphérique personnalisé"
+
+#: src/DeviceBindingEditor.jsx
+msgid "Add custom device path"
+msgstr "Ajouter un chemin de périphérique personnalisé"
+
+#: src/DeviceBindingEditor.jsx
+msgid "Devices are bound read-write into the container. Requires restart to take effect."
+msgstr "Les périphériques sont montés en lecture-écriture dans le conteneur. Un redémarrage est nécessaire pour que les modifications prennent effet."
+
+#: src/BackupDialog.jsx
+msgid "Backup type"
+msgstr "Type de sauvegarde"
+
+#: src/BackupDialog.jsx
+msgid "Full backup"
+msgstr "Sauvegarde complète"
+
+#: src/BackupDialog.jsx
+msgid "Creates a tar.gz archive, transferred via SCP"
+msgstr "Crée une archive tar.gz, transférée via SCP"
+
+#: src/BackupDialog.jsx
+msgid "Incremental backup"
+msgstr "Sauvegarde incrémentielle"
+
+#: src/BackupDialog.jsx
+msgid "rsync snapshot with hardlinks — requires rsync on local and remote host"
+msgstr "Instantané rsync avec liens physiques — nécessite rsync sur l'hôte local et distant"
+
+#: src/BackupDialog.jsx
+msgid "Incremental snapshots are stored as NAME/YYYYMMDD-HHMMSS/ directories under this path"
+msgstr "Les instantanés incrémentiels sont stockés sous forme de répertoires NAME/YYYYMMDD-HHMMSS/ sous ce chemin"
+
+#: src/BackupDialog.jsx
+msgid "Schedule"
+msgstr "Planification"
+
+#: src/BackupDialog.jsx
+msgid "Every hour"
+msgstr "Toutes les heures"
+
+#: src/BackupDialog.jsx
+msgid "Every 2 hours"
+msgstr "Toutes les 2 heures"
+
+#: src/BackupDialog.jsx
+msgid "Every 4 hours"
+msgstr "Toutes les 4 heures"
+
+#: src/BackupDialog.jsx
+msgid "Every 6 hours"
+msgstr "Toutes les 6 heures"
+
+#: src/BackupDialog.jsx
+msgid "Every 12 hours"
+msgstr "Toutes les 12 heures"
+
+#: src/BackupDialog.jsx
+msgid "Once per day"
+msgstr "Une fois par jour"
+
+#: src/BackupDialog.jsx
+msgid "Incremental backup recommended for sub-daily schedules"
+msgstr "Sauvegarde incrémentielle recommandée pour les planifications sub-quotidiennes"
+
+#: src/BackupDialog.jsx
+msgid "Time must be in HH:MM format (e.g. 02:00)"
+msgstr "L'heure doit être au format HH:MM (ex. 02:00)"
+
+#: src/BackupDialog.jsx
+msgid "MariaDB / MySQL"
+msgstr "MariaDB / MySQL"
+
+#: src/BackupDialog.jsx
+msgid "Run mysqldump before backup (zero-downtime database backup)"
+msgstr "Exécuter mysqldump avant la sauvegarde (sauvegarde de base de données sans interruption)"
+
+#: src/BackupDialog.jsx
+msgid "MariaDB root password"
+msgstr "Mot de passe root MariaDB"
+
+#: src/BackupDialog.jsx
+msgid "Uses mysqldump --single-transaction inside the running container. The dump travels with each snapshot and is restored automatically on restore."
+msgstr "Exécute mysqldump --single-transaction dans le conteneur en cours d'exécution. Le dump accompagne chaque instantané et est restauré automatiquement lors de la restauration."
+
+#: src/CreateMachineDialog.jsx
+msgid "Upload from file"
+msgstr "Téléverser depuis un fichier"
+
+#: src/CreateMachineDialog.jsx
+msgid "Container archive"
+msgstr "Archive de conteneur"
+
+#: src/CreateMachineDialog.jsx
+msgid "Select a .tar.gz container archive exported from machinectl or cockpit-nspawn."
+msgstr "Sélectionnez une archive .tar.gz exportée depuis machinectl ou cockpit-nspawn."
+
+#: src/CreateMachineDialog.jsx
+msgid "Uploading… $0 of $1"
+msgstr "Téléversement… $0 sur $1"
+
+#: src/CreateMachineDialog.jsx
+msgid "Uploading file to server…"
+msgstr "Téléversement du fichier vers le serveur…"
+
+#: src/CreateMachineDialog.jsx
+msgid "Importing container…"
+msgstr "Importation du conteneur…"
+
+#: src/CreateMachineDialog.jsx
+msgid "Container $0 imported"
+msgstr "Conteneur $0 importé"
+
+#: src/CreateMachineDialog.jsx
+msgid "$0 has been imported."
+msgstr "$0 a été importé."
+
+#: src/CreateMachineDialog.jsx
+msgid "Uploading…"
+msgstr "Téléversement…"
+
+#: src/CreateMachineDialog.jsx
+msgid "Importing…"
+msgstr "Importation…"
+
+#: src/MachineActions.jsx
+msgid "Rename…"
+msgstr "Renommer…"
+
+#: src/MachineActions.jsx
+msgid "Rename: $0"
+msgstr "Renommer : $0"
+
+
+#: src/MachineActions.jsx
+msgid "Rename"
+msgstr "Renommer"
+
+#: src/MachineActions.jsx
+msgid "Rename failed"
+msgstr "Échec du renommage"
+
+#: src/MachineActions.jsx
+msgid "$0 renamed to $1"
+msgstr "$0 renommé en $1"
+
+#: src/BackupDialog.jsx
+msgid "Simple — keep a fixed number of copies"
+msgstr "Simple — conserver un nombre fixe de copies"
+
+#: src/BackupDialog.jsx
+msgid "GFS — Grandfather-Father-Son tiers"
+msgstr "GFS — niveaux Grand-père-Père-Fils"
+
+#: src/BackupDialog.jsx
+msgid "Set a tier to 0 to disable it. Requires python3 on the backup server."
+msgstr "Mettez un niveau à 0 pour le désactiver. Nécessite python3 sur le serveur de sauvegarde."
+
+#: src/BackupDialog.jsx
+msgid "Hourly"
+msgstr "Par heure"
+
+#: src/BackupDialog.jsx
+msgid "Daily"
+msgstr "Quotidien"
+
+#: src/BackupDialog.jsx
+msgid "Weekly"
+msgstr "Hebdomadaire"
+
+#: src/BackupDialog.jsx
+msgid "Monthly"
+msgstr "Mensuel"
+
+#: src/BackupDialog.jsx
+msgid "Yearly"
+msgstr "Annuel"
+
+#: src/BackupDialog.jsx
+msgid "Notify on"
+msgstr "Notifier lors de"
+
+#: src/BackupDialog.jsx
+msgid "Failure"
+msgstr "Échec"
+
+#: src/BackupDialog.jsx
+msgid "Success"
+msgstr "Succès"
+
+#: src/BackupDialog.jsx
+msgid "Configure at least one channel below to enable notifications"
+msgstr "Configurez au moins un canal ci-dessous pour activer les notifications"
+
+#: src/BackupDialog.jsx
+msgid "Email (SMTP)"
+msgstr "E-mail (SMTP)"
+
+#: src/BackupDialog.jsx
+msgid "SMTP username (e.g. user@gmail.com)"
+msgstr "Nom d'utilisateur SMTP (ex. user@gmail.com)"
+
+#: src/BackupDialog.jsx
+msgid "SMTP password"
+msgstr "Mot de passe SMTP"
+
+#: src/BackupDialog.jsx
+msgid "Recipient address"
+msgstr "Adresse du destinataire"
+
+#: src/BackupDialog.jsx
+msgid "Leave all four fields blank to disable email. Uses curl with STARTTLS/SSL — no local MTA required."
+msgstr "Laissez les quatre champs vides pour désactiver l'e-mail. Utilise curl avec STARTTLS/SSL — aucun MTA local requis."
+
+#: src/BackupDialog.jsx
+msgid "Slack webhook URL"
+msgstr "URL du webhook Slack"
+
+#: src/BackupDialog.jsx
+msgid "Leave blank to disable. Create at api.slack.com/apps → Incoming Webhooks."
+msgstr "Laisser vide pour désactiver. Créer sur api.slack.com/apps → Incoming Webhooks."
+
+#: src/BackupDialog.jsx
+msgid "Pushover"
+msgstr "Pushover"
+
+#: src/BackupDialog.jsx
+msgid "User key"
+msgstr "Clé utilisateur"
+
+#: src/BackupDialog.jsx
+msgid "App token"
+msgstr "Jeton d'application"
+
+#: src/BackupDialog.jsx
+msgid "Leave both blank to disable. Create an app at pushover.net to get an app token."
+msgstr "Laisser les deux vides pour désactiver. Créez une application sur pushover.net pour obtenir un jeton d'application."
+
+
+# BackupsOverview.jsx + app.jsx tabs
+
+#: src/BackupsOverview.jsx
+msgid "Loading backup status..."
+msgstr "Chargement de l'état des sauvegardes..."
+
+#: src/BackupsOverview.jsx
+msgid "No containers found."
+msgstr "Aucun conteneur trouvé."
+
+#: src/BackupsOverview.jsx
+msgid "Backup overview"
+msgstr "Vue d'ensemble des sauvegardes"
+
+#: src/BackupsOverview.jsx
+msgid "No backup configured"
+msgstr "Aucune sauvegarde configurée"
+
+#: src/BackupsOverview.jsx
+msgid "Never run"
+msgstr "Jamais exécuté"
+
+#: src/BackupsOverview.jsx
+msgid "Next run"
+msgstr "Prochaine exécution"
+
+#: src/app.jsx
+msgid "Containers"
+msgstr "Conteneurs"
+
+#: src/app.jsx
+msgid "Backups"
+msgstr "Sauvegardes"
+
+# Pull-backup strings added 2026-07-15
+
+#: src/BackupDialog.jsx
+msgid "Backup mode"
+msgstr "Mode de sauvegarde"
+
+#: src/BackupDialog.jsx
+msgid "Container name \"$0\" isn't valid for pull backup (only letters, digits, - and _ are allowed)"
+msgstr "Le nom du conteneur \"$0\" n'est pas valide pour la sauvegarde pull (seuls les lettres, chiffres, - et _ sont autorisés)"
+
+#: src/BackupDialog.jsx
+msgid "Database consistency comes from a mysqldump taken inside the container before each pull, not a filesystem-level snapshot — the container's filesystem itself is read live."
+msgstr "La cohérence de la base de données provient d'un mysqldump effectué à l'intérieur du conteneur avant chaque extraction, et non d'un instantané au niveau du système de fichiers — le système de fichiers du conteneur lui-même est lu en direct."
+
+#: src/BackupDialog.jsx
+msgid "Failed to disable pull backup"
+msgstr "Échec de la désactivation de la sauvegarde pull"
+
+#: src/BackupDialog.jsx
+msgid "Failed to prepare pull backup"
+msgstr "Échec de la préparation de la sauvegarde pull"
+
+#: src/BackupDialog.jsx
+msgid "How pull backup works"
+msgstr "Fonctionnement de la sauvegarde pull"
+
+#: src/BackupDialog.jsx
+msgid "Last DB dump failed: $0"
+msgstr "Échec du dernier dump de la base : $0"
+
+#: src/BackupDialog.jsx
+msgid "Last DB dump: $0$1"
+msgstr "Dernier dump de la base : $0$1"
+
+#: src/BackupDialog.jsx
+msgid "MySQL/MariaDB username (e.g. backup or root)"
+msgstr "Nom d'utilisateur MySQL/MariaDB (par ex. backup ou root)"
+
+#: src/BackupDialog.jsx
+msgid "MySQL/MariaDB username is required"
+msgstr "Le nom d'utilisateur MySQL/MariaDB est requis"
+
+#: src/BackupDialog.jsx
+msgid "Password for \"$0\""
+msgstr "Mot de passe pour \"$0\""
+
+#: src/BackupDialog.jsx
+msgid "Paste the vault's public key (e.g. the contents of /root/.ssh/nspawn-vault.pub on the vault host). Trusted here with a forced, read-only command — it can never run anything else on this host."
+msgstr "Collez la clé publique du coffre-fort (par exemple le contenu de /root/.ssh/nspawn-vault.pub sur l'hôte du coffre-fort). Elle est ici approuvée avec une commande forcée en lecture seule — elle ne peut jamais exécuter autre chose sur cet hôte."
+
+#: src/BackupDialog.jsx
+msgid "Pull backup disabled for $0"
+msgstr "Sauvegarde pull désactivée pour $0"
+
+#: src/BackupDialog.jsx
+msgid "Pull backup is unavailable for this container: the name \"$0\" contains characters the vault's dispatcher won't accept (only letters, digits, - and _ are allowed)."
+msgstr "La sauvegarde pull n'est pas disponible pour ce conteneur : le nom \"$0\" contient des caractères que le dispatcher du coffre-fort n'accepte pas (seuls les lettres, chiffres, - et _ sont autorisés)."
+
+#: src/BackupDialog.jsx
+msgid "Pull backup prepared"
+msgstr "Sauvegarde pull préparée"
+
+#: src/BackupDialog.jsx
+msgid "Pull backup prepared for $0"
+msgstr "Sauvegarde pull préparée pour $0"
+
+#: src/BackupDialog.jsx
+msgid "Pull — a backup vault initiates and manages backups for this container"
+msgstr "Pull — un coffre-fort de sauvegarde initie et gère les sauvegardes de ce conteneur"
+
+#: src/BackupDialog.jsx
+msgid "Push — this host schedules and manages its own backups"
+msgstr "Push — cet hôte planifie et gère lui-même ses sauvegardes"
+
+#: src/BackupDialog.jsx
+msgid "Save"
+msgstr "Enregistrer"
+
+#: src/BackupDialog.jsx
+msgid "Saved as $0 inside the container — rides along with the vault's pull, so look for it under that same path once synced."
+msgstr "Enregistré sous $0 à l'intérieur du conteneur — voyage avec l'extraction du coffre-fort, cherchez-le donc sous ce même chemin une fois synchronisé."
+
+#: src/BackupDialog.jsx
+msgid "Saving here prepares this host: installs the vault's forced-command dispatcher, trusts the vault's key for it, and (if MariaDB is enabled below) writes DB credentials for it to read. The vault itself initiates every connection over SSH and pulls this container's files read-only — nothing here schedules a backup on its own."
+msgstr "Enregistrer ici prépare cet hôte : installe le dispatcher de commande forcée du coffre-fort, fait confiance à sa clé pour cela, et (si MariaDB est activé ci-dessous) écrit les identifiants de la base de données pour qu'il les lise. Le coffre-fort lui-même initie chaque connexion via SSH et récupère les fichiers de ce conteneur en lecture seule — rien ici ne planifie de sauvegarde de son propre chef."
+
+#: src/BackupDialog.jsx
+msgid "Source host is ready for pull backup. Add \"$0\" and container \"$1\" to the vault's source-host list (Admin → Source hosts), then test the connection there before enabling the pull timer."
+msgstr "L'hôte source est prêt pour la sauvegarde pull. Ajoutez \"$0\" et le conteneur \"$1\" à la liste des hôtes source du coffre-fort (Admin → Hôtes source), puis testez la connexion là-bas avant d'activer la minuterie de pull."
+
+#: src/BackupDialog.jsx
+msgid "Source host is ready for pull backup. Add this host and container \"$0\" to the vault's source-host list (Admin → Source hosts), then test the connection there before enabling the pull timer."
+msgstr "L'hôte source est prêt pour la sauvegarde pull. Ajoutez cet hôte et le conteneur \"$0\" à la liste des hôtes source du coffre-fort (Admin → Hôtes source), puis testez la connexion là-bas avant d'activer la minuterie de pull."
+
+#: src/BackupDialog.jsx
+msgid "This only reflects the database dump step run on this host — not whether the vault's pull of the container itself has completed."
+msgstr "Cela reflète uniquement l'étape de dump de la base de données exécutée sur cet hôte — pas si l'extraction du conteneur par le coffre-fort lui-même est terminée."
+
+#: src/BackupDialog.jsx
+msgid "This vault owns scheduling, retention, and alerting for pull-mode containers — none of that is configured or visible here."
+msgstr "Ce coffre-fort gère la planification, la rétention et les alertes pour les conteneurs en mode pull — rien de tout cela n'est configuré ni visible ici."
+
+#: src/BackupDialog.jsx
+msgid "Vault's public SSH key"
+msgstr "Clé SSH publique du coffre-fort"
+
+#: src/BackupDialog.jsx
+msgid "Vault's public key is required"
+msgstr "La clé publique du coffre-fort est requise"
+
+#: src/BackupDialog.jsx
+msgid "Written to /etc/cockpit-nspawn/pull/<name>.cnf for the MySQL/MariaDB user \"$0\" — the vault's snapshot-db.sh runs mysqldump --single-transaction inside the container before each pull and removes the dump again afterward. A dedicated user with only dump privileges (SELECT, LOCK TABLES, SHOW VIEW, EVENT, TRIGGER) is recommended over root, since this credentials file sits in plaintext (mode 600) on this host."
+msgstr "Écrit dans /etc/cockpit-nspawn/pull/<name>.cnf pour l'utilisateur MySQL/MariaDB \"$0\" — le snapshot-db.sh du coffre-fort exécute mysqldump --single-transaction à l'intérieur du conteneur avant chaque extraction et supprime le dump ensuite. Un utilisateur dédié avec uniquement des privilèges de dump (SELECT, LOCK TABLES, SHOW VIEW, EVENT, TRIGGER) est recommandé plutôt que root, car ce fichier d'identifiants se trouve en clair (mode 600) sur cet hôte."
+
+# Pre-snapshot hook strings added 2026-08-03
+#: src/BackupDialog.jsx
+msgid "Pre-snapshot hook (optional)"
+msgstr "Hook de pré-snapshot (facultatif)"
+
+#: src/BackupDialog.jsx
+msgid "Run a command inside the container right before each pull"
+msgstr "Exécuter une commande dans le conteneur juste avant chaque récupération"
+
+#: src/BackupDialog.jsx
+msgid "e.g. ipa-backup or pg_dump -U postgres mydb > /var/tmp/mydb.sql"
+msgstr "p. ex. ipa-backup ou pg_dump -U postgres mydb > /var/tmp/mydb.sql"
+
+#: src/BackupDialog.jsx
+msgid "For services with their own backup tooling that mysqldump above doesn't cover (FreeIPA's ipa-backup, pg_dump, etc). Written to /etc/cockpit-nspawn/pull/<name>.hook (mode 600) and run inside the container via systemd-run just before the vault's pull."
+msgstr "Pour les services disposant de leur propre outil de sauvegarde que mysqldump ci-dessus ne couvre pas (ipa-backup de FreeIPA, pg_dump, etc). Écrit dans /etc/cockpit-nspawn/pull/<name>.hook (mode 600) et exécuté dans le conteneur via systemd-run juste avant la récupération par le coffre-fort."
+
+#: src/BackupDialog.jsx
+msgid "Pre-snapshot hook command is required"
+msgstr "La commande du hook de pré-snapshot est requise"
+
+#: src/BackupDialog.jsx
+msgid "Last pre-snapshot hook: $0"
+msgstr "Dernier hook de pré-snapshot : $0"
+
+#: src/BackupDialog.jsx
+msgid "Last pre-snapshot hook failed: $0"
+msgstr "Échec du dernier hook de pré-snapshot : $0"
+

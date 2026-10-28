@@ -1,0 +1,21 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
+.spice-replace-dialog-panel {
+    /* separate it a bit from the text above */
+    margin-block-start: var(--pf-t--global--spacer--md);
+
+    /* drop excessive inside spacing */
+    .pf-v6-c-panel__main-body {
+        padding-block-start: 0;
+        padding-block-end: 0;
+        padding-inline-start: 0;
+        padding-inline-end: 0;
+    }
+}
+
+.spice-replace-dialog-popover-list {
+    list-style: inside;
+}
+
+#replace-spice-dialog-select-all {
+    --pf-v6-c-button--PaddingInlineStart: 0;
+}

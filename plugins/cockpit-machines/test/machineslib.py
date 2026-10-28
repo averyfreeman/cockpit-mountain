@@ -1,0 +1,641 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+#
+# Copyright (C) 2021 Red Hat, Inc.
+import os
+import sys
+import time
+import traceback
+from collections.abc import Mapping, Sequence
+
+import netlib
+import storagelib
+import testlib
+from dialoglib import DialogHelpers
+from machine import testvm
+
+
+def hasMonolithicDaemon(image: str) -> bool:
+    return (image.startswith("rhel-8-") or
+            image.startswith("debian") or
+            image.startswith("ubuntu") or
+            image in ["arch"])
+
+
+# software TPM doesn't work on some OSes
+def hasBrokenTPM(image: str) -> bool:
+    return image.startswith("rhel-8")
+
+
+class VirtualMachinesCaseHelpers(testlib.MachineCase):
+    def waitPageInit(self) -> None:
+        m = self.machine
+        virtualization_disabled_ignored = \
+                self.browser.call_js_func("localStorage.getItem", "virtualization-disabled-ignored") == "true"
+        virtualization_enabled = \
+                "PASS" in m.execute("virt-host-validate qemu | grep 'Checking for hardware virtualization' || true")
+        if not virtualization_enabled and not virtualization_disabled_ignored:
+            self.browser.click("#ignore-hw-virtualization-disabled-btn")
+        with self.browser.wait_timeout(30):
+            self.browser.wait_in_text("body", "Virtual machines")
+
+    # TODO: generic, move to testlib.py?
+    def dropdownAction(self, kebab_selector: str, menu_selector: str) -> None:
+        b = self.browser
+        b.click(kebab_selector)
+        b.wait_visible(f"{kebab_selector}[aria-expanded=true]")
+        # HACK: PF bug: Dropdown open state is bouncing
+        time.sleep(0.2)
+        b.wait_visible(f"{kebab_selector}[aria-expanded=true]")
+        b.click(menu_selector)
+        b.wait_not_present(f"{kebab_selector}[aria-expanded=true]")
+
+    def performAction(self, vmName: str, action: str, *, checkExpectedState: bool = True,
+                      connectionName: str = "system", logPath: str | None = None) -> None:
+        b = self.browser
+        m = self.machine
+
+        if logPath:
+            m.write(logPath, '')
+
+        self.dropdownAction(f"#vm-{vmName}-{connectionName}-action-kebab", f"#vm-{vmName}-{connectionName}-{action}")
+        if action in ["reboot", "forceReboot"] and logPath:
+            # https://bugzilla.redhat.com/show_bug.cgi?id=2221144
+            # The VM should not be rebooted when the confirmation dialog is shown
+            time.sleep(5)
+            self.assertNotIn("Linux version", m.execute(f"cat {logPath}"))
+
+        # Some actions, which can cause expensive downtime when clicked accidentally, have confirmation dialog
+        if action in ["off", "forceOff", "reboot", "forceReboot", "sendNMI"]:
+            b.wait_visible(f"#vm-{vmName}-{connectionName}-confirm-action-modal")
+            b.click(f".pf-v6-c-modal-box__footer #vm-{vmName}-{connectionName}-{action}")
+            b.wait_not_present(f"#vm-{vmName}-{connectionName}-confirm-action-modal")
+
+        if not checkExpectedState:
+            return
+
+        if action == "pause":
+            b.wait_in_text(f"#vm-{vmName}-{connectionName}-state", "Paused")
+        if action in ["resume", "run", "reboot", "forceReboot"]:
+            b.wait_in_text(f"#vm-{vmName}-{connectionName}-state", "Running")
+            if logPath:
+                testlib.wait(lambda: "Linux version" in m.execute(f"cat {logPath}"))
+        if action == "forceOff" or action == "off":
+            b.wait_in_text(f"#vm-{vmName}-{connectionName}-state", "Shut off")
+
+    def goToVmPage(self, vmName: str, connectionName: str = 'system') -> None:
+        self.browser.click(f"tbody tr[data-row-id=\"vm-{vmName}-{connectionName}\"] a.vm-list-item-name")
+
+    def goToMainPage(self) -> None:
+        self.browser.click(".machines-listing-breadcrumb li:first-of-type a")
+
+    def waitVmPage(self, vmName: str) -> None:
+        self.browser.wait_in_text("#vm-details .vm-name", vmName)
+
+    def waitVmRow(self, vmName: str, connectionName: str = 'system', *, present: bool = True) -> None:
+        b = self.browser
+        vm_row = f"tbody tr[data-row-id=\"vm-{vmName}-{connectionName}\"]"
+        if present:
+            b.wait_visible(vm_row)
+        else:
+            b.wait_not_present(vm_row)
+
+    def togglePoolRow(self, poolName: str, connectionName: str = "system") -> None:
+        b = self.browser
+        sel = f"tbody tr[data-row-id=\"pool-{poolName}-{connectionName}\"]"
+        isExpanded = 'pf-m-expanded' in b.attr(f"{sel} + tr", "class")
+
+        b.click(f"{sel} .pf-v6-c-table__toggle button")
+        if isExpanded:
+            b.wait_not_present(f"{sel} + tr.pf-m-expanded")
+        else:
+            b.wait_visible(f"{sel} + tr.pf-m-expanded")
+
+    def waitPoolRow(self, poolName: str, connectionName: str = "system", *, present: bool = True) -> None:
+        b = self.browser
+        pool_row = f"tbody tr[data-row-id=\"pool-{poolName}-{connectionName}\"]"
+        if present:
+            b.wait_visible(pool_row)
+        else:
+            b.wait_not_present(pool_row)
+
+    def toggleNetworkRow(self, networkName: str, connectionName: str = "system") -> None:
+        b = self.browser
+        sel = f"tbody tr[data-row-id=\"network-{networkName}-{connectionName}\"]"
+        isExpanded = 'pf-m-expanded' in b.attr(f"{sel} + tr", "class")
+
+        b.click(f"{sel} .pf-v6-c-table__toggle button")
+        if isExpanded:
+            b.wait_not_present(f"{sel} + tr.pf-m-expanded")
+        else:
+            b.wait_visible(f"{sel} + tr.pf-m-expanded")
+
+    def waitNetworkRow(self, networkName: str, connectionName: str = "system", *, present: bool = True) -> None:
+        b = self.browser
+        network_row = f"tbody tr[data-row-id=\"network-{networkName}-{connectionName}\"]"
+        if present:
+            b.wait_visible(network_row)
+        else:
+            b.wait_not_present(network_row)
+
+    def expandDiskRow(self, target: str) -> None:
+        b = self.browser
+        sel = f".disks-card tbody tr[data-row-id=\"{target}\"]"
+        isExpanded = 'pf-m-expanded' in b.attr(f"{sel} + tr", "class")
+
+        if not isExpanded:
+            b.click(f"{sel} .pf-v6-c-table__toggle button")
+            b.wait_visible(f"{sel} + tr.pf-m-expanded")
+
+    def expandNicRow(self, nic_num: int | str) -> None:
+        b = self.browser
+        sel = f".networks-card tbody tr[data-row-id=\"{nic_num}\"]"
+        isExpanded = 'pf-m-expanded' in b.attr(f"{sel} + tr", "class")
+
+        if not isExpanded:
+            b.click(f"{sel} .pf-v6-c-table__toggle button")
+            b.wait_visible(f"{sel} + tr.pf-m-expanded")
+
+    def getDomainMacAddress(self, vmName: str) -> str:
+        m = self.machine
+        dom_xml = f"virsh -c qemu:///system dumpxml --domain {vmName}"
+        return m.execute(f"{dom_xml} | xmllint --xpath 'string(//domain/devices/interface/mac/@address)' -").strip()
+
+    def getDomainXpathValue(self, vmName: str, xpath: str, *, str_value: bool = False, inactive: bool = False) -> str:
+        dom_xml = f"virsh dumpxml {vmName} "
+        if inactive:
+            dom_xml += "--inactive "
+        if str_value:
+            xpath = f"string({xpath})"
+        return self.machine.execute(f"{dom_xml} | xmllint --xpath '{xpath}' -").strip()
+
+    def getLibvirtServiceName(self) -> str:
+        m = self.machine
+        return "libvirtd" if hasMonolithicDaemon(m.image) else "virtqemud"
+
+    def startLibvirt(self, m: testvm.Machine) -> None:
+
+        # Ensure everything has started correctly
+        m.execute(f"systemctl start {self.getLibvirtServiceName()}.service")
+
+        # Wait until we can get a list of domains
+        m.execute("until virsh list; do sleep 1; done")
+
+        # Create/activate network 'default' if necessary
+        m.execute("""if ! out=$(virsh net-info default); then
+                         virsh net-define /etc/libvirt/qemu/networks/default.xml
+                     fi
+                     if ! echo "$out" | grep -q 'Active.*yes'; then virsh net-start default; fi""")
+        m.execute(r"until virsh net-info default | grep 'Active:\s*yes'; do sleep 1; done")
+
+    def createVm(self, name: str, graphics: str = 'none', *, ptyconsole: bool = False, running: bool = True,
+                 memory: int = 128, connection: str = 'system', machine: testvm.Machine | None = None,
+                 os: str | None = None) -> Mapping[str, str | int]:
+        m = machine or self.machine
+
+        if os is None:
+            # q35 in rhel-8 can't do a lot of hotplugging, so we stick
+            # with i440fx by default there.
+            os = "linux2022" if "rhel-8" not in m.image else "linux2016"
+
+        image_file = m.pull("alpine")
+
+        if connection == "system":
+            img = f"/var/lib/libvirt/images/{name}-2.img"
+            logPath = f"/var/log/libvirt/console-{name}.log"
+            qemuLogPath = f"/var/log/libvirt/qemu/{name}.log"
+        else:
+            m.execute("runuser -l admin -c 'mkdir -p /home/admin/.local/share/libvirt/images'")
+            img = f"/home/admin/.local/share/libvirt/images/{name}-2.img"
+            logPath = f"/home/admin/.local/share/libvirt/console-{name}.log"
+            qemuLogPath = f"/home/admin/.local/share/libvirt/qemu/{name}.log"
+
+        m.upload([image_file], img)
+        m.execute(f"chmod 777 {img}")
+
+        args: Mapping[str, str | int] = {
+            "name": name,
+            "image": img,
+            "logfile": logPath,
+            "qemulog": qemuLogPath,
+            "memory": memory,
+        }
+        if ptyconsole:
+            console = "pty,target.type=serial "
+        else:
+            console = f"file,target.type=serial,source.path={args['logfile']} "
+
+        command = [(f"virt-install --connect qemu:///{connection} --name {name} "
+                    f"--os-variant {os} "
+                    "--boot hd,network "
+                    "--vcpus 1 "
+                    f"--memory {memory} "
+                    f"--import --disk {img} "
+                    f"--graphics {'none' if graphics == 'none' else graphics + ',listen=127.0.0.1'} "
+                    f"--console {console}"
+                    f"--print-step 1 > /tmp/xml-{connection}")]
+
+        command.append(f"virsh -c qemu:///{connection} define /tmp/xml-{connection}")
+        if running:
+            command.append(f"virsh -c qemu:///{connection} start {name}")
+
+        if connection == "system":
+            state = "running" if running else "\"shut off\""
+            logfile = f"/var/log/libvirt/qemu/{name}.log"
+            command.append(
+                f'[ "$(virsh -c qemu:///{connection} domstate {name})" = {state} ] || \
+                {{ virsh -c qemu:///{connection} dominfo {name} >&2; cat {logfile} >&2; exit 1; }}')
+        self.run_admin("; ".join(command), connection, machine=machine)
+
+        # TODO check if kernel is booted
+        # Ideally we would like to check guest agent event for that
+        # Libvirt has a signal for that too: VIR_DOMAIN_EVENT_ID_AGENT_LIFECYCLE
+        # https://libvirt.org/git/?p=libvirt-python.git;a=blob;f=examples/guest-vcpus/guest-vcpu-daemon.py;h=30fcb9ce24165c59dec8d9bbe6039f56382e81e3;hb=HEAD
+
+        self.allow_journal_messages('.*denied.*comm="pmsignal".*')
+
+        return args
+
+    # Preparations for iscsi storage pool; return the system's initiator name
+    def prepareStorageDeviceOnISCSI(self, target_iqn: str) -> str:
+        m = self.machine
+
+        # ensure that we generate a /etc/iscsi/initiatorname.iscsi
+        m.execute("systemctl start iscsid")
+
+        orig_iqn = m.execute("sed -n '/^InitiatorName=/ { s/^.*=//; p }' /etc/iscsi/initiatorname.iscsi").strip()
+
+        # Increase the iSCSI timeouts for heavy load during our testing
+        self.sed_file(r"s|^\(node\..*log.*_timeout = \).*|\1 60|", "/etc/iscsi/iscsid.conf")
+
+        # make sure this gets cleaned up, to avoid reboot hangs (https://bugzilla.redhat.com/show_bug.cgi?id=1817241)
+        self.restore_dir("/var/lib/iscsi")
+
+        # Setup a iSCSI target
+        m.execute("""
+                  targetcli /backstores/ramdisk create test 50M
+                  targetcli /iscsi create %(tgt)s
+                  targetcli /iscsi/%(tgt)s/tpg1/luns create /backstores/ramdisk/test
+                  targetcli /iscsi/%(tgt)s/tpg1/acls create %(ini)s
+                  """ % {"tgt": target_iqn, "ini": orig_iqn})
+
+        self.addCleanup(m.execute, "targetcli /backstores/ramdisk delete test")
+        self.addCleanup(m.execute, f"targetcli /iscsi delete {target_iqn}; iscsiadm -m node -o delete")
+        return orig_iqn
+
+    def run_admin(self, cmd: str, connectionName: str = 'system', machine: testvm.Machine | None = None) -> str:
+        m = machine or self.machine
+
+        if connectionName == 'session':
+            return m.execute(f"su - admin -c 'export XDG_RUNTIME_DIR=/run/user/$(id -u admin); {cmd}'")
+        else:
+            return m.execute(cmd)
+
+    def deleteDisk(self, target: str, vm_name: str = "subVmTest1", expect_path: str | None = None) -> None:
+        b = self.browser
+
+        b.wait_visible(f"#vm-{vm_name}-disks-{target}-target")
+        self.dropdownAction(f"#vm-{vm_name}-disks-{target}-action-kebab", f"#delete-vm-{vm_name}-disks-{target}")
+        b.wait_visible(".pf-v6-c-modal-box")
+        b.wait_in_text("#delete-resource-modal-target", target)
+        if expect_path:
+            b.wait_in_text("#delete-resource-modal-file", expect_path)
+        b.click("#delete-resource-modal-primary")
+        b.wait_not_present(".pf-v6-c-modal-box")
+        b.wait_not_present(f"#vm-{vm_name}-disks-{target}-device")
+
+    def deleteIface(self, iface: int, mac: str | None = None, vm_name: str | None = None) -> None:
+        b = self.browser
+
+        self.dropdownAction(f"#vm-subVmTest1-iface-{iface}-action-kebab", f"#delete-vm-subVmTest1-iface-{iface}")
+        b.wait_in_text(".pf-v6-c-modal-box .pf-v6-c-modal-box__header .pf-v6-c-modal-box__title",
+                       "Remove network interface?")
+        if mac and vm_name:
+            b.wait_in_text(".pf-v6-c-modal-box__body .pf-v6-c-description-list",
+                           f"{mac} will be removed from {vm_name}")
+        b.click(".pf-v6-c-modal-box__footer button:contains(Remove)")
+        b.wait_not_present(".pf-v6-c-modal-box")
+
+    def get_next_mac(self, last_mac: str) -> str:
+        parts = last_mac.split(':')
+        suffix = parts[-1]
+        new_suffix = format((int(suffix, 16) + 1) & 0xFF, "x").zfill(2)
+        parts[-1] = new_suffix
+        new_mac = ':'.join(parts)
+        return new_mac
+
+    def setup_mock_server(self, mock_server_filename: str, subj_names: str) -> int:
+        self.machine.upload(["files/min-openssl-config.cnf", f"files/{mock_server_filename}"], self.vm_tmpdir)
+
+        self.restore_file("/etc/hosts")
+        for i, sub_name in enumerate(subj_names):
+            self.machine.write("/etc/hosts", f"127.0.0.1 {sub_name}\n", append=True)
+            self.machine.write(f"{self.vm_tmpdir}/min-openssl-config.cnf", f"DNS.{i + 2} = {sub_name}\n", append=True)
+
+        cmds = [
+            # Generate certificate for https server
+            f"cd {self.vm_tmpdir}",
+            f"openssl req -x509 -newkey rsa:4096 -nodes -keyout server.key -new -out server.crt -config {self.vm_tmpdir}/min-openssl-config.cnf -sha256 -days 365 -extensions dn"  # ruff: ignore[line-too-long]
+        ]
+
+        if self.machine.image.startswith("ubuntu") or self.machine.image.startswith("debian"):
+            cmds += [
+                f"cp {self.vm_tmpdir}/server.crt /usr/local/share/ca-certificates/cert.crt",
+                "update-ca-certificates"
+            ]
+        elif self.machine.image.startswith("arch"):
+            cmds += [
+                f"cp {self.vm_tmpdir}/server.crt /etc/ca-certificates/trust-source/anchors/server.crt",
+                "update-ca-trust"
+            ]
+        elif "suse" in self.machine.image:
+            cmds += [
+                f"cp {self.vm_tmpdir}/server.crt /etc/pki/trust/anchors/server.crt",
+                "update-ca-certificates"
+            ]
+        else:
+            cmds += [
+                f"cp {self.vm_tmpdir}/server.crt /etc/pki/ca-trust/source/anchors/server.crt",
+                "update-ca-trust"
+            ]
+        self.machine.execute("; ".join(cmds))
+
+        # Run https server with range option support. QEMU uses range option
+        # see: https://lists.gnu.org/archive/html/qemu-devel/2013-06/msg02661.html
+        # or
+        # https://github.com/qemu/qemu/blob/master/block/curl.c
+        #
+        # and on certain distribution supports only https (not http)
+        # see: block-drv-ro-whitelist option in qemu-kvm.spec for certain distribution
+        return self.machine.spawn(f"cd /var/lib/libvirt; exec python3 {self.vm_tmpdir}/{mock_server_filename} {self.vm_tmpdir}/server.crt {self.vm_tmpdir}/server.key",  # ruff: ignore[line-too-long]
+                                  "httpsserver")
+
+    def waitLogFile(self, logfile: str, expected_text: str) -> None:
+        try:
+            testlib.wait(lambda: expected_text in self.machine.execute(f"cat {logfile}"), delay=3)
+        except testlib.Error:
+            log = self.machine.execute(f"cat {logfile}")
+            print(f"----- log of failed VM ------\n{log}\n---------")
+            raise
+
+    def waitGuestBooted(self, logfile: str) -> None:
+        self.waitLogFile(logfile, "Welcome to Alpine Linux")
+
+    def waitDisks(self, expected_disks: Sequence[str], vm: str = "subVmTest1") -> None:
+        """Wait until Disks table initialized on the details
+
+        This prevents the kebabs from jumping around during re-renders, which
+        makes trying to click on them racy.
+        """
+        for disk in expected_disks:
+            self.browser.wait_visible(f"#vm-{vm}-disks-{disk}-target")
+        # HACK: we need to wait on *something* else, but no idea what..
+        time.sleep(0.5)
+
+
+class VirtualMachinesCase(VirtualMachinesCaseHelpers, storagelib.StorageHelpers, netlib.NetworkHelpers):
+    def setUp(self) -> None:
+        super().setUp()
+
+        for m in self.machines.values():
+            # We don't want nested KVM since it doesn't work well enough
+            # three levels deep.
+            #
+            # The first level is the VM allocated to us that runs our
+            # "tasks" container in certain environments, the second level
+            # is the VM started by testlib.py to run a given test, and the
+            # third level are the VMS started by the test itself.  In most
+            # environments, the "tasks" container runs on bare metal, and
+            # the VMs started here are on level 2.
+            #
+            # Using KVM on level 3 is significantly slower than software
+            # emulation, by something like a factor of 2 at least, and
+            # much worse on a machine with many VMs to the point that the
+            # kernel will trigger its NMI watchdog and the boot never
+            # finishes. So we switch it off by removing "/dev/kvm".
+            #
+            # Our environments where the VMs started by the tests are on
+            # level 2 don't have support for nested KVM. So "/dev/kvm"
+            # does not exist in the first place and we don't need to be
+            # careful to leave it in place.
+            #
+            m.execute("rm -f /dev/kvm")
+
+        m = self.machine
+
+        # Keep pristine state of libvirt
+        self.restore_dir("/var/lib/libvirt")
+        self.restore_dir("/etc/libvirt")
+        self.machine.execute("chmod u=rwx,g=,o= /etc/libvirt")  # keep original permissions
+        self.restore_dir("/home/admin/.local/share/libvirt/")
+
+        self.startLibvirt(m)
+
+        self.addCleanup(m.execute, f"systemctl stop {self.getLibvirtServiceName()}")
+        if not hasMonolithicDaemon(m.image):
+            self.addCleanup(m.execute, "systemctl stop virtstoraged.service virtnetworkd.service")
+
+        def stop_all() -> None:
+            # Domains.
+            #
+            # Stopping (destroying) a domain is enough. They will all
+            # be undefined when the libvirt state is restored to what
+            # it was before the test. See the "restore_dir" calls
+            # above.
+
+            # this is a race condition: a test may leave a domain shutting down, so it may go away while iterating
+            m.execute('for d in $(virsh -c qemu:///system list --name); do '
+                      '  if ! out=$(virsh -c qemu:///system destroy $d 2>&1); then '
+                      '    echo "$out" | grep -q "domain is not running"; '
+                      "  fi; done")
+            m.execute("runuser -l admin -c 'for d in $(virsh -c qemu:///session list --all --name); do "
+                      "virsh -c qemu:///session undefine $d --snapshots-metadata; done'")
+
+            # Check that they are really all destroyed.  If a running
+            # machine leaks from one test to another, it's going to be
+            # confusing to figure out where it comes from.  It is
+            # better to detect it here.
+
+            self.assertEqual(m.execute("virsh -c qemu:///system list --name"), "\n")
+
+            # pools
+            m.execute("""
+                      rm -rf /run/libvirt/storage/*
+                      for n in $(virsh -c qemu:///system pool-list --name);
+                        do virsh -c qemu:///system pool-destroy $n;
+                      done
+            """)
+            m.execute("runuser -l admin -c 'for d in $(virsh -c qemu:///session pool-list --name); do "
+                      "virsh -c qemu:///session pool-destroy $d; done'")
+            m.execute("runuser -l admin -c 'for d in $(virsh -c qemu:///session pool-list --name --all); do "
+                      "virsh -c qemu:///session pool-undefine $d; done'")
+
+            # networks
+            m.execute("""
+                      rm -rf /run/libvirt/network/test_network*
+                      for n in $(virsh -c qemu:///system net-list --name);
+                        do virsh -c qemu:///system net-destroy $n;
+                      done
+                      """)
+            m.execute("runuser -l admin -c 'for d in $(virsh -c qemu:///session net-list --name); do "
+                      "virsh -c qemu:///session net-destroy $d; done'")
+            m.execute("runuser -l admin -c 'for d in $(virsh -c qemu:///session net-list --name --all); do "
+                      "virsh -c qemu:///session net-undefine $d; done'")
+
+        self.addCleanup(stop_all)
+
+        # we don't have configuration to open the firewall for local libvirt machines, so just stop firewalld
+        m.execute("systemctl stop firewalld")
+        if not hasMonolithicDaemon(m.image):
+            m.execute("systemctl reset-failed virtnetworkd; systemctl try-restart virtnetworkd")
+        else:
+            m.execute("systemctl reset-failed libvirtd; systemctl try-restart libvirtd")
+
+        # FIXME: report downstream; AppArmor noisily denies some operations, but they are not required for us
+        self.allow_journal_messages(r'.* type=1400 .* apparmor="DENIED" operation="capable" profile="\S*libvirtd.* capname="sys_rawio".*')  # ruff: ignore[line-too-long]
+        # AppArmor doesn't like the non-standard path for our storage pools
+        self.allow_journal_messages(f'.* type=1400 .* apparmor="DENIED" operation="open".* profile="virt-aa-helper" name="{self.vm_tmpdir}.*')  # ruff: ignore[line-too-long]
+
+        # FIXME: Testing on Arch Linux fails randomly with networkmanager time outs while the test passes.
+        if m.image == 'arch':
+            self.allow_journal_messages(r".* couldn't get all properties of org.freedesktop.NetworkManager.Device at /org/freedesktop/NetworkManager/Devices/\d+: Timeout was reached")  # ruff: ignore[line-too-long]
+
+        # avoid error noise about resources getting cleaned up
+        def session_cleanup() -> None:
+            if self.browser.have_test_api():
+                self.browser.logout()
+
+        self.addCleanup(session_cleanup)
+
+        # noVNC warns about this for non-TLS connections; for RHEL downstream testing
+        self.allow_browser_errors("noVNC requires a secure context")
+
+        # HACK: fix these in our code
+        self.allow_browser_errors(
+            r"Scrollbar test exception: TypeError: Cannot read properties of null \(reading 'appendChild'\)",
+            "Scrollbar test exception: TypeError: document.body is null",
+            "Tried changing state of a disconnected RFB object",
+            "Failed to get libvirt version from the dbus API:.*Cannot recv data: Connection reset by peer",
+            # deprecated PF SelectGroup has invalid properties
+            r"Warning: React does not recognize the .* prop.*(inputId|isSelected|sendRef|keyHandler)",
+        )
+
+    def downloadVmXml(self, vm: str) -> None:
+        m = self.machine
+
+        vms_xml = f"/var/lib/cockpittest/pkg_specific_artifacts/{vm}.xml"
+        m.execute(f"virsh dumpxml {vm} > {vms_xml}")
+        dest_file = f"{self.label()}-{m.label}-{vm}.xml"
+        dest = os.path.abspath(dest_file)
+        m.download(vms_xml, dest)
+        testlib.attach(dest, move=False)
+        print(f"Wrote {vm} XML to {dest_file}")
+
+    def downloadVmLog(self, vm: str) -> None:
+        m = self.machine
+
+        vms_log = f"/var/log/libvirt/qemu/{vm}.log"
+        # Log file may not exist, if VM was never started
+        if m.execute(f"! test -f {vms_log} || echo exists").strip() == "exists":
+            dest_file = f"{self.label()}-{m.label}-{vm}.log"
+            dest = os.path.abspath(dest_file)
+            m.download(vms_log, dest)
+            testlib.attach(dest, move=True)
+            print(f"Wrote {vm} log to {dest_file}")
+
+    def downloadVmConsole(self, vm: str) -> None:
+        m = self.machine
+
+        console_log = f"/var/log/libvirt/console-{vm}.log"
+        # Log file may not exist
+        if m.execute(f"! test -f {console_log} || echo exists").strip() == "exists":
+            dest_file = f"{self.label()}-{m.label}-{vm}-console.log"
+            dest = os.path.abspath(dest_file)
+            m.download(console_log, dest)
+            testlib.attach(dest, move=True)
+            print(f"Wrote {vm} console log to {dest_file}")
+
+    def downloadVmsArtifacts(self) -> None:
+        m = self.machine
+
+        vms = m.execute("virsh list --all --name").strip().splitlines()
+        if len(vms) > 0:
+            m.execute("mkdir -p /var/lib/cockpittest/pkg_specific_artifacts")
+        for vm in vms:
+            self.downloadVmXml(vm)
+            self.downloadVmLog(vm)
+            self.downloadVmConsole(vm)
+
+    def createUser(self, user_group: str) -> str:
+        user_name = f"test_{user_group if user_group else 'none'}_user"
+        self.machine.execute(f"useradd{' -G ' + user_group if user_group else ''} {user_name}")
+        self.machine.execute(f"echo '{user_name}:foobar' | chpasswd")
+        # If at any time prior a user with the same user id existed as
+        # the one that we have just created, the classic dbus-daemon
+        # might still use the groups of that old user when making
+        # policy decisions. (The modern dbus-broken does not seem to
+        # have that problem.) So let's reload it to stop that from
+        # happening.
+        if self.machine.image.startswith(("rhel-8-10")):
+            self.machine.execute("systemctl reload dbus")
+        # user libvirtd instance tends to SIGABRT with "Failed to find user record for uid .."
+        # on shutdown during cleanup
+        # so make sure that there are no leftover user processes that bleed into the next test
+        self.addCleanup(self.machine.execute,
+                        f"pkill -u {user_name} || true; while pgrep -u {user_name}; do sleep 0.5; done")
+        # HACK: ...but it still tends to crash during shutdown (without known stack trace)
+        self.allow_journal_messages('Process .*libvirtd.* of user 10.* dumped core.*')
+
+        return user_name
+
+    def tearDown(self) -> None:
+        b = self.browser
+        if b.have_test_api() and b.is_present("#button.alert-link.more-button"):
+            b.click("button.alert-link.more-button")
+
+        if self.getError():
+            try:
+                self.downloadVmsArtifacts()
+            except (OSError, RuntimeError):
+                # failures in these debug artifacts should not skip cleanup actions
+                sys.stderr.write("Failed to generate debug artifact:\n")
+                traceback.print_exc(file=sys.stderr)
+
+        super().tearDown()
+
+
+class MachinesDialogHelpers(DialogHelpers):
+
+    # FileAutoComplete
+
+    def set_FileAutoComplete(self, path: str, val: str) -> None:
+        b = self.browser
+        sel = self.field(path)
+        b.set_input_text(f"{sel} .pf-v6-c-menu-toggle input", val)
+        # select the file
+        b.wait_text(".pf-v6-c-menu ul li:nth-child(1) button", val)
+        b.click(".pf-v6-c-menu ul li:nth-child(1) button")
+        b.wait_not_present(".pf-v6-c-menu")
+        b.wait_val(f"{sel} .pf-v6-c-menu-toggle input", val)
+
+    # TypeaheadSelect
+
+    def set_TypeaheadSelect(self, path: str, val: str) -> None:
+        b = self.browser
+        sel = self.field(path)
+        b.click(f"{sel} button.pf-v6-c-menu-toggle__button")
+        b.click(f".pf-v6-c-menu ul li button:contains('{val}')")
+        b.wait_not_present(".pf-v6-c-menu")
+        b.wait_val(f"{sel} .pf-v6-c-menu-toggle input", val)
+
+    def wait_TypeaheadSelect(self, path: str, val: str) -> None:
+        b = self.browser
+        sel = self.field(path)
+        b.wait_val(f"{sel} .pf-v6-c-menu-toggle input", val)
+
+    # SimpleSelect
+
+    def set_SimpleSelect(self, path: str, val: str) -> None:
+        b = self.browser
+        sel = self.field(path)
+        b.click(sel)
+        b.click(f".pf-v6-c-menu li button:contains('{val}')")

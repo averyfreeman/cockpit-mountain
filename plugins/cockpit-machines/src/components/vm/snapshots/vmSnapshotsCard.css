@@ -1,0 +1,9 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
+.tooltip-circle {
+    padding: 0.5rem;
+}
+
+/* CheckIcon is black by default */
+.snap-creation-time svg {
+    color: var(--pf-t--global--color--status--success--default);
+}

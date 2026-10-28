@@ -1,0 +1,65 @@
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      # run these when most of our developers don't work
+      day: "sunday"
+      timezone: "Europe/Berlin"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "[no-test]"
+    labels:
+      - "node_modules"
+      - "bot"
+    groups:
+      oxlint:
+        patterns:
+          - "oxlint*"
+      esbuild:
+        patterns:
+          - "esbuild*"
+      patternfly:
+        patterns:
+          - "@patternfly*"
+      react:
+        patterns:
+          - "react*"
+      stylelint:
+        patterns:
+          - "stylelint*"
+      types:
+        patterns:
+          - "@types*"
+          - "types*"
+      xterm:
+        patterns:
+          - "@xterm/*"
+    ignore:
+      # When Patternfly gets a major version we don't want to get PRs for it
+      # Would require a lot of work and not something we wanna do in a dependabot PR.
+      - dependency-name: "@patternfly/*"
+        update-types: ["version-update:semver-major"]
+
+      # Major React updates need a manual compatibility check.
+      - dependency-name: "*react*"
+        update-types: ["version-update:semver-major"]
+
+      # The TypeScript toolchain takes a while to update to a major version
+      # Manually update to major TypeScript versions
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    open-pull-requests-limit: 3
+    labels:
+      - "no-test"
+      - "bot"
+    schedule:
+      interval: "monthly"
+    groups:
+      actions:
+        patterns:
+          - "*"

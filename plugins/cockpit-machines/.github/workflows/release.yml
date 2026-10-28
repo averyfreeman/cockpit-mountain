@@ -1,0 +1,85 @@
+name: release
+on:
+  push:
+    tags:
+      # this is a glob, not a regexp
+      - '[0-9]*'
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/cockpit-project/tasks:latest
+      options: --user root
+    permissions:
+      # create GitHub release
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Install gh
+        run: dnf install -y gh
+
+      # https://github.blog/2022-04-12-git-security-vulnerability-announced/
+      - name: Pacify git's permission check
+        run: |
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          git config --global --add safe.directory /__w/${REPO_NAME}/${REPO_NAME}
+
+      - name: Workaround for https://github.com/actions/checkout/pull/697
+        run: |
+          TAG_VERSION="$(git describe --tags)"
+          git fetch --force origin ${TAG_VERSION}:refs/tags/${TAG_VERSION}
+
+      - name: Build release
+        run: make dist node-cache
+
+      - name: Create a release
+        run: |
+          set -x
+
+          TAG_VERSION="$(git describe --tags)"
+          git tag -l --format='%(contents:body)' ${TAG_VERSION} > release-note.txt
+
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          gh release create --title ${TAG_VERSION} --notes-file release-note.txt  \
+            ${TAG_VERSION} \
+            ${REPO_NAME}-${TAG_VERSION}.tar.xz \
+            ${REPO_NAME}-node-${TAG_VERSION}.tar.xz
+
+  node-cache:
+    # doesn't depend on it, but let's make sure the build passes before we do this
+    needs: [source]
+    runs-on: ubuntu-latest
+    environment: node-cache
+    # done via deploy key, token needs no write permissions at all
+    permissions: {}
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@v7
+
+      - name: Set up git
+        run: |
+            git config user.name "GitHub Workflow"
+            git config user.email "cockpituous@cockpit-project.org"
+
+      - name: Tag node-cache
+        run: |
+          set -eux
+          # this is a shared repo, prefix with project name
+          TAG="${GITHUB_REPOSITORY#*/}-$(basename $GITHUB_REF)"
+          make tools/node-modules
+          tools/node-modules checkout
+          cd node_modules
+          git tag "$TAG"
+          git remote add cache "ssh://git@github.com/${GITHUB_REPOSITORY%/*}/node-cache"
+          eval $(ssh-agent)
+          ssh-add - <<< '${{ secrets.DEPLOY_KEY }}'
+          # make this idempotent: delete an existing tag
+          git push cache :"$TAG" || true
+          git push cache tag "$TAG"
+          ssh-add -D

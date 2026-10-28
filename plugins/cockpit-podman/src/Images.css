@@ -1,0 +1,12 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
+#containers-images div.download-in-progress {
+    color: grey;
+    font-weight: bold;
+}
+
+#containers-images .pf-v6-c-table.pf-m-compact .pf-v6-c-table__action {
+    --pf-v6-c-table--cell--responsive--PaddingBlockEnd: 0.5rem;
+    --pf-v6-c-table--m-compact__action--PaddingBlockStart: 0.5rem;
+    --pf-v6-c-table--cell--PaddingBlockStart: 0.5rem;
+    --pf-v6-c-table--cell--responsive--PaddingInlineEnd: 05rem;
+}

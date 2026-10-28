@@ -1,0 +1,382 @@
+/* hangar.css — plugin styling layered over Bootstrap + the shared themes.css.
+ *
+ * The Logbook scrubber is the only genuinely custom widget here; everything else
+ * leans on Bootstrap so the plugin inherits Cockpit's light/dark switching via
+ * themes.css rather than maintaining a second palette.
+ */
+
+:root {
+    --hangar-gutter: 1rem;
+    --hangar-scrubber-w: 13rem;
+
+    /* Derived from Bootstrap's semantic colours rather than hardcoded, so every
+     * palette in themes.css restyles the status dots, badges and scrubber for free.
+     * A new theme states its Bootstrap variables and nothing here has to change.
+     * The literals are fallbacks for the case where Bootstrap has not loaded. */
+    --hangar-ok: var(--bs-success, #2e7d32);
+    --hangar-warn: var(--bs-warning, #ed6c02);
+    --hangar-err: var(--bs-danger, #c62828);
+    --hangar-idle: var(--bs-secondary-color, #6c757d);
+}
+
+body {
+    margin: 0;
+    font-size: 0.9rem;
+}
+
+.hangar-shell {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    overflow: hidden;
+}
+
+.hangar-header {
+    flex: 0 0 auto;
+    padding: 0.6rem var(--hangar-gutter);
+    border-bottom: 1px solid var(--bs-border-color, rgba(0, 0, 0, 0.15));
+}
+
+.hangar-body {
+    flex: 1 1 auto;
+    overflow: auto;
+    padding: var(--hangar-gutter);
+}
+
+/* --- status dots ------------------------------------------------------- */
+
+.hangar-dot {
+    display: inline-block;
+    width: 0.6rem;
+    height: 0.6rem;
+    border-radius: 50%;
+    margin-right: 0.4rem;
+    vertical-align: middle;
+    background: var(--hangar-idle);
+}
+
+.hangar-dot.ok       { background: var(--hangar-ok); }
+.hangar-dot.partial  { background: var(--hangar-warn); }
+.hangar-dot.failed   { background: var(--hangar-err); }
+.hangar-dot.running  { background: var(--hangar-ok); animation: hangar-pulse 1.4s ease-in-out infinite; }
+
+@keyframes hangar-pulse {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.25; }
+}
+
+/* Respect users who have asked the OS for less motion — the pulse is decorative. */
+@media (prefers-reduced-motion: reduce) {
+    .hangar-dot.running { animation: none; }
+}
+
+/* --- Loading ------------------------------------------------------------
+ *
+ * A skeleton of the rows that are coming, not a spinner. The Overview always
+ * renders the same shape — a card per job — so the wait can show that shape
+ * instead of a word: nothing jumps when the data lands, and the screen says how
+ * much is on its way rather than merely that something is.
+ *
+ * Built from Bootstrap's own theme tokens, so it follows every hangar theme
+ * without naming a single colour of its own.
+ */
+.hangar-skel-card {
+    border: 1px solid var(--bs-border-color, rgba(128, 128, 128, 0.25));
+    border-radius: var(--bs-border-radius, 0.375rem);
+    padding: 0.85rem 1rem;
+    margin-bottom: 0.5rem;
+}
+
+.hangar-skel-line {
+    height: 0.7rem;
+    border-radius: 999px;
+    background: var(--bs-secondary-bg, rgba(128, 128, 128, 0.2));
+    position: relative;
+    overflow: hidden;
+}
+
+.hangar-skel-line + .hangar-skel-line {
+    margin-top: 0.55rem;
+}
+
+/* Same size and rhythm as .hangar-dot, so the wait occupies the row the data
+ * will occupy. */
+.hangar-skel-dot {
+    width: 0.6rem;
+    height: 0.6rem;
+    border-radius: 50%;
+    flex: 0 0 auto;
+    background: var(--bs-secondary-bg, rgba(128, 128, 128, 0.2));
+}
+
+.hangar-skel-card .d-flex + .hangar-skel-line {
+    margin-top: 0.55rem;
+}
+
+/* One sweep across the bars, at the pace of the status dot's pulse, so the
+ * screen has a single idiom for "working" rather than two. */
+.hangar-skel-line::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    transform: translateX(-100%);
+    background: linear-gradient(90deg,
+        transparent,
+        var(--bs-tertiary-bg, rgba(255, 255, 255, 0.14)),
+        transparent);
+    animation: hangar-sweep 1.4s ease-in-out infinite;
+}
+
+@keyframes hangar-sweep {
+    to { transform: translateX(100%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    /* The bars still describe the layout; only the travelling highlight goes. */
+    .hangar-skel-line::after { animation: none; }
+}
+
+/* --- Logbook ----------------------------------------------------------- */
+
+.hangar-logbook {
+    display: flex;
+    gap: var(--hangar-gutter);
+    align-items: stretch;
+    min-height: 24rem;
+}
+
+.hangar-tree {
+    flex: 1 1 auto;
+    overflow: auto;
+    border: 1px solid var(--bs-border-color, rgba(0, 0, 0, 0.15));
+    border-radius: 0.35rem;
+}
+
+/* The scrubber is the signature control: a vertical stack of moments, newest at
+ * the top, that the user scrolls back through. Sticky so it stays put while the
+ * file tree beside it scrolls independently. */
+.hangar-scrubber {
+    flex: 0 0 var(--hangar-scrubber-w);
+    overflow: auto;
+    border-left: 1px solid var(--bs-border-color, rgba(0, 0, 0, 0.15));
+    padding-left: 0.75rem;
+}
+
+.hangar-band-label {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    opacity: 0.65;
+    padding: 0.35rem 0 0.2rem;
+    background: var(--bs-body-bg, #fff);
+}
+
+.hangar-moment {
+    display: block;
+    width: 100%;
+    text-align: left;
+    border: 0;
+    background: transparent;
+    padding: 0.3rem 0.5rem;
+    border-radius: 0.3rem;
+    cursor: pointer;
+    line-height: 1.25;
+}
+
+.hangar-moment:hover { background: var(--bs-secondary-bg, rgba(0, 0, 0, 0.06)); }
+
+.hangar-moment.active {
+    background: var(--bs-primary, #0d6efd);
+    color: #fff;
+}
+
+.hangar-moment .rel {
+    display: block;
+    font-size: 0.75rem;
+    opacity: 0.7;
+}
+
+.hangar-moment.active .rel { opacity: 0.85; }
+
+/* Change badges between adjacent snapshots. */
+.hangar-badge {
+    font-size: 0.68rem;
+    padding: 0 0.3rem;
+    border-radius: 0.25rem;
+    margin-left: 0.35rem;
+}
+
+/* Bootstrap 5.3's *-bg-subtle variables are themed, so these tint with the
+ * palette instead of staying a fixed rgba() that only suits the light theme. */
+.hangar-badge.added    { background: var(--bs-success-bg-subtle, rgba(46, 125, 50, 0.18)); color: var(--hangar-ok); }
+.hangar-badge.modified { background: var(--bs-warning-bg-subtle, rgba(237, 108, 2, 0.18)); color: var(--hangar-warn); }
+.hangar-badge.removed  { background: var(--bs-danger-bg-subtle, rgba(198, 40, 40, 0.18));  color: var(--hangar-err); }
+
+/* --- scrollable modals with a <form> wrapper ---------------------------- */
+
+/* Bootstrap's .modal-dialog-scrollable constrains .modal-body because the body is
+ * a FLEX CHILD of .modal-content. Four of hangar's modals wrap header/body/footer
+ * in a <form> so Enter submits the dialog — and that block-level form breaks the
+ * chain: it grows to its content, the body is never constrained, and a tall form
+ * runs off the bottom of the screen with no scrollbar and no reachable buttons.
+ *
+ * Re-establish the chain through the form. min-height: 0 is the load-bearing part:
+ * a flex item defaults to min-height: auto, which refuses to shrink below its
+ * content and is why the body measured 1517px inside a 644px dialog. */
+.modal-dialog-scrollable .modal-content > form {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+    max-height: 100%;
+}
+
+.modal-dialog-scrollable .modal-content > form > .modal-body {
+    overflow-y: auto;
+    min-height: 0;
+}
+
+/* Scrollbars are easy to miss on the dark palettes, which makes a scrollable
+ * dialog look truncated. Give them contrast against whichever theme is active. */
+.modal-body,
+.hangar-body,
+.hangar-tree,
+.hangar-scrubber,
+.hangar-rawlog {
+    scrollbar-width: thin;
+    scrollbar-color: var(--bs-secondary-color, #6c757d) transparent;
+}
+
+/* --- version / update badge -------------------------------------------- */
+
+/* One control, two jobs: check when idle, install when an update is waiting.
+ * Styled as a badge but built as a <button> so it is keyboard-reachable. */
+.hangar-badge-update {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.1rem 0.6rem;
+    border-radius: 999px;
+    border: 1px solid var(--bs-border-color, rgba(0, 0, 0, 0.2));
+    background: transparent;
+    color: var(--bs-secondary-color, #6c757d);
+    font-family: var(--bs-font-monospace, monospace);
+    font-size: 0.75rem;
+    line-height: 1.6;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+.hangar-badge-update:hover:not(:disabled) {
+    background: var(--bs-secondary-bg, rgba(0, 0, 0, 0.06));
+    color: var(--bs-body-color, inherit);
+}
+
+.hangar-badge-update:disabled { cursor: default; opacity: 0.7; }
+
+.hangar-badge-update:focus-visible {
+    outline: 2px solid var(--bs-primary, #0d6efd);
+    outline-offset: 2px;
+}
+
+/* An available update is the one state worth colouring — it is an action the
+ * user has not taken yet, not a status. */
+.hangar-badge-update.available {
+    background: var(--bs-success, #198754);
+    border-color: var(--bs-success, #198754);
+    color: #fff;
+    font-family: inherit;
+    font-weight: 600;
+}
+
+.hangar-badge-update.available:hover:not(:disabled) {
+    filter: brightness(1.1);
+    color: #fff;
+}
+
+/* A failed check is not an emergency — the plugin still works — so it is
+ * marked, not alarmed. */
+.hangar-badge-update.failed {
+    border-color: var(--bs-warning, #ffc107);
+    color: var(--bs-warning, #ffc107);
+}
+
+/* --- theme picker ------------------------------------------------------ */
+
+.hangar-swatch {
+    display: inline-block;
+    width: 1.6rem;
+    height: 1.6rem;
+    border-radius: 0.3rem;
+    border: 1px solid var(--bs-border-color, rgba(0, 0, 0, 0.2));
+    vertical-align: middle;
+}
+
+.hangar-theme-option {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    border: 1px solid transparent;
+    border-radius: 0.35rem;
+    padding: 0.35rem 0.6rem;
+    background: transparent;
+    cursor: pointer;
+    color: inherit;
+}
+
+.hangar-theme-option:hover { background: var(--bs-secondary-bg, rgba(0, 0, 0, 0.06)); }
+
+.hangar-theme-option[aria-pressed="true"] {
+    border-color: var(--bs-primary, #0d6efd);
+    background: var(--bs-primary-bg-subtle, rgba(13, 110, 253, 0.1));
+}
+
+/* Keyboard focus must stay obvious on every palette, including the dark ones. */
+.hangar-theme-option:focus-visible {
+    outline: 2px solid var(--bs-primary, #0d6efd);
+    outline-offset: 2px;
+}
+
+/* --- misc -------------------------------------------------------------- */
+
+.hangar-empty {
+    padding: 3rem 1rem;
+    text-align: center;
+    opacity: 0.7;
+}
+
+.hangar-mono {
+    font-family: var(--bs-font-monospace, monospace);
+    font-size: 0.82rem;
+}
+
+/* Raw ReaR log tail — we show it verbatim when parsing fails, so it needs to be
+ * readable and scrollable rather than truncated. */
+.hangar-rawlog {
+    max-height: 18rem;
+    overflow: auto;
+    white-space: pre;
+    font-family: var(--bs-font-monospace, monospace);
+    font-size: 0.78rem;
+    padding: 0.6rem;
+    border-radius: 0.3rem;
+    background: var(--bs-secondary-bg, rgba(0, 0, 0, 0.05));
+}
+
+.hangar-progress {
+    height: 0.45rem;
+}
+
+/* Bootstrap paints every heading with --bs-heading-color, and each hangar theme
+ * sets that to a near-white for the dark page background. An alert has a light
+ * tinted background in every theme, so a heading inside one came out all but
+ * invisible — the Recovery screen's "How this works, and what it costs" was
+ * legible only by selecting it. Alerts already set their own foreground; the
+ * heading should simply take it. */
+.alert h1, .alert h2, .alert h3, .alert h4, .alert h5, .alert h6,
+.alert .h1, .alert .h2, .alert .h3, .alert .h4, .alert .h5, .alert .h6,
+.alert legend {
+    color: inherit;
+}

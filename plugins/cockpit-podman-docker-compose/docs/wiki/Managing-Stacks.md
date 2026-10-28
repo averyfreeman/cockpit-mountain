@@ -1,0 +1,141 @@
+# Managing Stacks
+
+This page covers all the lifecycle actions you can perform on a stack: bringing it up, stopping it, starting it, taking it down, restarting it, pausing it, and killing it.
+
+> **Working with multiple stacks?** Select more than one stack and run Up, Restart, Pull, Down, or Kill on all of them at once — see [Bulk Actions](Bulk-Actions).
+
+## Up
+
+**What it does:** Runs `docker compose up -d`. Docker creates or recreates containers as needed, applies configuration changes, and leaves everything running in the background.
+
+**When to use it:** When you want to start a stopped stack, or after editing the compose file and want to apply the changes.
+
+### Confirmation step
+
+Before the operation starts, a confirmation modal always appears. It shows:
+
+- A warning that containers with changed configuration will be recreated.
+- A list of every service and its image. Services using unpinned images (`:latest` or no tag) are marked with a **⚠** warning — unless their `pull_policy` rules out fetching (`never`, or `missing` for an image already on disk). A service's `pull_policy`, if set, is shown next to it.
+- An **Optional profiles** section — if your compose file defines [profiles](https://docs.docker.com/compose/profiles/), checkboxes appear here so you can select which ones to activate. Only services tagged with a selected profile will start. Services without any profile tag always start regardless.
+- A **Jobs** list, if the file declares jobs (Docker Compose 5.6.0+). Up never starts jobs; trigger them from **⋮ → Run** (see [Running Commands](Running-Commands)). If a job with a `schedule` is active (it has no profile, or one of its profiles is selected), a red warning explains that Compose will refuse to start the stack, because scheduled jobs are not supported yet. The warning follows the profile checkboxes, and it does not block **Up**: the Compose CLI has the final say.
+
+Click **Up** to proceed or **Cancel** to abort.
+
+### Progress modal
+
+A progress modal opens and streams the output of `docker compose up` in real time. The log is color-coded by event type. When the operation finishes:
+
+- **✓ Up complete** — all containers started successfully
+- **✗ Up failed** — an error occurred; the full error is shown below the status
+
+If Docker Compose prints warnings, for example about attributes that have no effect outside Swarm mode (Compose 5.6.0 warns about `deploy.update_config`, `credential_spec`, `ports[].mode: host` and others), they are collected into a **Docker Compose reported warnings** box above the log, as plain messages. A warning does not fail the operation. The Pull progress modal does the same.
+
+Click **Close** when done. If the operation is still running, click **Cancel** to abort it. Alternatively, click **Run in Background** (or close the modal with its **✕**) to close it and keep the operation running — see [Background Tasks](Background-Tasks).
+
+---
+
+## Start
+
+**What it does:** Runs `docker compose start`. Starts existing stopped containers without recreating them. Config changes in the compose file are **not** applied.
+
+**When to use it:** When you stopped a stack temporarily and want to resume it exactly as it was.
+
+No confirmation modal. The button triggers the command directly and the row updates as containers come online.
+
+---
+
+## Stop
+
+**What it does:** Runs `docker compose stop`. Sends `SIGTERM` to all running containers and waits for them to exit gracefully. Containers are preserved — they can be started again with **Start**.
+
+**When to use it:** When you want to pause a stack temporarily without losing container state.
+
+No confirmation modal. The dashboard updates as containers stop.
+
+---
+
+## Down
+
+**What it does:** Runs `docker compose down`. Stops and **removes** all containers for this stack. The stack disappears from the Running section. Networks created by the stack are also removed. Volumes and images are **not** removed by default.
+
+**When to use it:** When you want to tear down a stack completely and remove its containers.
+
+### Confirmation dialog
+
+A confirmation modal appears:
+
+> Running `docker compose down` will stop and remove all containers for **[stack name]**.  
+> The stack will disappear from this list.
+
+If any of the stack's networks are also used by other running stacks, a warning is shown listing which stacks share those networks. Proceeding will remove the network, which may affect the other stacks.
+
+Click **Down (remove)** to proceed or **Cancel** to abort.
+
+After Down completes, the stack may reappear in the **Stopped / offline stacks** section if its compose file still exists on disk.
+
+### When containers are left behind
+
+After Down (and Kill), the plugin checks what Docker still lists for the stack. If anything is left, the dialog stays open and names the leftover containers — also when compose itself failed, for example because the stack's folder was deleted. Click **Force remove** to delete them by their project label; this works without the compose file.
+
+If Docker lists containers it cannot open, their records are damaged (usually after a crash or power loss), and Docker can neither start nor remove them. The dialog shows the exact fix for your setup and a **Repair** button. Repair stops Docker, deletes the damaged records and starts Docker again. While Docker is stopped, **every container on that daemon stops**, and containers without a restart policy stay stopped afterwards. Repair is Docker-only; Podman stores its state differently.
+
+---
+
+## Restart
+
+**What it does:** Runs `docker compose restart`. Stops and then starts all containers without recreating them. Config changes in the compose file are **not** applied.
+
+**When to use it:** When a service has become unresponsive and you want to cycle it without changing anything else.
+
+Found in the **⋮ more** menu. Disabled for stopped or unknown stacks.
+
+---
+
+## Pause / Unpause
+
+**What it does:**
+- **Pause** — Freezes all running containers in the stack. CPU usage drops to zero. Memory is retained.
+- **Unpause** — Resumes frozen containers from where they left off.
+
+**When to use it:** When you need to temporarily freeze a stack (e.g., to take a consistent snapshot) without stopping it.
+
+Found in the **⋮ more** menu. **Pause** is shown when the stack is running; **Unpause** is shown when the stack is paused (status label turns blue).
+
+While a stack is paused, **Up** is greyed out (unpause it first), but **Stop** and **Down** still work: the stack's paused containers are unpaused for you first, since Podman refuses to stop a paused container.
+
+---
+
+## Kill
+
+**What it does:** Runs `docker compose kill`. Sends `SIGKILL` to all containers, terminating them immediately. Unlike **Stop**, containers have no chance to clean up or flush buffers.
+
+**When to use it:** Only when **Stop** is not working — for example, when a container is hung and not responding to graceful shutdown signals.
+
+Found in the **⋮ more** menu. This is a **danger action**.
+
+### Confirmation dialog
+
+> Running `docker compose kill` sends SIGKILL to all containers in **[stack name]**, forcefully terminating them immediately.  
+> Unlike Stop, processes have no chance to clean up. Use only when Stop does not respond.
+
+Click **Kill all containers** (danger button) or **Cancel**.
+
+If containers remain after Kill, the dialog lists them the same way as Down — see [When containers are left behind](#when-containers-are-left-behind).
+
+---
+
+## Scale
+
+**What it does:** Adjusts the number of running replicas for one or more services (`docker compose up --scale`).
+
+**When to use it:** When you need multiple instances of a stateless service for load distribution or testing.
+
+Found in the **⋮ more** menu. Only available for running stacks. See [Scaling Services](Scaling-Services) for the full walkthrough.
+
+---
+
+## Notifications and errors
+
+Start, Stop, Restart, Pause and Unpause — and the per-service Start, Stop and Restart buttons — confirm the result with a short notification in the corner: green when it worked, red with Docker's error message when it didn't.
+
+If an action fails, a red error alert also appears directly below the stack row with the error message from Docker. The alert disappears when you close it or trigger another action.

@@ -1,0 +1,249 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ *
+ * Copyright (C) 2021 Red Hat, Inc.
+ */
+
+import cockpit from 'cockpit';
+import { useState } from 'react';
+
+import type { ConnectionName, VM } from '../../types';
+
+import { Button } from "@patternfly/react-core/dist/esm/components/Button";
+import { Checkbox } from "@patternfly/react-core/dist/esm/components/Checkbox";
+import { Flex, FlexItem } from "@patternfly/react-core/dist/esm/layouts/Flex";
+import { Form, FormGroup } from "@patternfly/react-core/dist/esm/components/Form";
+import {
+    Modal, ModalBody, ModalFooter, ModalHeader
+} from '@patternfly/react-core/dist/esm/components/Modal';
+import { Radio } from "@patternfly/react-core/dist/esm/components/Radio";
+import { TextInput } from "@patternfly/react-core/dist/esm/components/TextInput";
+import { PopoverPosition } from "@patternfly/react-core/dist/esm/components/Popover";
+
+import { FormHelper } from 'cockpit-components-form-helper.jsx';
+import { domainGetAll, domainMigrateToUri } from '../../libvirtApi/domain.js';
+import { isEmpty, isObjectEmpty } from '../../helpers.js';
+import { ModalError } from 'cockpit-components-inline-notification.jsx';
+import { useDialogs } from 'dialogs.jsx';
+
+import { InfoPopover } from '../common/infoPopover.jsx';
+
+import { VMS_CONFIG } from "../../config.js";
+
+import './vmMigrateDialog.css';
+
+const _ = cockpit.gettext;
+
+interface ValidationFailed {
+    destUri?: string;
+}
+
+const DestUriRow = ({
+    validationFailed,
+    destUri,
+    setDestUri
+} : {
+    validationFailed: ValidationFailed,
+    destUri: string,
+    setDestUri: (val: string) => void,
+}) => {
+    return (
+        <FormGroup label={_("Destination URI")} fieldId="dest-uri-input">
+            <TextInput id='dest-uri-input'
+                       validated={validationFailed.destUri ? "error" : "default"}
+                       value={destUri}
+                       placeholder={cockpit.format(_("Example, $0"), "qemu+ssh://192.0.2.16/system")}
+                       onChange={(_, value) => setDestUri(value)} />
+            <FormHelper helperTextInvalid={validationFailed.destUri} />
+        </FormGroup>
+    );
+};
+
+const DurationRow = ({
+    temporary,
+    setTemporary
+} : {
+    temporary: boolean,
+    setTemporary: (val: boolean) => void,
+}) => {
+    return (
+        <FormGroup hasNoPaddingTop
+                   fieldId="temporary"
+                   label={_("Duration")}
+                   labelHelp={
+                       <InfoPopover aria-label="Duration popover"
+                                position={PopoverPosition.bottom}
+                                enableFlip
+                                bodyContent={<Flex direction={{ default: 'column' }}>
+                                    <FlexItem>
+                                        <h4 className="popover-headline">{_("Permanent (default)")}</h4>
+                                        <p>{_("The migrated VM configuration is removed from the source host. The destination host is considered the new home of the VM.")}</p>
+                                    </FlexItem>
+                                    <FlexItem>
+                                        <h4 className="popover-headline">{_("Temporary")}</h4>
+                                        <p>{_("A copy of the VM will run on the destination and will disappear when it is shut off. Meanwhile, the origin host keeps its copy of the VM configuration.")}</p>
+                                    </FlexItem>
+                                </Flex>}
+                       />
+                   }>
+            <Checkbox id="temporary"
+                      isChecked={temporary}
+                      label={_("Temporary migration")}
+                      onChange={(_, val) => setTemporary(val)} />
+        </FormGroup>
+    );
+};
+
+type StorageCopyMode = "copy" | "nocopy";
+
+const StorageRow = ({
+    storage,
+    setStorage
+} : {
+    storage: StorageCopyMode,
+    setStorage: (val: StorageCopyMode) => void,
+}) => {
+    return (
+        <FormGroup hasNoPaddingTop
+                   label={_("Storage")}
+                   labelHelp={
+                       <InfoPopover aria-label="Storage popover"
+                                position={PopoverPosition.bottom}
+                                enableFlip
+                                bodyContent={<Flex direction={{ default: 'column' }}>
+                                    <FlexItem>
+                                        <h4 className="popover-headline">{_("Shared storage")}</h4>
+                                        <p>{_("Use the same location on both the origin and destination hosts for your storage. This can be a shared storage pool, NFS, or any other method of sharing storage.")}</p>
+                                    </FlexItem>
+                                    <FlexItem>
+                                        <h4 className="popover-headline">{_("Copy storage")}</h4>
+                                        <p>{_("Full disk images and the domain's memory will be migrated. Only non-shared, writable disk images will be transferred. Unused storage will remain on the origin after migration.")}</p>
+                                    </FlexItem>
+                                </Flex>}
+                       />
+                   }>
+            <Radio id="shared"
+                   name="storage"
+                   label={_("Storage is at a shared location")}
+                   isChecked={storage === "nocopy"}
+                   onChange={() => setStorage("nocopy")} />
+            <Radio id="copy"
+                   name="storage"
+                   label={_("Copy storage")}
+                   isChecked={storage === "copy"}
+                   onChange={() => setStorage("copy")} />
+        </FormGroup>
+    );
+};
+
+interface DialogError {
+    dialogError?: string;
+    message?: string;
+}
+
+export const MigrateDialog = ({
+    vm,
+    connectionName
+} : {
+    vm: VM,
+    connectionName: ConnectionName,
+}) => {
+    const Dialogs = useDialogs();
+    const [destUri, setDestUri] = useState("");
+    const [error, setDialogError] = useState<DialogError>({});
+    const [inProgress, setInProgress] = useState(false);
+    const [storage, setStorage] = useState<StorageCopyMode>("nocopy");
+    const [temporary, setTemporary] = useState(false);
+    const [validationFailed, setValidationFailed] = useState<ValidationFailed>({});
+
+    const copyStorageHidden = !VMS_CONFIG.StorageMigrationSupported;
+
+    function validateParams() {
+        const validation: ValidationFailed = {};
+        if (isEmpty(destUri.trim()))
+            validation.destUri = _("Destination URI must not be empty");
+
+        return validation;
+    }
+
+    function onMigrate() {
+        const v = validateParams();
+        if (!isObjectEmpty(v)) {
+            setValidationFailed(v);
+            return;
+        }
+
+        setInProgress(true);
+        return domainMigrateToUri({ connectionName, objPath: vm.id, destUri, storage, temporary })
+                .then(() => {
+                    Dialogs.close();
+                    if (!temporary)
+                        cockpit.location.go(["vms"]);
+                })
+                .then(() => {
+                    // Because of bug, we don't get event when migration undefines a VM
+                    // https://gitlab.com/libvirt/libvirt/-/issues/186
+                    return domainGetAll({ connectionName });
+                })
+                .catch(exc => {
+                    setInProgress(false);
+                    setDialogError({ dialogError: _("Migration failed"), message: exc.message });
+                });
+    }
+
+    const body = (
+        <Form onSubmit={e => e.preventDefault()} isHorizontal>
+            <DestUriRow destUri={destUri}
+                        setDestUri={setDestUri}
+                        validationFailed={validationFailed} />
+            <DurationRow temporary={temporary}
+                         setTemporary={setTemporary} />
+            {!copyStorageHidden && <StorageRow storage={storage}
+                                               setStorage={setStorage} />
+            }
+        </Form>
+    );
+
+    const dataCorruptionWarning = () => {
+        const hasWriteableDisks = Object.values(vm.disks).findIndex(a => !a.readonly) !== -1;
+
+        if (temporary && storage === "nocopy" && hasWriteableDisks)
+            return <div className="footer-warning">{_("Do not run this VM on the origin and destination hosts at the same time.")}</div>;
+        else if (temporary && storage === "copy")
+            return <div className="footer-warning">{_("All VM activity, including storage, will be temporary. This will result in data loss on the destination host.")}</div>;
+    };
+
+    const footer = (
+        <ModalFooter>
+            {dataCorruptionWarning()}
+            <Button variant='primary'
+                    id="migrate-button"
+                    isLoading={inProgress}
+                    isDisabled={inProgress}
+                    onClick={onMigrate}>
+                {_("Migrate")}
+            </Button>
+            <Button id="cancel-button" variant='link' onClick={Dialogs.close}>
+                {_("Cancel")}
+            </Button>
+        </ModalFooter>
+    );
+
+    return (
+        <Modal id="migrate-modal" position="top" variant="medium" isOpen onClose={Dialogs.close}>
+            <ModalHeader title={_("Migrate VM to another host")}
+                description={copyStorageHidden && _("Storage volumes must be shared between this host and the destination host.")}
+            />
+            <ModalBody>
+                {error.dialogError &&
+                    <ModalError
+                        dialogError={error.dialogError}
+                        {...error.message && { dialogErrorDetail: error.message } }
+                    />
+                }
+                {body}
+            </ModalBody>
+            {footer}
+        </Modal>
+    );
+};

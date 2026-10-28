@@ -1,0 +1,35 @@
+# Managed by Cockpit Sudo Manager
+# Global sudo defaults and safe operational access
+#
+# Scope:
+#   - Logging, auditing, and safety defaults
+#   - Universally safe read-only commands
+#   - No service modification
+#   - No package changes
+#   - No system lifecycle actions
+
+# ==========================================================
+# Read-only system inspection
+# ==========================================================
+Cmnd_Alias SYSINFO_READ = \
+  /usr/bin/uptime, \
+  /usr/bin/whoami, \
+  /usr/bin/id, \
+  /usr/bin/hostnamectl, \
+  /usr/bin/timedatectl, \
+  /usr/bin/df, \
+  /usr/bin/df *, \
+  /usr/bin/free, \
+  /usr/bin/free *, \
+  /usr/bin/lsblk, \
+  /usr/bin/lsblk *, \
+  /usr/bin/mount
+
+# ==========================================================
+# Log inspection (non-interactive only)
+# ==========================================================
+Cmnd_Alias LOG_READ = \
+  /usr/bin/tail /var/log/*, \
+  /usr/bin/tail -f /var/log/*, \
+  /usr/bin/head /var/log/*
+

@@ -1,0 +1,17 @@
+name: Packaging
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  pkg-ci:
+    uses: RXTX4816/cockpit-plugin-base-react/.github/workflows/pkg-ci-plugin.yml@main
+    with:
+      plugin-name: cockpit-compose
+      spec-file: cockpit-compose.spec
+      aur-pkgname: cockpit-compose
+    secrets: inherit

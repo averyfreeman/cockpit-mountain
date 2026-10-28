@@ -1,0 +1,20 @@
+require:
+  - systemd-container
+  - cockpit-podman
+  - cockpit-ws
+  - cockpit-system
+  - criu
+  - nginx
+duration: 30m
+
+/system:
+    test: ./browser.sh system
+    summary: Run *System tests
+
+/user:
+    test: ./browser.sh user
+    summary: Run *User tests
+
+/other:
+    test: ./browser.sh other
+    summary: Run all other tests

@@ -1,0 +1,186 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ *
+ * Copyright (C) 2020 Red Hat, Inc.
+ */
+import React from 'react';
+import cockpit from 'cockpit';
+
+import type { optString, VM } from '../../../types';
+import type { Dialogs } from 'dialogs';
+
+import { Button } from "@patternfly/react-core/dist/esm/components/Button";
+import { Form, FormGroup } from "@patternfly/react-core/dist/esm/components/Form";
+import { FormSelect, FormSelectOption } from "@patternfly/react-core/dist/esm/components/FormSelect";
+import {
+    Modal, ModalBody, ModalFooter, ModalHeader
+} from '@patternfly/react-core/dist/esm/components/Modal';
+import { Tooltip } from "@patternfly/react-core/dist/esm/components/Tooltip";
+import { useDialogs, DialogsContext } from 'dialogs.jsx';
+
+import { ModalError } from 'cockpit-components-inline-notification.jsx';
+import { domainCanInstall, domainSetOSFirmware } from "../../../libvirtApi/domain.js";
+import { supportsUefiXml, labelForFirmwarePath, uefiFirmwareImages } from './helpers.jsx';
+import { addTPM } from '../vmActions';
+
+const _ = cockpit.gettext;
+
+const xmlToState = (value: optString) => value || 'bios';
+const stateToXml = (value: string) => value == 'bios' ? null : value;
+
+interface FirmwareModalProps {
+    vm: VM,
+}
+
+interface FirmwareModalState {
+    dialogError: null | string;
+    dialogErrorDetail?: string;
+    firmware: string;
+}
+
+class FirmwareModal extends React.Component<FirmwareModalProps, FirmwareModalState> {
+    static contextType = DialogsContext;
+    declare context: Dialogs;
+
+    constructor(props: FirmwareModalProps) {
+        super(props);
+        this.state = {
+            dialogError: null,
+            firmware: xmlToState(props.vm.firmware),
+        };
+        this.dialogErrorSet = this.dialogErrorSet.bind(this);
+        this.save = this.save.bind(this);
+    }
+
+    dialogErrorSet(text: string, detail: string) {
+        this.setState({ dialogError: text, dialogErrorDetail: detail });
+    }
+
+    async save() {
+        const Dialogs = this.context;
+        const vm = this.props.vm;
+        try {
+            await domainSetOSFirmware({
+                vm,
+                loaderType: stateToXml(this.state.firmware)
+            });
+
+            if (this.state.firmware == 'efi' && !vm.hasTPM && vm.capabilities.supportsTPM)
+                await addTPM(vm);
+
+            Dialogs.close();
+        } catch (exc) {
+            this.dialogErrorSet(_("Failed to change firmware"), String(exc));
+        }
+    }
+
+    render() {
+        const Dialogs = this.context;
+        return (
+            <Modal position="top" variant="medium" isOpen onClose={Dialogs.close}>
+                <ModalHeader title={_("Change firmware")} />
+                <ModalBody>
+                    <Form isHorizontal>
+                        {this.state.dialogError &&
+                            <ModalError
+                                dialogError={this.state.dialogError}
+                                {...this.state.dialogErrorDetail && { dialogErrorDetail: this.state.dialogErrorDetail } }
+                            />
+                        }
+                        <FormGroup label={_("Firmware")} fieldId="firmware-dialog-select">
+                            <FormSelect onChange={(_event, value) => this.setState({ firmware: value })}
+                                        id='firmware-dialog-select'
+                                        value={this.state.firmware }>
+                                <FormSelectOption value='bios' key='bios'
+                                                  label='BIOS' />
+                                <FormSelectOption value='efi' key='efi'
+                                                  label='UEFI' />
+                            </FormSelect>
+                        </FormGroup>
+                    </Form>
+                </ModalBody>
+                <ModalFooter>
+                    <Button variant='primary' id="firmware-dialog-apply" onClick={this.save}>
+                        {_("Save")}
+                    </Button>
+                    <Button variant='link' onClick={Dialogs.close}>
+                        {_("Cancel")}
+                    </Button>
+                </ModalFooter>
+            </Modal>
+        );
+    }
+}
+
+export const FirmwareLink = ({
+    vm,
+    idPrefix
+} : {
+    vm: VM,
+    idPrefix: string,
+}) => {
+    const Dialogs = useDialogs();
+
+    let firmwareLinkWrapper;
+    const hasInstallPhase = vm.metadata && vm.metadata.hasInstallPhase;
+    const sourceType = vm.metadata && vm.metadata.installSourceType;
+    const labelForFirmware = labelForFirmwarePath(vm.loader, vm.arch);
+    let currentFirmware;
+
+    if (vm.firmware == "efi" || labelForFirmware == "efi")
+        currentFirmware = "UEFI";
+    else if (labelForFirmware == "custom")
+        currentFirmware = cockpit.format(_("Custom firmware: $0"), vm.loader);
+    else if (labelForFirmware == "unknown")
+        currentFirmware = _("Unknown firmware");
+    else
+        currentFirmware = "BIOS";
+
+    /* If the VM hasn't an install phase and the VM was not imported then don't show a link, just the text */
+    if (!domainCanInstall(vm.state, hasInstallPhase) && sourceType !== "disk_image") {
+        firmwareLinkWrapper = <div id={`${idPrefix}-firmware`}>{currentFirmware}</div>;
+    } else {
+        const firmwareLink = (disabled: boolean) => {
+            return (
+                <span id={`${idPrefix}-firmware-tooltip`}>
+                    <Button variant="link" isInline id={`${idPrefix}-firmware`} isDisabled={disabled}
+                            onClick={() => Dialogs.show(<FirmwareModal vm={vm} />)}>
+                        {currentFirmware}
+                    </Button>
+                </span>
+            );
+        };
+
+        if (vm.state != "shut off") {
+            if (vm.persistent) {
+                firmwareLinkWrapper = (
+                    <Tooltip id='firmware-edit-disabled-on-running' content={_("Shut off the VM in order to edit firmware configuration")}>
+                        {firmwareLink(true)}
+                    </Tooltip>
+                );
+            } else {
+                firmwareLinkWrapper = (
+                    <Tooltip id='firmware-edit-disabled-on-transient' content={_("Transient VMs don't support editing firmware configuration")}>
+                        {firmwareLink(true)}
+                    </Tooltip>
+                );
+            }
+        } else if (!supportsUefiXml(vm.capabilities.loader)) {
+            firmwareLinkWrapper = (
+                <Tooltip id='missing-uefi-support' content={_("Libvirt or hypervisor does not support UEFI")}>
+                    {firmwareLink(true)}
+                </Tooltip>
+            );
+        } else if (uefiFirmwareImages(vm.capabilities.loader, vm.arch).length == 0) {
+            firmwareLinkWrapper = (
+                <Tooltip id='missing-uefi-images' content={_("Libvirt did not detect any UEFI/OVMF firmware image installed on the host")}>
+                    {firmwareLink(true)}
+                </Tooltip>
+            );
+        } else {
+            firmwareLinkWrapper = firmwareLink(false);
+        }
+    }
+
+    return firmwareLinkWrapper;
+};

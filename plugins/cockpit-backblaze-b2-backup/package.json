@@ -1,0 +1,53 @@
+{
+  "name": "backblaze-b2",
+  "description": "Cockpit plugin for Backblaze B2 backups",
+  "type": "module",
+  "main": "index.js",
+  "repository": "https://github.com/rabol/backblaze-b2",
+  "author": "Steen Rabol",
+  "license": "LGPL-2.1",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "watch": "ESBUILD_WATCH='true' ./build.js",
+    "build": "./build.js",
+    "stylelint": "stylelint src/*{.css,scss}",
+    "stylelint:fix": "stylelint --fix src/*{.css,scss}",
+    "lint": "oxlint src/",
+    "lint:fix": "oxlint --fix src/"
+  },
+  "devDependencies": {
+    "@types/crypto-js": "^4.2.2",
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "argparse": "2.0.1",
+    "esbuild": "catalog:",
+    "esbuild-plugin-copy": "2.1.1",
+    "esbuild-plugin-replace": "1.4.0",
+    "esbuild-sass-plugin": "3.3.1",
+    "esbuild-wasm": "catalog:",
+    "gettext-parser": "8.0.0",
+    "glob": "11.0.3",
+    "jed": "1.1.1",
+    "qunit": "2.24.1",
+    "sass": "1.79.6",
+    "stylelint": "16.22.0",
+    "stylelint-config-recommended-scss": "15.0.1",
+    "stylelint-config-standard": "38.0.0",
+    "stylelint-config-standard-scss": "15.0.1",
+    "stylelint-formatter-pretty": "4.0.1",
+    "typescript": "catalog:",
+    "oxlint": "catalog:"
+  },
+  "dependencies": {
+    "@patternfly/patternfly": "catalog:",
+    "@patternfly/react-core": "catalog:",
+    "@patternfly/react-icons": "catalog:",
+    "@patternfly/react-styles": "catalog:",
+    "@patternfly/react-table": "catalog:",
+    "crypto-js": "^4.2.0",
+    "react": "catalog:",
+    "react-dom": "catalog:"
+  }
+}

@@ -1,0 +1,82 @@
+[tool.mypy]
+follow_imports = 'silent'  # https://github.com/python-lsp/pylsp-mypy/issues/81
+scripts_are_modules = true  # allow checking all scripts in one invocation
+explicit_package_bases = true
+check_untyped_defs = true
+disallow_any_generics = true
+disallow_incomplete_defs = true
+disallow_subclassing_any = true
+disallow_untyped_calls = true
+disallow_untyped_decorators = true
+disallow_untyped_defs = true
+strict_equality = true
+mypy_path = 'test/common:bots'
+exclude = [
+    "bots"
+]
+
+[[tool.mypy.overrides]]
+ignore_missing_imports = true
+module = [
+    # run without bots checked out
+    "lib.constants.*",
+    "machine.*",
+    "testvm",
+]
+
+[tool.pyright]
+strict = ["**"]
+extraPaths = ["test/common", "bots"]
+
+[tool.ruff]
+exclude = [
+    ".git/",
+    "modules/",
+    "node_modules/",
+]
+line-length = 118
+preview = true
+src = []
+
+[tool.ruff.lint]
+select = [
+    "A",       # flake8-builtins
+    "B",       # flake8-bugbear
+    "C4",      # flake8-comprehensions
+    "D300",    # pydocstyle: Forbid ''' in docstrings
+    "DTZ",     # flake8-datetimez
+    "E",       # pycodestyle
+    "EXE",     # flake8-executable
+    "F",       # pyflakes
+    "FBT",     # flake8-boolean-trap
+    "G",       # flake8-logging-format
+    "I",       # isort
+    "ICN",     # flake8-import-conventions
+    "ISC",     # flake8-implicit-str-concat
+    "PLE",     # pylint errors
+    "PGH",     # pygrep-hooks
+    "RSE",     # flake8-raise
+    "RUF",     # ruff rules
+    "T10",     # flake8-debugger
+    "TC",      # flake8-type-checking
+    "UP032",   # f-string
+    "W",       # warnings (mostly whitespace)
+    "YTT",     # flake8-2020
+]
+
+[tool.ruff.lint.flake8-pytest-style]
+fixture-parentheses = false
+mark-parentheses = false
+
+[tool.ruff.lint.isort]
+known-first-party = ["cockpit"]
+
+[tool.vulture]
+min_confidence = 80
+ignore_names = [
+   "test[A-Z0-9]*",
+]
+
+[tool.codespell]
+skip = './node_modules,./dist'
+ignore-words-list = 'doubleclick'

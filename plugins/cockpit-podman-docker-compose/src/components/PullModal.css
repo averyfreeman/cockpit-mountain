@@ -1,0 +1,28 @@
+.pm-header {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.75rem;
+  font-size: 0.875rem;
+}
+
+.pm-status-running {
+  color: var(--pf-t--global--text--color--subtle);
+}
+
+.pm-status-ok {
+  color: #56d364;
+  font-weight: 600;
+}
+
+.pm-status-failed {
+  color: #f85149;
+  font-weight: 600;
+}
+
+
+.pm-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 0.75rem;
+}

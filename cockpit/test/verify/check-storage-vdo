@@ -1,0 +1,446 @@
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
+
+#
+# Copyright (C) 2015 Red Hat, Inc.
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
+
+import packagelib
+import storagelib
+import testlib
+
+SIZE_10G = "10000000000"
+
+# OS images that support VDO logical volumes
+VDO_IMAGE_PREFIXES = ("rhel-", "centos-", "arch", "fedora-45")
+
+
+@testlib.skipImage("VDO support not installed", "*-bootc")
+class TestStorageVDO(storagelib.StorageCase):
+
+    provision = {"0": {"memory_mb": 1800}}
+
+    def testVdo(self):
+        m = self.machine
+        b = self.browser
+
+        self.login_and_go("/storage")
+        # an empty xfs filesystem created with 6.4.0 is smaller then newer xfs versions
+        old_xfs = m.image.startswith('rhel-9') or m.image.startswith('centos-9') or m.image.startswith('rhel-8')
+
+        # Make a volume group in which to create the VDO LV
+        dev = "/dev/" + m.add_disk(SIZE_10G, serial="DISK1")["dev"]
+        b.wait_visible(self.card_row("Storage", name=dev))
+        m.execute("vgcreate vdo_vgroup /dev/sda")
+
+        self.click_card_row("Storage", name="vdo_vgroup")
+        b.wait_in_text(self.card("LVM2 logical volumes"), "No logical volumes")
+
+        b.click(self.card_button("LVM2 logical volumes", "Create new logical volume"))
+        self.dialog_wait_open()
+        b._wait_present("[data-field='purpose'] select option[value='block']")
+
+        # Currently, vdo is only supported by Cockpit on RHEL
+        if not m.image.startswith(VDO_IMAGE_PREFIXES):
+            b.wait_not_present("[data-field='purpose'] select option[value='vdo']")
+            return
+
+        # create VDO LV with default options and default virtual size
+        self.dialog_set_val("name", "vdo0")
+        self.dialog_set_val("purpose", "vdo")
+        self.dialog_set_val("vdo_psize", 6000)
+        self.dialog_apply()
+        self.dialog_wait_close()
+
+        # pool name gets auto-generated
+        pool_name = "vpool0"
+
+        b.wait_text(self.card_row_col("LVM2 logical volumes", 1, 1), "vdo0")
+        # the pool does not appear as a top-level volume
+        b.wait_not_present(self.card_row("LVM2 logical volumes", name=pool_name))
+        self.click_card_row("LVM2 logical volumes", 1)
+        # Volume card
+        b.wait_text(self.card_desc("LVM2 logical volume", "Name"), "vdo0")
+        b.wait_in_text(self.card_desc("LVM2 logical volume", "Size"), "10.0 GB")
+        # VDO pool card
+        b.wait_text(self.card_desc("LVM2 VDO pool", "Name"), pool_name)
+        b.wait_in_text(self.card_desc("LVM2 VDO pool", "Size"), "6.00 GB")
+        # initial physical usage is ~ 4 GB, overhead for the deduplication index
+        b.wait_text(self.card_desc("LVM2 VDO pool", "Data used"), "3.86 GB (64%)")
+        b.wait_text(self.card_desc("LVM2 VDO pool", "Metadata used"), "0%")
+        b.wait_visible(self.card("LVM2 VDO pool") + " input[aria-label='Use compression']:checked")
+        b.wait_visible(self.card("LVM2 VDO pool") + " input[aria-label='Use deduplication']:checked")
+
+        # create a filesystem
+        self.click_card_dropdown("Unformatted data", "Format")
+        self.dialog({"type": "xfs",
+                     "name": "vdofs",
+                     "mount_point": "/run/data"})
+        b.wait_visible(self.card("xfs filesystem"))
+
+        # compressible data should affect logical usage
+        m.execute("dd if=/dev/zero of=/run/data/empty bs=1M count=1000")
+        b.wait_in_text(self.card_desc("xfs filesystem", "Usage"), "1.2 / " if old_xfs else "1.3 / ")
+        # but not physical usage
+        b.wait_text(self.card_desc("LVM2 VDO pool", "Data used"), "3.86 GB (64%)")
+
+        # incompressible data
+        m.execute("dd if=/dev/urandom of=/run/data/gibberish bs=1M count=1000")
+        b.wait_in_text(self.card_desc("xfs filesystem", "Usage"), "2.2 / " if old_xfs else "2.3 / ")
+        # equal amount of physical space (not completely predictable due to random data)
+        b.wait_in_text(self.card_desc("LVM2 VDO pool", "Data used"), "4.")
+
+        def wait_prop(device, prop, value):
+            m.execute(f"until lvdisplay --noheadings -Co {prop} /dev/vdo_vgroup/{device} | grep -q '{value}'; do sleep 0.1; done")
+
+        # change compression/deduplication
+        b.click("input[aria-label='Use compression']")
+        b.wait_visible("input[aria-label='Use compression']:not(checked):not([disabled])")
+        wait_prop(pool_name, "vdo_compression_state", "offline")
+        b.click("input[aria-label='Use compression']")
+        b.wait_visible("input[aria-label='Use compression']:checked:not([disabled])")
+        wait_prop(pool_name, "vdo_compression_state", "online")
+
+        b.click("input[aria-label='Use deduplication']")
+        b.wait_visible("input[aria-label='Use deduplication']:not(checked):not([disabled])")
+        wait_prop(pool_name, "vdo_index_state", r"offline\|closed")
+        b.click("input[aria-label='Use deduplication']")
+        b.wait_visible("input[aria-label='Use deduplication']:checked:not([disabled])")
+        wait_prop(pool_name, "vdo_index_state", "online")
+
+        # grow volume
+        b.click(self.card_button("LVM2 logical volume", "Grow"))
+        self.dialog({"size": 12000})
+        b.wait_in_text(self.card_desc("LVM2 logical volume", "Size"), "12.0 GB")
+        wait_prop("vdo0", "lv_size", "11.18g")
+
+        # grow pool
+        b.click(self.card_button("LVM2 VDO pool", "Grow"))
+        self.dialog({"size": 8000})
+        b.wait_in_text(self.card_desc("LVM2 VDO pool", "Size"), "8.15 GB")
+        wait_prop(pool_name, "lv_size", "7.59g")
+
+        # deleting the vdo0 volume deletes the pool as well
+        self.click_card_dropdown("LVM2 logical volume", "Delete")
+        self.confirm()
+        b.wait_in_text(self.card("LVM2 logical volumes"), "No logical volumes")
+        self.assertEqual(m.execute("lvs --noheadings").strip(), "")
+
+        # create VDO LV with customized options
+        b.click(self.card_button("LVM2 logical volumes", "Create new logical volume"))
+        self.dialog_wait_open()
+        b._wait_present("[data-field='purpose'] select option[value='block']")
+        self.dialog_set_val("name", "vdo0")
+        self.dialog_set_val("purpose", "vdo")
+        self.dialog_set_val("vdo_psize", 6000)
+        # grossly overcommitted
+        self.dialog_set_val("vdo_lsize", 20000)
+        self.dialog_set_val("vdo_options.compression", val=False)
+        self.dialog_apply()
+        self.dialog_wait_close()
+        b.wait_text(self.card_row_col("LVM2 logical volumes", 1, 1), "vdo0")
+
+        self.click_card_row("LVM2 logical volumes", 1)
+        # Volume card
+        b.wait_text(self.card_desc("LVM2 logical volume", "Name"), "vdo0")
+        b.wait_in_text(self.card_desc("LVM2 logical volume", "Size"), "20.0 GB")
+        # VDO Pool tab
+        b.wait_in_text(self.card_desc("LVM2 VDO pool", "Size"), "6.00 GB")
+        b.wait_visible("input[aria-label='Use compression']:not(:checked)")
+        b.wait_visible("input[aria-label='Use deduplication']:checked")
+        wait_prop(pool_name, "vdo_compression_state", "offline")
+        wait_prop(pool_name, "vdo_index_state", "online")
+
+        # delete again
+        self.click_card_dropdown("LVM2 logical volume", "Delete")
+        self.confirm()
+        b.wait_in_text(self.card("LVM2 logical volumes"), "No logical volumes")
+        self.assertEqual(m.execute("lvs --noheadings").strip(), "")
+
+        # react to CLI
+        m.execute("lvcreate --type vdo --size 6g --virtualsize 10g --name vdo1 --yes vdo_vgroup")
+        b.wait_text(self.card_row_col("LVM2 logical volumes", 1, 1), "vdo1")
+        m.execute("lvremove --yes /dev/vdo_vgroup/vdo1")
+        b.wait_in_text(self.card("LVM2 logical volumes"), "No logical volumes")
+
+
+@testlib.onlyImage("legacy VDO API only supported on RHEL 8", "rhel-8*")
+class TestStorageLegacyVDO(storagelib.StorageCase):
+
+    def setUp(self):
+        super().setUp()
+        # packagekit eats too much CPU/memory in the background
+        self.machine.execute("systemctl mask --now packagekit")
+
+    def testVdo(self):
+        m = self.machine
+        b = self.browser
+
+        self.login_and_go("/storage")
+
+        # Make a logical volume for use as the backing device.
+        m.add_disk(SIZE_10G, serial="DISK1")
+        b.wait_visible(self.card_row("Storage", name="/dev/sda"))
+        m.execute("vgcreate vdo_vgroup /dev/sda; lvcreate -n lvol -L 5G vdo_vgroup")
+        # Create VDO; this is not supported any more, thus no UI for it
+        m.execute("vdo create --device /dev/vdo_vgroup/lvol --name vdo0 --vdoLogicalSize 5G", timeout=300)
+
+        self.click_card_row("Storage", name="lvol")
+
+        def detail(index):
+            card = self.card("VDO device vdo0")
+            return f'{card} .pf-v6-c-description-list__group:nth-of-type({index}) > dd'
+
+        b.wait_text(detail(1), "/dev/mapper/vdo0")
+        b.wait_in_text(detail(2), "used of 5.37 GB")
+        b.wait_in_text(detail(3), "used of 5.37 GB")
+        b.wait_text(detail(4), "268 MB")
+        b.wait_visible(detail(5) + " input:checked")
+        b.wait_visible(detail(6) + " input:checked")
+
+        # Make a filesystem on it
+
+        self.click_card_dropdown("Unformatted data", "Format")
+        self.dialog({"type": "xfs",
+                     "name": "FILESYSTEM",
+                     "mount_point": "/run/data"})
+        b.wait_in_text(self.card_desc("xfs filesystem", "Mount point"), "after network")
+        b.wait_in_text(self.card_desc("xfs filesystem", "Mount point"), "x-systemd.device-timeout=0")
+        b.wait_in_text(self.card_desc("xfs filesystem", "Mount point"), "x-systemd.requires=vdo.service")
+        b.wait_in_text(self.card_desc("xfs filesystem", "Usage"), "/ 5.4 GB")
+
+        # Grow physical
+
+        m.execute("lvresize vdo_vgroup/lvol -L 9G")
+        b.wait_in_text(".pf-v6-c-alert__description", 'Only 5.37 GB of 9')
+        b.click("button:contains('Grow to take all space')")
+        b.wait_not_present(".pf-v6-c-alert")
+        b.wait_in_text(detail(2), "used of 9.66 GB")
+
+        # Grow logical
+
+        b.click(detail(3) + " button:contains('Grow')")
+        self.dialog({"lsize": 10000})
+        b.wait_in_text(detail(3), "used of 10.0 GB")
+        b.wait_in_text(self.card_desc("xfs filesystem", "Usage"), "/ 10 GB")
+
+        # Stop
+
+        b.wait_visible(self.card("xfs filesystem"))
+        b.click(self.card_button("VDO device vdo0", "Stop"))
+        self.dialog_wait_open()
+        b.wait_in_text("#dialog", "unmount, stop")
+        self.dialog_apply()
+        self.dialog_wait_close()
+        b.wait_not_present(self.card("xfs filesystem"))
+
+        # Delete
+
+        self.click_card_dropdown("VDO device vdo0", "Delete")
+        self.dialog_wait_open()
+        self.dialog_apply_with_retry(expected_errors=["Device or resource busy"])
+        b.wait_not_present(self.card("VDO device vdo0"))
+        b.wait_visible(self.card("Unformatted data"))
+        b.wait_visible(self.card("LVM2 logical volume"))
+
+    def testBrokenVdo(self):
+        m = self.machine
+        b = self.browser
+
+        self.login_and_go("/storage")
+
+        m.add_disk(SIZE_10G, serial="DISK1")
+        b.wait_visible(self.card_row("Storage", name="/dev/sda"))
+
+        # Install a valid configuration file that describes a broken VDO
+        m.write("/etc/vdoconf.yml", """
+config: !Configuration
+  vdos:
+    vdo0: !VDOService
+      _operationState: beginCreate
+      ackThreads: 1
+      activated: enabled
+      bioRotationInterval: 64
+      bioThreads: 4
+      blockMapCacheSize: 128M
+      blockMapPeriod: 16380
+      compression: enabled
+      cpuThreads: 2
+      deduplication: enabled
+      device: /dev/sda
+      hashZoneThreads: 1
+      indexCfreq: 0
+      indexMemory: 0.25
+      indexSparse: disabled
+      indexThreads: 0
+      logicalBlockSize: 4096
+      logicalSize: 10G
+      logicalThreads: 1
+      name: vdo0
+      physicalSize: 10G
+      physicalThreads: 1
+      readCache: disabled
+      readCacheSize: 0M
+      slabSize: 2G
+      writePolicy: sync
+  version: 538380551
+""")
+
+        self.click_card_row("Storage", name="/dev/sda")
+        b.click(".pf-m-danger button:contains('Remove device')")
+        b.wait_visible(self.card("Unformatted data"))
+
+    def testBrokenVdoConfig(self):
+        m = self.machine
+        b = self.browser
+
+        self.login_and_go("/storage")
+
+        m.add_disk(SIZE_10G, serial="DISK1")
+        b.wait_visible(self.card_row("Storage", name="/dev/sda"))
+
+        # Install a valid configuration file
+        m.write("/etc/vdoconf.yml", """
+config: !Configuration
+  vdos:
+    vdo0: !VDOService
+      _operationState: finished
+      ackThreads: 1
+      activated: enabled
+      bioRotationInterval: 64
+      bioThreads: 4
+      blockMapCacheSize: 128M
+      blockMapPeriod: 16380
+      compression: enabled
+      cpuThreads: 2
+      deduplication: enabled
+      device: /dev/sda
+      hashZoneThreads: 1
+      indexCfreq: 0
+      indexMemory: 0.25
+      indexSparse: disabled
+      indexThreads: 0
+      logicalBlockSize: 4096
+      logicalSize: 10G
+      logicalThreads: 1
+      name: vdo0
+      physicalSize: 10G
+      physicalThreads: 1
+      readCache: disabled
+      readCacheSize: 0M
+      slabSize: 2G
+      writePolicy: sync
+  version: 538380551
+""")
+
+        b.wait_in_text(self.card_row("Storage", name="/dev/sda"), "VDO device")
+
+        # Install a broken configuration file
+        m.write("/etc/vdoconf.yml", """
+config: !Configuration
+  vdos:
+    vdo0: !VDOService
+      blah: 12
+""")
+
+        b.wait_in_text(self.card_row("Storage", name="/dev/sda"), "Unformatted data")
+
+        # Install a valid configuration file again
+        m.write("/etc/vdoconf.yml", """
+config: !Configuration
+  vdos:
+    vdo1: !VDOService
+      _operationState: finished
+      ackThreads: 1
+      activated: enabled
+      bioRotationInterval: 64
+      bioThreads: 4
+      blockMapCacheSize: 128M
+      blockMapPeriod: 16380
+      compression: enabled
+      cpuThreads: 2
+      deduplication: enabled
+      device: /dev/sda
+      hashZoneThreads: 1
+      indexCfreq: 0
+      indexMemory: 0.25
+      indexSparse: disabled
+      indexThreads: 0
+      logicalBlockSize: 4096
+      logicalSize: 10G
+      logicalThreads: 1
+      name: vdo1
+      physicalSize: 10G
+      physicalThreads: 1
+      readCache: disabled
+      readCacheSize: 0M
+      slabSize: 2G
+      writePolicy: sync
+  version: 538380551
+""")
+
+        b.wait_in_text(self.card_row("Storage", name="/dev/sda"), "VDO device")
+
+
+@testlib.onlyImage("VDO package installation only supported on RHEL", "rhel-*", "centos-*")
+@testlib.skipOstree("package installation not supported on ostree images")
+class TestStoragePackagesVDO(packagelib.PackageCase, storagelib.StorageHelpers):
+
+    provision = {"0": {"memory_mb": 1500}}
+
+    def testVdoMissingPackages(self):
+        m = self.machine
+        b = self.browser
+
+        # Remove the vdoformat utility by uninstalling the vdo
+        # package.  Older versions of LVM2 will need it and Cockpit
+        # will help to install the "vdo" package again.  Newer
+        # versions of LVM2 do not need vdoformat and Cockpit should
+        # not try to install it.
+
+        m.execute("rpm --erase --verbose vdo")
+
+        needs_vdoformat = m.image.startswith(("rhel-8", "rhel-9", "centos-9"))
+
+        self.login_and_go("/storage")
+        m.add_disk(SIZE_10G, serial="DISK1")
+        b.wait_visible(self.card_row("Storage", name="/dev/sda"))
+        m.execute("vgcreate vdo_vgroup /dev/sda")
+
+        self.click_card_row("Storage", name="vdo_vgroup")
+        b.click("button:contains('Create new logical volume')")
+        self.dialog_wait_open()
+        b._wait_present("[data-field='purpose'] select option[value='block']")
+        # no package installation helper text
+        self.assertFalse(b.is_present("#dialog .pf-v6-c-helper-text"))
+        self.dialog_set_val("purpose", "vdo")
+
+        if needs_vdoformat:
+            # shows the package installation note
+            b.wait_in_text("#dialog .pf-v6-c-helper-text", "vdo package will be installed")
+
+            # vdo package does not exist
+            self.dialog_apply()
+            b.wait_in_text("#dialog .pf-v6-c-alert.pf-m-danger", "vdo is not available from any repository")
+
+            self.createPackage("vdo", "999", "1")
+            self.enableRepo()
+
+            self.dialog_apply()
+            # gets over package installation now, but it's a mock package
+            b.wait_in_text("#dialog .pf-v6-c-alert.pf-m-danger", "vdoformat")
+            b.wait_in_text("#dialog .pf-v6-c-alert.pf-m-danger", "No such file or directory")
+            # but it got past package installation
+            self.assertIn("999", m.execute("rpm -q vdo"))
+
+            self.dialog_cancel()
+
+        else:
+            # Don't need vdoformat, volume can be created
+            b.wait_not_present("#dialog .pf-v6-c-helper-text")
+            self.dialog_apply()
+            b.wait_text(self.card_row_col("LVM2 logical volumes", 1, 1), "lvol0")
+
+
+if __name__ == '__main__':
+    testlib.test_main()

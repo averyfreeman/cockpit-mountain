@@ -1,0 +1,2085 @@
+/* Explorer — Cockpit plugin custom styles
+   Bootstrap 5 base, restyled to match PatternFly/Cockpit utilitarian look.
+*/
+
+:root {
+    --ex-bg: #fff;
+    --ex-bg-alt: #f5f5f5;
+    --ex-bg-tab: #ededed;
+    --ex-bg-tab-active: #fff;
+    --ex-border: #d2d2d2;
+    --ex-border-strong: #b8bbbe;
+    --ex-text: #151515;
+    --ex-text-muted: #6a6e73;
+    --ex-accent: #06c;
+    --ex-accent-hover: #004080;
+    --ex-selected: #e7f1fa;
+    --ex-selected-border: #06c;
+    --ex-danger: #c9190b;
+    --ex-warning: #f0ab00;
+    --ex-success: #3e8635;
+    --ex-row-h: 28px;
+    --ex-font: "RedHatText", "Open Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+    --ex-mono: "RedHatMono", "Liberation Mono", Consolas, monospace;
+    --ex-badge-fg: #fff;
+    --ex-badge-idle: #6b7280;   /* gray */
+    --ex-badge-active: #16a34a; /* green */
+}
+
+html, body {
+    height: 100%;
+    margin: 0;
+    overflow: hidden;
+    font-family: var(--ex-font);
+    font-size: 14px;
+    color: var(--ex-text);
+    background: var(--ex-bg);
+}
+
+body {
+    display: flex;
+    flex-direction: column;
+}
+
+/* ====== Tab bar ====== */
+.tab-bar {
+    display: flex;
+    align-items: stretch;
+    background: var(--ex-bg-alt);
+    border-bottom: 1px solid var(--ex-border);
+    height: 36px;
+    flex: 0 0 36px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    user-select: none;
+}
+
+.tab-list {
+    display: flex;
+    align-items: stretch;
+    min-width: 0;
+}
+
+.tab {
+    display: flex;
+    align-items: center;
+    padding: 0 8px 0 12px;
+    min-width: 120px;
+    max-width: 240px;
+    height: 36px;
+    background: var(--ex-bg-tab);
+    border-right: 1px solid var(--ex-border);
+    cursor: pointer;
+    position: relative;
+    gap: 6px;
+    font-size: 13px;
+}
+
+.tab.active {
+    background: var(--ex-bg-tab-active);
+    border-top: 2px solid var(--ex-accent);
+    padding-top: 0;
+    margin-top: -1px;
+}
+
+.tab-label {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+/* Inline title editor (double-click a tab / sub-tab to rename). Sized to blend
+   into the tab so editing reads as in-place text, not a popped-in form field. */
+.tab-title-input {
+    flex: 1;
+    min-width: 4ch;
+    max-width: 180px;
+    font: inherit;
+    color: var(--ex-text, inherit);
+    background: var(--ex-bg, #fff);
+    border: 1px solid var(--ex-accent, #0d6efd);
+    border-radius: 3px;
+    padding: 0 3px;
+    outline: none;
+}
+.term-subtab-input {
+    min-width: 4ch;
+    max-width: 200px;
+    font: inherit;
+    font-family: var(--bs-font-monospace, monospace);
+    color: var(--ex-text, inherit);
+    background: var(--ex-bg, #fff);
+    border: 1px solid var(--ex-accent, #0d6efd);
+    border-radius: 3px;
+    padding: 0 3px;
+    outline: none;
+}
+
+.tab-close {
+    background: none;
+    border: none;
+    color: var(--ex-text-muted);
+    font-size: 16px;
+    line-height: 1;
+    padding: 0 4px;
+    cursor: pointer;
+    border-radius: 2px;
+}
+
+.tab-close:hover { background: rgba(0,0,0,.1); color: var(--ex-text); }
+
+.tab-new {
+    background: none;
+    border: none;
+    width: 36px;
+    height: 36px;
+    font-size: 20px;
+    color: var(--ex-text-muted);
+    cursor: pointer;
+}
+
+.tab-new:hover { background: rgba(0,0,0,.05); color: var(--ex-text); }
+
+.tab-bar-spacer { flex: 1; }
+
+.tab-bar-btn {
+    text-decoration: none;
+    color: var(--ex-text-muted);
+    padding: 0 12px;
+    height: 36px;
+    display: flex;
+    align-items: center;
+    font-size: 13px;
+}
+.tab-bar-btn:hover { color: var(--ex-text); }
+
+/* Drag-and-drop sorting indicator */
+.tab.sortable-ghost { opacity: 0.4; }
+
+/* ====== Tab pane ====== */
+.tab-pane {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-height: 0;
+}
+
+/* ====== Toolbar ====== */
+.toolbar {
+    display: flex;
+    align-items: center;
+    padding: 6px 8px;
+    background: var(--ex-bg-alt);
+    border-bottom: 1px solid var(--ex-border);
+    gap: 4px;
+    flex: 0 0 auto;
+}
+
+.path-bar {
+    background: var(--ex-bg);
+    border: 1px solid var(--ex-border);
+    border-radius: 3px;
+    padding: 3px 8px;
+    min-height: 28px;
+    display: flex;
+    align-items: center;
+    overflow: hidden;
+    cursor: text;
+}
+
+.breadcrumbs {
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    overflow-x: auto;
+    width: 100%;
+    white-space: nowrap;
+    font-size: 13px;
+}
+
+.breadcrumbs a {
+    color: var(--ex-accent);
+    text-decoration: none;
+    padding: 1px 3px;
+    border-radius: 2px;
+}
+.breadcrumbs a:hover { background: var(--ex-bg-alt); text-decoration: underline; }
+.breadcrumbs .sep { color: var(--ex-text-muted); padding: 0 1px; }
+.breadcrumb-root { font-weight: 500; }
+
+.path-input { font-family: var(--ex-mono); font-size: 13px; }
+
+.search-box {
+    display: flex;
+    align-items: stretch;
+    gap: 2px;
+    min-width: 180px;
+}
+
+/* ====== File list ====== */
+.file-list-wrap {
+    flex: 1 1 auto;
+    overflow: auto;
+    position: relative;
+    background: var(--ex-bg);
+}
+
+.file-list {
+    width: 100%;
+    margin: 0;
+    table-layout: fixed;
+    font-size: 13px;
+}
+
+.file-list thead th {
+    position: sticky;
+    top: 0;
+    background: var(--ex-bg-alt);
+    z-index: 2;
+    border-bottom: 1px solid var(--ex-border);
+    padding: 6px 8px;
+    font-weight: 600;
+    font-size: 12px;
+    color: var(--ex-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.file-list th.sortable { cursor: pointer; user-select: none; }
+.file-list th.sortable:hover { color: var(--ex-text); }
+
+.file-list td {
+    padding: 4px 8px;
+    height: var(--ex-row-h);
+    border-top: 1px solid var(--ex-border);
+    vertical-align: middle;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.col-check { width: 32px; text-align: center; }
+.col-name { width: auto; }
+.col-size { width: 90px; text-align: right; font-variant-numeric: tabular-nums; }
+.col-modified { width: 160px; }
+.col-perms { width: 110px; font-family: var(--ex-mono); font-size: 12px; }
+.col-owner { width: 140px; }
+.col-type { width: 110px; }
+
+/* Per-row actions menu (⋮) — opens the same menu as right-click. Primarily for
+   touch screens with no right-click; on desktop it appears on row hover. */
+.col-menu { width: 40px; text-align: center; padding: 0; }
+.row-menu-btn {
+    border: 0; background: transparent; cursor: pointer;
+    color: var(--ex-text); opacity: 0;
+    font-size: 18px; line-height: 1; padding: 2px 8px; border-radius: 4px;
+    transition: opacity .1s ease, background-color .1s ease;
+}
+.file-list tbody tr:hover .row-menu-btn,
+.file-list tbody tr.selected .row-menu-btn { opacity: .55; }
+.row-menu-btn:hover, .row-menu-btn:focus-visible { opacity: 1; background: rgba(127, 127, 127, .18); outline: none; }
+/* Touch / no-hover pointers: always show the affordance with a bigger tap target. */
+@media (hover: none), (pointer: coarse) {
+    .row-menu-btn { opacity: .75; padding: 8px 10px; font-size: 20px; }
+    .col-menu { width: 46px; }
+    .tab-bar-btn, .toolbar .btn, .modal-footer .btn { min-height: 40px; }
+    .toolbar-more-item { min-height: 44px; }
+}
+
+.file-list tbody tr { cursor: default; }
+.file-list tbody tr:hover { background: var(--ex-bg-alt); }
+.file-list tbody tr.selected { background: var(--ex-selected); }
+.file-list tbody tr.selected:hover { background: #d8e8f6; }
+.file-list tbody tr.cut-file { opacity: 0.5; }
+
+.file-icon {
+    display: inline-block;
+    width: 18px;
+    text-align: center;
+    margin-right: 4px;
+}
+
+.file-name { user-select: none; }
+
+.symlink-target {
+    color: var(--ex-text-muted);
+    margin-left: 8px;
+    font-size: 12px;
+    font-style: italic;
+}
+
+.empty-state {
+    text-align: center;
+    padding: 40px !important;
+    color: var(--ex-text-muted);
+    border-top: none !important;
+}
+
+.loading-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(255,255,255,0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--ex-text-muted);
+    z-index: 5;
+}
+
+/* ====== Status bar ====== */
+.status-bar {
+    flex: 0 0 24px;
+    display: flex;
+    align-items: center;
+    padding: 0 8px;
+    background: var(--ex-bg-alt);
+    border-top: 1px solid var(--ex-border);
+    font-size: 12px;
+    color: var(--ex-text-muted);
+    gap: 12px;
+}
+
+/* Selection breakdown "lights up" in the accent colour when non-empty; the
+   span is always present (kept empty otherwise) so the 24px bar never
+   changes height. --ex-accent already swaps to a lighter blue under
+   [data-bs-theme="dark"] (css var block above) with verified >5:1 contrast
+   against --ex-bg-alt in both themes, so no extra dark override is needed. */
+.status-selection { color: var(--ex-accent); font-weight: 600; }
+
+/* Per-pane footer (dual mode): the same .status-bar element, but at half
+   (or less) the width of the shared bar it replaces there. Without this,
+   long text wraps to a second line under a narrow pane and silently grows
+   that footer taller than its sibling's — breaking the side-by-side
+   alignment the per-pane footer exists to provide. Force a single line and
+   truncate instead. Scoped to footers nested in .file-pane so the
+   full-width shared bar (a sibling of .tab-split-body, not a .file-pane
+   descendant) is unaffected. */
+.file-pane > .status-bar > span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+.file-pane > .status-bar > span:first-child { flex: 1 1 auto; }
+.file-pane > .status-bar > span.status-selection { flex: 0 1 auto; }
+
+/* Compact selection chip in the per-tab toolbar; echoes the status-bar
+   count from the same tab.selection source. */
+.toolbar-selection {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: var(--ex-selected);
+    color: var(--ex-accent);
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+    cursor: pointer;
+    user-select: none;
+}
+.toolbar-selection:hover { opacity: 0.85; }
+
+/* ====== Search results header ====== */
+.search-results-bar {
+    background: #fff5cc;
+    border-bottom: 1px solid var(--ex-warning);
+    padding: 4px 8px;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+/* ====== Context menu ====== */
+.context-menu {
+    position: fixed;
+    z-index: 3000;
+    background: var(--ex-bg);
+    border: 1px solid var(--ex-border-strong);
+    border-radius: 3px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.18);
+    min-width: 200px;
+    padding: 4px 0;
+    font-size: 13px;
+}
+
+.ctx-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.ctx-list li {
+    padding: 4px 16px;
+    cursor: pointer;
+    position: relative;
+    white-space: nowrap;
+}
+
+.ctx-list li:hover:not(.ctx-sep):not(.disabled) { background: var(--ex-selected); color: var(--ex-accent-hover); }
+.ctx-list li.disabled { color: var(--ex-text-muted); cursor: default; }
+
+.ctx-sep {
+    border-top: 1px solid var(--ex-border);
+    margin: 4px 0;
+    padding: 0;
+    height: 0;
+    cursor: default;
+}
+
+.ctx-has-sub > .ctx-sub {
+    position: absolute;
+    left: 100%;
+    top: 0;
+    background: var(--ex-bg);
+    border: 1px solid var(--ex-border-strong);
+    border-radius: 3px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.18);
+    min-width: 200px;
+    padding: 4px 0;
+    display: none;
+}
+
+.ctx-has-sub:hover > .ctx-sub { display: block; }
+
+/* ====== Operations tray ====== */
+.ops-tray {
+    position: fixed;
+    bottom: 0;
+    right: 16px;
+    width: 380px;
+    max-height: 40vh;
+    background: var(--ex-bg);
+    border: 1px solid var(--ex-border-strong);
+    border-bottom: none;
+    border-radius: 4px 4px 0 0;
+    box-shadow: 0 -2px 8px rgba(0,0,0,0.12);
+    z-index: 1500;
+    display: flex;
+    flex-direction: column;
+}
+
+.ops-header {
+    padding: 6px 12px;
+    background: var(--ex-bg-alt);
+    border-bottom: 1px solid var(--ex-border);
+    font-weight: 600;
+    font-size: 13px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.ops-body {
+    overflow-y: auto;
+    flex: 1 1 auto;
+    padding: 4px 0;
+}
+
+.op-row {
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--ex-border);
+    font-size: 12px;
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 4px 8px;
+    align-items: center;
+}
+
+.op-row .op-label {
+    grid-column: 1 / 3;
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.op-row .progress { grid-column: 1 / 2; height: 14px; }
+.op-row .op-status { font-size: 11px; color: var(--ex-text-muted); }
+
+.op-row.op-error { background: #faeae8; }
+.op-row.op-done { color: var(--ex-text-muted); }
+
+/* ====== Modal overrides ====== */
+.modal-content { border-radius: 3px; }
+.modal-header { background: var(--ex-bg-alt); border-bottom: 1px solid var(--ex-border); }
+.modal-header .modal-title { font-size: 16px; font-weight: 600; }
+
+.preview-body {
+    background: var(--ex-bg-alt);
+    min-height: 50vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+/* Code preview: a line-number gutter (sticky-left) beside the highlighted code,
+   both inside one scroll container. The gutter mirrors the code's font, 12px
+   size, 1.5 line-height and 1em top padding so numbers line up 1:1. */
+/* Host wraps the optional "truncated" banner above the scrollable code view. */
+.preview-text-host {
+    align-self: stretch;
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+.preview-trunc-banner {
+    flex: 0 0 auto;
+    padding: .4rem .75rem;
+    font-size: 12px;
+    background: #3a3320;
+    color: #e6d9a8;
+    border-bottom: 1px solid #4a4020;
+}
+.preview-trunc-banner a { color: #ffd76a; }
+.preview-code-wrap {
+    align-self: flex-start;
+    width: 100%;
+    max-height: 70vh;
+    overflow: auto;
+    display: flex;
+    align-items: flex-start;
+    background: #2d2d2d;
+}
+.preview-gutter {
+    flex: 0 0 auto;
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    margin: 0;
+    padding: 1em 0.55em;
+    font-family: Consolas, Monaco, 'Andale Mono', 'Ubuntu Mono', monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    text-align: right;
+    color: #777;
+    background: #2d2d2d;
+    border-right: 1px solid #444;
+    user-select: none;
+    white-space: pre;
+}
+pre.preview-code {
+    align-self: stretch;
+    flex: 1 1 auto;
+    width: auto;
+    margin: 0;
+    max-height: none;
+    overflow: visible;
+    font-size: 12px;
+    background: transparent;
+}
+.preview-img { max-width: 100%; max-height: 70vh; object-fit: contain; }
+.preview-iframe { width: 100%; height: 75vh; border: none; background: #fff; }
+.preview-media { max-width: 100%; max-height: 70vh; }
+.preview-fallback { text-align: center; color: var(--ex-text-muted); }
+.preview-doc { width: 100%; height: 100%; border: 0; background: #fff; }
+
+/* Video (both native-mode <video> and the hls.js wrap) fills the available
+   preview box — letterboxed, centered, aspect preserved — instead of being
+   capped at 70vh and left stranded top-left when the window is maximized.
+   Scoped by tag so the bare .preview-media rule above still governs <audio>,
+   which must not be stretched. */
+.preview-video-wrap .preview-media,
+.preview-body > video.preview-media {
+    width: 100%;
+    height: 100%;
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+    background: #000;
+}
+
+.preview-video-wrap { position: relative; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; background: #000; }
+/* FIX C: lives inline in the modal title bar now (next to the read-only /
+   language badges), not absolutely positioned over the video anymore. */
+.transcode-badge {
+    padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 700;
+    color: var(--ex-badge-fg); background: var(--ex-badge-idle); border: 1px solid rgba(0,0,0,.2);
+}
+.transcode-badge.is-active { background: var(--ex-badge-active); }
+/* FIX D: probed total duration, shown next to the badge in the title bar. */
+.video-duration { font-size: 11px; white-space: nowrap; }
+
+.editor-body {
+    padding: 0;
+    min-height: 70vh;
+    height: 70vh;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+}
+.editor-monaco {
+    flex: 1 1 auto;
+    width: 100%;
+    min-height: 0;
+}
+.editor-quill {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+}
+.editor-quill #quillContainer {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+.editor-quill .ql-toolbar {
+    flex: 0 0 auto;
+    border-radius: 0;
+    border-left: 0;
+    border-right: 0;
+    border-top: 0;
+}
+.editor-quill .ql-container {
+    flex: 1 1 auto;
+    overflow: auto;
+    border: 0;
+    font-family: var(--ex-font);
+    font-size: 14px;
+}
+.editor-quill .ql-editor { min-height: 100%; }
+.dirty-marker { color: var(--ex-accent); margin-left: 4px; }
+
+/* ===== Window host (single modal showing the active preview/editor) ===== */
+/* Give both editor and preview bodies a consistent window height. */
+#windowHost .modal-body { height: 72vh; position: relative; }
+/* When maximized, fill the screen but leave a strip at the bottom for the
+   open-windows taskbar (which floats above the modal — see .taskbar-floating). */
+#windowHost .modal-fullscreen .modal-content { display: flex; flex-direction: column; height: calc(100vh - 42px); }
+#windowHost .modal-fullscreen .modal-body { flex: 1 1 auto; min-height: 0; height: auto; }
+
+.props-table th { width: 35%; color: var(--ex-text-muted); font-weight: normal; }
+.props-table td { word-break: break-all; }
+
+/* Output pane (custom action streaming) */
+.output-pane {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: #1e1e1e;
+    color: #d4d4d4;
+    font-family: var(--ex-mono);
+    font-size: 12px;
+}
+
+.output-pane-header {
+    padding: 6px 12px;
+    background: #2d2d2d;
+    border-bottom: 1px solid #444;
+    color: #ccc;
+    display: flex;
+    justify-content: space-between;
+    font-size: 13px;
+}
+
+.output-pane-body {
+    flex: 1 1 auto;
+    overflow: auto;
+    padding: 8px 12px;
+    white-space: pre-wrap;
+    word-break: break-all;
+    /* Don't let the browser re-anchor scroll position when old lines are trimmed
+       off the top (outputMaxLines cap) — auto-scroll owns the position. */
+    overflow-anchor: none;
+}
+
+.output-pane-status {
+    border-top: 1px solid #444;
+    padding: 4px 12px;
+    background: #2d2d2d;
+    font-size: 11px;
+    color: #999;
+    display: flex;
+    justify-content: space-between;
+}
+
+/* Drop-target highlight */
+.file-list-wrap.drag-over { outline: 2px dashed var(--ex-accent); outline-offset: -4px; }
+/* Folder row highlighted as a drop-into target */
+.file-list tr.drag-over-row > td {
+    background: var(--bs-primary, #0d6efd) !important;
+    color: #fff;
+}
+.file-list tr.drag-over-row > td .file-name,
+.file-list tr.drag-over-row > td .symlink-target { color: #fff; }
+
+/* Smaller alert */
+.alert-sm { padding: 4px 8px; font-size: 13px; }
+
+/* Misc small overrides */
+.dropdown-menu { font-size: 13px; }
+.dropdown-item input[type="radio"],
+.dropdown-item input[type="checkbox"] { margin-right: 6px; }
+
+/* Scrollbars — modest styling */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.2); border-radius: 5px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(0,0,0,0.35); }
+
+/* ====== Tab git badge ====== */
+.tab-git-badge {
+    color: var(--ex-accent);
+    font-weight: bold;
+    margin-right: 2px;
+    font-size: 12px;
+}
+
+.tab-admin-badge {
+    display: inline-block;
+    margin: 0 2px;
+    padding: 0 4px;
+    border-radius: 4px;
+    font-size: 9px;
+    line-height: 14px;
+    font-weight: 600;
+    letter-spacing: .03em;
+    text-transform: uppercase;
+    color: #e5c07b;
+    background: rgba(229, 192, 123, .16);
+    border: 1px solid rgba(229, 192, 123, .45);
+    vertical-align: middle;
+}
+
+/* ====== Repo strip (current-repo bar) ====== */
+.repo-strip {
+    display: flex;
+    align-items: center;
+    padding: 4px 8px;
+    background: #eef5ff;
+    border-bottom: 1px solid var(--ex-border);
+    font-size: 13px;
+    gap: 6px;
+}
+.repo-strip-branch { display: flex; align-items: center; gap: 4px; }
+
+/* ====== GitHub panel ====== */
+.gh-panel .modal-body { padding: 12px; }
+.gh-repo-list-wrap { display: flex; flex-direction: column; max-height: 70vh; }
+.gh-repo-list {
+    border: 1px solid var(--ex-border);
+    border-radius: 3px;
+    overflow-y: auto;
+    flex: 1 1 auto;
+    min-height: 400px;
+    max-height: 65vh;
+}
+.gh-repo-item {
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--ex-border);
+    cursor: pointer;
+    font-size: 12px;
+}
+.gh-repo-item:hover { background: var(--ex-bg-alt); }
+.gh-repo-item.active { background: var(--ex-selected); border-left: 3px solid var(--ex-accent); padding-left: 7px; }
+.gh-repo-name { font-weight: 600; font-size: 13px; }
+.gh-repo-meta { display: flex; gap: 8px; color: var(--ex-text-muted); font-size: 11px; margin-top: 2px; flex-wrap: wrap; }
+
+.gh-repo-detail { border-left: 1px solid var(--ex-border); padding-left: 12px; max-height: 70vh; overflow-y: auto; }
+.gh-branches-wrap { max-height: 60vh; overflow-y: auto; }
+.gh-branch-table td { padding: 4px 8px; vertical-align: middle; }
+
+/* ====== Commit browser ====== */
+.commit-browser-body { height: calc(100vh - 60px); }
+.cb-grid {
+    display: grid;
+    grid-template-columns: 360px 320px 1fr;
+    height: 100%;
+}
+.cb-col { display: flex; flex-direction: column; border-right: 1px solid var(--ex-border); min-width: 0; }
+.cb-col:last-child { border-right: none; }
+.cb-col-header { background: var(--ex-bg-alt); border-bottom: 1px solid var(--ex-border); padding: 6px 10px; font-weight: 600; font-size: 12px; text-transform: uppercase; color: var(--ex-text-muted); }
+.cb-list { flex: 1 1 auto; overflow-y: auto; }
+.cb-commit, .cb-file {
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--ex-border);
+    cursor: pointer;
+    font-size: 12px;
+}
+.cb-commit:hover, .cb-file:hover { background: var(--ex-bg-alt); }
+.cb-commit.active, .cb-file.active { background: var(--ex-selected); }
+.cb-commit-subject { font-weight: 500; }
+.cb-commit-meta { display: flex; gap: 8px; color: var(--ex-text-muted); font-size: 11px; margin-top: 2px; }
+.cb-file-path { font-family: var(--ex-mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cb-file-stats { display: flex; gap: 8px; font-family: var(--ex-mono); font-size: 11px; margin-top: 2px; }
+.cb-diff-container { flex: 1 1 auto; overflow: auto; padding: 0; background: #fff; }
+.cb-diff-container .d2h-wrapper { font-size: 12px; }
+
+/* ====== Publish strip (folder not version-controlled) ====== */
+.publish-strip {
+    display: flex;
+    align-items: center;
+    padding: 4px 8px;
+    background: #f6f8fa;
+    border-bottom: 1px solid var(--ex-border);
+    font-size: 13px;
+    gap: 6px;
+}
+
+/* ====== DARK THEME ====== */
+/* Bootstrap 5.3 dark mode is enabled via data-bs-theme="dark" on <html>; we
+   override our custom --ex-* vars in the same selector so the rest of the UI
+   follows. */
+[data-bs-theme="dark"] {
+    --ex-bg: #1b1d21;
+    --ex-bg-alt: #292d31;
+    --ex-bg-tab: #2b2e33;
+    --ex-bg-tab-active: #1b1d21;
+    --ex-border: #444649;
+    --ex-border-strong: #5d6063;
+    --ex-text: #f0f0f0;
+    --ex-text-muted: #a6a6a6;
+    --ex-accent: #75b6fd;
+    --ex-accent-hover: #aedaff;
+    --ex-selected: #1e3a5f;
+    --ex-selected-border: #75b6fd;
+    --ex-danger: #fb6e6e;
+    --ex-warning: #f0ab00;
+    --ex-success: #5cb85c;
+    --ex-badge-fg: #0b0b0b;
+    --ex-badge-idle: #9ca3af;
+    --ex-badge-active: #22c55e;
+}
+
+[data-bs-theme="dark"] body { background: var(--ex-bg); color: var(--ex-text); }
+
+[data-bs-theme="dark"] .search-results-bar {
+    background: #3d3416;
+    border-bottom-color: var(--ex-warning);
+}
+[data-bs-theme="dark"] .repo-strip { background: #1e2b40; }
+[data-bs-theme="dark"] .publish-strip { background: #25272b; }
+
+[data-bs-theme="dark"] .tab.active { background: var(--ex-bg-tab-active); }
+[data-bs-theme="dark"] .file-list tbody tr:hover { background: #2f3338; }
+[data-bs-theme="dark"] .file-list tbody tr.selected { background: var(--ex-selected); }
+[data-bs-theme="dark"] .file-list tbody tr.selected:hover { background: #264d7a; }
+
+[data-bs-theme="dark"] .context-menu { background: #292d31; border-color: var(--ex-border-strong); }
+[data-bs-theme="dark"] .ctx-list li:hover:not(.ctx-sep):not(.disabled) {
+    background: var(--ex-selected); color: var(--ex-accent-hover);
+}
+
+[data-bs-theme="dark"] .ops-tray { background: var(--ex-bg); border-color: var(--ex-border-strong); }
+[data-bs-theme="dark"] .op-row.op-error { background: #4a1d1a; }
+
+[data-bs-theme="dark"] .loading-overlay { background: rgba(27,29,33,0.7); }
+[data-bs-theme="dark"] .preview-body { background: var(--ex-bg-alt); }
+[data-bs-theme="dark"] .preview-iframe { background: #fff; }  /* PDF/HTML viewer stays light */
+
+/* Quill (no native dark theme — override colors) */
+[data-bs-theme="dark"] .ql-toolbar.ql-snow {
+    background: var(--ex-bg-alt);
+    border-color: var(--ex-border);
+}
+[data-bs-theme="dark"] .ql-toolbar.ql-snow .ql-stroke { stroke: var(--ex-text); }
+[data-bs-theme="dark"] .ql-toolbar.ql-snow .ql-fill { fill: var(--ex-text); }
+[data-bs-theme="dark"] .ql-toolbar.ql-snow .ql-picker-label { color: var(--ex-text); }
+[data-bs-theme="dark"] .ql-toolbar.ql-snow button:hover .ql-stroke,
+[data-bs-theme="dark"] .ql-toolbar.ql-snow button.ql-active .ql-stroke { stroke: var(--ex-accent); }
+[data-bs-theme="dark"] .ql-toolbar.ql-snow button:hover .ql-fill,
+[data-bs-theme="dark"] .ql-toolbar.ql-snow button.ql-active .ql-fill { fill: var(--ex-accent); }
+[data-bs-theme="dark"] .ql-container.ql-snow { border-color: var(--ex-border); }
+[data-bs-theme="dark"] .ql-editor { background: var(--ex-bg); color: var(--ex-text); }
+[data-bs-theme="dark"] .ql-snow .ql-picker-options { background: var(--ex-bg-alt); border-color: var(--ex-border); }
+
+/* diff2html — flip backgrounds/text */
+[data-bs-theme="dark"] .cb-diff-container { background: var(--ex-bg); }
+[data-bs-theme="dark"] .d2h-file-wrapper { border-color: var(--ex-border); }
+[data-bs-theme="dark"] .d2h-file-header { background: var(--ex-bg-alt); border-color: var(--ex-border); color: var(--ex-text); }
+[data-bs-theme="dark"] .d2h-code-line, [data-bs-theme="dark"] .d2h-code-side-line { color: var(--ex-text); }
+[data-bs-theme="dark"] .d2h-code-linenumber, [data-bs-theme="dark"] .d2h-code-side-linenumber {
+    background: var(--ex-bg-alt); color: var(--ex-text-muted); border-color: var(--ex-border);
+}
+[data-bs-theme="dark"] .d2h-ins, [data-bs-theme="dark"] .d2h-ins .d2h-code-line-ctn { background: #143b1f; color: #b3ffb3; }
+[data-bs-theme="dark"] .d2h-del, [data-bs-theme="dark"] .d2h-del .d2h-code-line-ctn { background: #4a1f1f; color: #ffb3b3; }
+[data-bs-theme="dark"] .d2h-cntx, [data-bs-theme="dark"] .d2h-cntx .d2h-code-line-ctn { background: var(--ex-bg); }
+[data-bs-theme="dark"] .d2h-info { background: #1f3550; color: #a8d5ff; }
+[data-bs-theme="dark"] td.d2h-emptyplaceholder, [data-bs-theme="dark"] td.d2h-emptyplaceholder.d2h-cntx { background: #232529; }
+/* Inline word-level highlights — diff2html keeps light-theme pink/green here,
+   which makes the changed words unreadable on the dark line backgrounds. */
+[data-bs-theme="dark"] .d2h-code-line ins,
+[data-bs-theme="dark"] .d2h-code-side-line ins {
+    background-color: rgba(46, 160, 67, 0.55);
+    color: #fff;
+    text-decoration: none;
+}
+[data-bs-theme="dark"] .d2h-code-line del,
+[data-bs-theme="dark"] .d2h-code-side-line del {
+    background-color: rgba(248, 81, 73, 0.5);
+    color: #fff;
+    text-decoration: none;
+}
+
+/* Modal overrides for dark */
+[data-bs-theme="dark"] .modal-header { background: var(--ex-bg-alt); border-color: var(--ex-border); }
+[data-bs-theme="dark"] .gh-repo-item:hover { background: #2f3338; }
+[data-bs-theme="dark"] .gh-repo-item.active { background: var(--ex-selected); }
+
+/* ===== Integrated terminal split pane (v1.1) ===== */
+.tab-split-body {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: row;
+    min-height: 0;
+    overflow: hidden;
+}
+/* Dual-pane → terminal docks at the bottom (horizontal split) */
+.tab-split-body.dual-horizontal {
+    flex-direction: column;
+}
+.tab-split-body > .file-list-wrap {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+/* Panes container holds 1 or 2 file panes side by side */
+.panes-container {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: row;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+}
+.file-pane {
+    flex: 1 1 0;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+}
+.file-pane.dual {
+    border-right: 1px solid var(--ex-border);
+}
+.file-pane.dual:last-child {
+    border-right: none;
+}
+.file-pane .file-list-wrap {
+    flex: 1 1 auto;
+    min-height: 0;
+}
+.file-pane.dual.pane-active {
+    box-shadow: inset 0 2px 0 0 var(--bs-primary, #0d6efd);
+}
+.file-pane.dual:not(.pane-active) {
+    opacity: 0.92;
+}
+.pane-head {
+    display: flex;
+    align-items: center;
+    padding: 3px 6px;
+    background: var(--ex-bg-alt);
+    border-bottom: 1px solid var(--ex-border);
+    flex-shrink: 0;
+    gap: 4px;
+}
+.pane-head .pane-path {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: 12px;
+}
+.term-resizer {
+    width: 5px;
+    background: var(--ex-border);
+    cursor: col-resize;
+    flex-shrink: 0;
+    user-select: none;
+    transition: background 0.15s;
+}
+/* Horizontal resizer (dual-pane bottom terminal) */
+.term-resizer.horizontal {
+    width: auto;
+    height: 5px;
+    cursor: row-resize;
+}
+.term-resizer:hover,
+.term-resizer:active {
+    background: var(--bs-primary, #0d6efd);
+}
+.term-pane {
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    background: #000;
+    min-width: 220px;
+    overflow: hidden;
+}
+/* In dual (horizontal) mode the terminal pane spans full width, fixed height */
+.tab-split-body.dual-horizontal > .term-pane {
+    min-width: 0;
+    width: 100% !important;
+}
+.term-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 4px 8px;
+    background: var(--ex-bg-alt);
+    border-bottom: 1px solid var(--ex-border);
+    font-size: 12px;
+    color: var(--ex-text);
+    flex-shrink: 0;
+    height: 28px;
+}
+.term-header-title {
+    font-family: var(--bs-font-monospace, monospace);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--ex-text-muted);
+}
+.term-header-actions {
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
+}
+.term-header-actions button {
+    padding: 0 6px;
+    line-height: 1.2;
+    font-size: 14px;
+}
+.term-container {
+    flex: 1 1 auto;
+    min-height: 0;
+    padding: 4px;
+    overflow: hidden;
+    background: #000;
+}
+[data-bs-theme="dark"] .term-container {
+    background: #0d1117;
+}
+.term-container .xterm,
+.term-container .xterm-viewport,
+.term-container .xterm-screen {
+    height: 100% !important;
+}
+
+/* ===== Terminal sub-tabs (v1.2) ===== */
+.term-stack {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+    height: 100%;
+}
+.term-tabbar {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 3px 4px 0 4px;
+    background: var(--ex-bg-alt);
+    border-bottom: 1px solid var(--ex-border);
+    flex-shrink: 0;
+    overflow-x: auto;
+    scrollbar-width: thin;
+    min-height: 30px;
+}
+.term-subtab-list {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+}
+.term-subtab {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 8px;
+    background: transparent;
+    border: 1px solid transparent;
+    border-bottom: none;
+    border-radius: 4px 4px 0 0;
+    font-size: 12px;
+    color: var(--ex-text-muted);
+    cursor: pointer;
+    max-width: 200px;
+    flex-shrink: 0;
+    user-select: none;
+    transition: background 0.1s;
+}
+.term-subtab:hover {
+    background: var(--ex-bg-hover, rgba(0,0,0,0.05));
+    color: var(--ex-text);
+}
+.term-subtab.active {
+    background: var(--ex-bg);
+    border-color: var(--ex-border);
+    color: var(--ex-text);
+}
+.term-subtab-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--bs-font-monospace, monospace);
+}
+.term-subtab-close {
+    background: transparent;
+    border: none;
+    padding: 0 4px;
+    color: inherit;
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+    border-radius: 3px;
+    opacity: 0.6;
+}
+.term-subtab-close:hover {
+    background: var(--ex-bg-hover, rgba(0,0,0,0.1));
+    opacity: 1;
+}
+.term-subtab-add {
+    background: transparent;
+    border: 1px dashed var(--ex-border);
+    padding: 2px 8px;
+    color: var(--ex-text-muted);
+    font-size: 14px;
+    cursor: pointer;
+    border-radius: 4px;
+    margin-left: 4px;
+    flex-shrink: 0;
+}
+.term-subtab-add:hover {
+    background: var(--ex-bg-hover, rgba(0,0,0,0.05));
+    color: var(--ex-text);
+    border-style: solid;
+}
+.term-tabbar-spacer { flex: 1; min-width: 8px; }
+.term-tabbar-actions {
+    flex-shrink: 0;
+    padding: 0 4px;
+}
+.term-tabbar-actions button {
+    background: transparent;
+    border: none;
+    padding: 2px 6px;
+    color: var(--ex-text-muted);
+    cursor: pointer;
+    font-size: 14px;
+    border-radius: 3px;
+}
+.term-tabbar-actions button:hover {
+    background: var(--ex-bg-hover, rgba(0,0,0,0.05));
+    color: var(--ex-text);
+}
+.term-stack .term-containers {
+    flex: 1 1 auto;
+    min-height: 0;
+    position: relative;
+    background: #000;
+}
+[data-bs-theme="dark"] .term-stack .term-containers {
+    background: #0d1117;
+}
+.term-stack .term-containers .term-container {
+    position: absolute;
+    inset: 0;
+    padding: 4px;
+    overflow: hidden;
+}
+
+/* Terminal-kind main tab (full-pane) */
+.terminal-tab-body {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+.terminal-tab-body .term-stack {
+    flex: 1;
+}
+
+/* Cached repos dropdown */
+.cached-repos-dropdown {
+    min-width: 300px;
+    max-height: 400px;
+    overflow-y: auto;
+}
+.cached-repos-dropdown .dropdown-item {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    font-family: var(--bs-font-monospace, monospace);
+    font-size: 12px;
+}
+.cached-repos-dropdown .dropdown-item .repo-title {
+    font-family: var(--ex-font);
+    font-weight: 600;
+    font-size: 13px;
+}
+.cached-repos-dropdown .dropdown-item .repo-key {
+    color: var(--ex-text-muted);
+    font-size: 11px;
+}
+.cached-repos-dropdown .dropdown-item .repo-path {
+    color: var(--ex-text-muted);
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.cached-repo-row {
+    display: flex;
+    align-items: center;
+}
+.cached-repo-row .dropdown-item { flex: 1; min-width: 0; }
+.cached-repo-btn {
+    flex: 0 0 auto;
+    background: none;
+    border: none;
+    color: var(--ex-text-muted);
+    cursor: pointer;
+    padding: 2px 8px;
+    font-size: 12px;
+    border-radius: 4px;
+}
+.cached-repo-btn:hover { background: var(--bs-secondary-bg, #373c44); color: var(--ex-text); }
+.cached-repo-forget:hover { background: #e81123; color: #fff; }
+
+/* Branch switcher dropdown in the repo strip */
+.branch-dd-toggle {
+    text-decoration: none;
+    color: inherit;
+    cursor: pointer;
+}
+.branch-dd-toggle:hover { color: var(--ex-accent, #539bf5); }
+.branch-dd-caret { font-size: 9px; opacity: 0.7; }
+.branch-dd-menu {
+    max-height: 360px;
+    overflow-y: auto;
+    min-width: 220px;
+    font-size: 13px;
+}
+.branch-copy-item { display: flex; flex-direction: column; line-height: 1.25; }
+.branch-copy-title { font-weight: 500; }
+.branch-copy-path {
+    font-size: 11px;
+    color: var(--ex-text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.branch-copy-item.active .branch-copy-path { color: rgba(255,255,255,0.75); }
+
+/* GitHub panel — local copies listed under each branch name */
+.gh-branch-copies { margin-top: 4px; display: flex; flex-direction: column; gap: 2px; }
+.gh-branch-copy {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 6px;
+    font-size: 11px;
+    text-decoration: none;
+    color: var(--ex-accent, #539bf5);
+    max-width: 100%;
+}
+.gh-branch-copy:hover { text-decoration: underline; }
+.gh-branch-copy-ico { opacity: 0.8; }
+.gh-branch-copy-path { color: var(--ex-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Directory picker */
+.dir-picker-list {
+    border: 1px solid var(--ex-border);
+    border-radius: 6px;
+    max-height: 50vh;
+    overflow-y: auto;
+}
+.dir-picker-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    cursor: pointer;
+    border-bottom: 1px solid var(--ex-border);
+}
+.dir-picker-item:last-child { border-bottom: none; }
+.dir-picker-item:hover { background: var(--bs-secondary-bg, #373c44); }
+.dir-picker-ico { opacity: 0.85; }
+
+/* GitHub panel — local copies list */
+.gh-copy-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 4px;
+    border-bottom: 1px solid var(--ex-border);
+}
+.gh-copy-info { flex: 1; min-width: 0; }
+.gh-copy-info > div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gh-copy-info code { font-size: 11px; color: var(--ex-text-muted); }
+.gh-copy-actions { display: flex; gap: 4px; flex: 0 0 auto; }
+
+/* v1.2.1 — Make terminal-related buttons more obvious */
+.tab-new-term {
+    color: var(--ex-text-muted) !important;
+    font-family: monospace;
+    font-size: 14px;
+    padding: 0 8px !important;
+    margin-left: 2px;
+    border-left: 1px solid var(--ex-border) !important;
+    border-radius: 0;
+}
+.tab-new-term:hover {
+    color: var(--ex-text) !important;
+    background: var(--ex-bg-hover, rgba(0,0,0,0.05));
+}
+/* Make the term-subtab-add (+ inside the terminal stack) much more visible */
+.term-subtab-add {
+    background: transparent;
+    border: 1px solid var(--ex-border);
+    padding: 3px 12px;
+    color: var(--ex-text-muted);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    border-radius: 4px;
+    margin-left: 6px;
+    flex-shrink: 0;
+    line-height: 1.5;
+}
+.term-subtab-add:hover {
+    background: var(--bs-primary, #0d6efd);
+    color: #fff;
+    border-color: var(--bs-primary, #0d6efd);
+}
+
+/* ===== Terminal sub-tab path popover (v1.5) ===== */
+.term-path-pop {
+    position: fixed;
+    z-index: 3000;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    max-width: 520px;
+    padding: 6px 8px;
+    background: #1f2328;
+    color: #e6edf3;
+    border: 1px solid var(--ex-border);
+    border-radius: 6px;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.4);
+    font-size: 12px;
+}
+[data-bs-theme="light"] .term-path-pop {
+    background: #2b2f36;
+    color: #fff;
+}
+.term-path-pop-text {
+    color: inherit;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 400px;
+    font-family: var(--bs-font-monospace, monospace);
+}
+.term-path-pop-copy {
+    flex-shrink: 0;
+    padding: 1px 8px;
+    font-size: 11px;
+    white-space: nowrap;
+}
+
+[x-cloak] { display: none !important; }
+
+/* ===== Custom actions JSON/YAML editor (v1.7) ===== */
+.actions-code {
+    width: 100%;
+    min-height: 360px;
+    resize: vertical;
+    font-size: 12.5px;
+    line-height: 1.5;
+    tab-size: 2;
+    white-space: pre;
+    overflow-wrap: normal;
+    overflow-x: auto;
+}
+
+/* ===== Version badge (top bar) ===== */
+.explorer-version-badge {
+    display: inline-flex;
+    align-items: center;
+    margin: 0 8px;
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 11.5px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    white-space: nowrap;
+    background: #2563eb;          /* contrasting blue */
+    color: #ffffff;
+    border: 1px solid #1d4ed8;
+}
+[data-bs-theme="light"] .explorer-version-badge {
+    background: #1d4ed8;
+    color: #ffffff;
+    border-color: #1e40af;
+}
+.explorer-version-badge.update-available {
+    background: #16a34a;          /* green = update ready */
+    border-color: #15803d;
+    animation: ex-badge-pulse 1.8s ease-in-out infinite;
+}
+@keyframes ex-badge-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(22, 163, 74, 0.5); }
+    50%      { box-shadow: 0 0 0 4px rgba(22, 163, 74, 0); }
+}
+
+/* ===== Custom actions: large dialog + Monaco editor in code mode (v1.9) ===== */
+.modal-dialog.actions-dialog-code {
+    max-width: 96vw;
+}
+.modal-dialog.actions-dialog-code .modal-content {
+    height: 90vh;
+}
+.modal-dialog.actions-dialog-code .modal-body {
+    display: flex;
+    flex-direction: column;
+}
+.modal-dialog.actions-dialog-code .actions-row {
+    flex: 1 1 auto;
+    min-height: 0;
+}
+.modal-dialog.actions-dialog-code .actions-row > [class^="col-"] {
+    height: 100%;
+}
+.actions-monaco {
+    width: 100%;
+    height: 100%;
+    min-height: 60vh;
+    border: 1px solid var(--ex-border);
+    border-radius: 6px;
+    overflow: hidden;
+}
+.actions-list .btn-link { text-decoration: none; font-size: 14px; line-height: 1; }
+.actions-list .action-move { padding: 2px 5px; font-size: 15px; }
+.actions-list .action-move:disabled { opacity: .3; }
+
+/* Fixed-height dialog with independently scrolling panes (both Form and code
+   modes, both User and System tabs). The nav-tabs, mode toolbar and "+ New
+   action" button stay pinned; only the action list and the editor scroll. */
+#actionsModal .modal-content { height: 90vh; }
+#actionsModal .modal-body { display: flex; flex-direction: column; overflow: hidden; }
+#actionsModal .actions-row { flex: 1 1 auto; min-height: 0; }
+#actionsModal .actions-row > [class^="col-"] { height: 100%; }
+#actionsModal .actions-left { display: flex; flex-direction: column; }
+#actionsModal .actions-list-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+#actionsModal .actions-right { overflow-y: auto; }
+.actions-section-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    font-weight: 700;
+    color: var(--ex-muted, #8b93a0);
+    margin: 4px 2px;
+}
+
+/* ===== User/system badges on custom-action menu items ===== */
+.ctx-action-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+.ctx-action-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ctx-action-item.ctx-action-disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+.ctx-action-item.ctx-action-disabled:hover { background: transparent; }
+.ca-badge {
+    flex-shrink: 0;
+    font-size: 9.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    line-height: 1.4;
+}
+.ca-badge-user   { background: #16a34a; color: #fff; }   /* green */
+.ca-badge-system { background: #2563eb; color: #fff; }   /* blue */
+
+/* Context-menu submenus (used when there are more than 3 custom actions) */
+.ctx-submenu { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.ctx-submenu-arrow { flex-shrink: 0; opacity: 0.7; font-size: 11px; }
+.ctx-submenu > .ctx-flyout {
+    display: none;
+    position: absolute;
+    left: 100%;
+    top: -5px;                       /* line up with the parent row past the menu padding */
+    min-width: 220px;
+    max-height: min(60vh, 420px);
+    overflow-y: auto;
+    list-style: none;
+    margin: 0;
+    padding: 4px 0;
+    background: var(--ex-bg);
+    border: 1px solid var(--ex-border-strong);
+    border-radius: 3px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.18);
+    z-index: 3001;
+}
+.ctx-submenu.fly-left > .ctx-flyout { left: auto; right: 100%; }
+.ctx-submenu:hover > .ctx-flyout,
+.ctx-submenu:focus-within > .ctx-flyout { display: block; }
+.ctx-flyout li { padding: 4px 16px; cursor: pointer; position: relative; white-space: nowrap; }
+.ctx-flyout li:hover:not(.ctx-action-disabled) { background: var(--ex-selected); color: var(--ex-accent-hover); }
+[data-bs-theme="dark"] .ctx-submenu > .ctx-flyout { background: #292d31; border-color: var(--ex-border-strong); }
+[data-bs-theme="dark"] .ctx-flyout li:hover:not(.ctx-action-disabled) { background: var(--ex-selected); color: var(--ex-accent-hover); }
+
+/* ===== tmux session manager ===== */
+.tmux-wrap { position: relative; display: inline-flex; align-items: stretch; }
+.tmux-btn-active { color: var(--ex-accent) !important; }
+.tmux-panel {
+    position: fixed;
+    z-index: 3000;
+    width: 300px;
+    max-width: 92vw;
+    background: var(--ex-bg);
+    border: 1px solid var(--ex-border-strong);
+    border-radius: 4px;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.22);
+    overflow: hidden;
+    font-size: 13px;
+}
+.tmux-panel-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 7px 10px; font-weight: 600;
+    border-bottom: 1px solid var(--ex-border);
+}
+.tmux-icon-btn {
+    background: none; border: none; color: var(--ex-text-muted);
+    cursor: pointer; font-size: 15px; line-height: 1; padding: 0 4px;
+}
+.tmux-icon-btn:hover { color: var(--ex-accent); }
+.tmux-panel-body { max-height: 320px; overflow-y: auto; padding: 4px 0; }
+.tmux-empty { padding: 10px 12px; color: var(--ex-text-muted); }
+.tmux-row { display: flex; align-items: stretch; }
+.tmux-row:hover { background: var(--ex-selected); }
+.tmux-row-main {
+    flex: 1 1 auto; min-width: 0; text-align: left;
+    background: none; border: none; cursor: pointer; color: inherit;
+    padding: 6px 12px; display: flex; flex-direction: column; gap: 1px;
+}
+.tmux-row-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tmux-row-meta { font-size: 11px; color: var(--ex-text-muted); }
+.tmux-row-open {
+    align-self: flex-start; margin-top: 2px; font-size: 9.5px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.4px; padding: 1px 6px;
+    border-radius: 999px; background: #16a34a; color: #fff;
+}
+.tmux-kill {
+    flex: 0 0 auto; background: none; border: none; cursor: pointer;
+    color: var(--ex-text-muted); padding: 0 12px; font-size: 12px;
+}
+.tmux-kill:hover { color: #ef4444; }
+.tmux-panel-foot { border-top: 1px solid var(--ex-border); padding: 6px; }
+.tmux-new {
+    width: 100%; background: none; border: 1px dashed var(--ex-border-strong);
+    color: var(--ex-accent); cursor: pointer; border-radius: 4px; padding: 6px;
+}
+.tmux-new:hover { background: var(--ex-selected); }
+.tmux-conf { margin-top: 6px; border-style: solid; }
+[data-bs-theme="dark"] .tmux-panel { background: #292d31; border-color: var(--ex-border-strong); }
+
+/* ===== Windows-style window controls (preview / editor headers) ===== */
+.win-controls { display: inline-flex; align-items: center; gap: 2px; }
+.win-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 38px;
+    height: 28px;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: var(--bs-body-color, #c9d1d9);
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background-color 0.12s ease, color 0.12s ease;
+}
+.win-btn:hover { background: rgba(127, 127, 127, 0.22); }
+.win-btn:active { background: rgba(127, 127, 127, 0.32); }
+.win-btn svg { display: block; }
+.win-btn-close:hover { background: #e81123; color: #fff; }   /* classic Windows close-hover red */
+.win-btn-close:active { background: #f1707a; color: #fff; }
+
+/* ===== Minimized-windows taskbar ===== */
+.explorer-taskbar {
+    flex: 0 0 auto;                 /* docked bar at the bottom of the layout */
+    position: relative;
+    z-index: 1060;                  /* stay above the host modal + backdrop */
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    padding: 4px 8px;
+    background: var(--ex-bg-alt);
+    border-top: 1px solid var(--ex-border);
+    overflow-x: auto;               /* scroll if many windows are open */
+    overflow-y: hidden;
+    white-space: nowrap;
+    min-height: 34px;
+}
+/* When a window is maximized (host modal is fullscreen), the docked taskbar
+   would be hidden behind the modal — float it above instead so it stays
+   visible and clickable. The fullscreen content is shortened by 42px to match. */
+.explorer-taskbar.taskbar-floating {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 1080;                  /* above the Bootstrap modal (1055) + backdrop (1050) */
+}
+.taskbar-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex: 0 0 auto;
+    background: var(--bs-tertiary-bg, #2b2f36);
+    border: 1px solid var(--bs-border-color, #444c56);
+    border-radius: 6px;
+    padding: 4px 6px 4px 10px;
+    cursor: pointer;
+    max-width: 240px;
+    user-select: none;
+}
+.taskbar-item:hover { background: var(--bs-secondary-bg, #373c44); }
+.taskbar-item.active {
+    border-color: var(--ex-accent, #539bf5);
+    box-shadow: 0 0 0 1px var(--ex-accent, #539bf5), 0 2px 10px rgba(0, 0, 0, 0.3);
+}
+.taskbar-ico { font-size: 13px; line-height: 1; }
+.taskbar-label {
+    font-size: 13px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 170px;
+}
+.taskbar-close {
+    border: none;
+    background: transparent;
+    color: var(--bs-secondary-color, #9aa4af);
+    cursor: pointer;
+    border-radius: 4px;
+    width: 18px;
+    height: 18px;
+    line-height: 1;
+    padding: 0;
+    font-size: 11px;
+    flex: 0 0 auto;
+}
+.taskbar-close:hover { background: #e81123; color: #fff; }
+
+/* ───── Mounts / fstab editor ───────────────────────────────────────────── */
+.mounts-toolbar { display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; }
+.mounts-mountafter { font-size: .85rem; color: var(--ex-text-muted); white-space: nowrap; }
+.mounts-loading, .mounts-empty { padding: 1rem; text-align: center; color: var(--ex-text-muted); }
+.mounts-table-wrap { max-height: 48vh; overflow: auto; border: 1px solid var(--ex-border); border-radius: 6px; }
+.mounts-table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+.mounts-table th, .mounts-table td { padding: .25rem .4rem; border-bottom: 1px solid var(--ex-border); vertical-align: middle; }
+.mounts-table tbody tr:last-child td { border-bottom: 0; }
+.mounts-table thead th { position: sticky; top: 0; background: var(--ex-bg-alt); color: var(--ex-text-muted); font-weight: 600; z-index: 1; }
+.mounts-table input { min-width: 5rem; }
+.mounts-table input.mt-type { min-width: 4rem; }
+.mounts-table .mt-num { width: 4.5rem; }
+.mounts-table .mt-num input { width: 4rem; min-width: 0; text-align: center; }
+.mounts-table .mt-state { width: 1.6rem; text-align: center; }
+.mounts-table .mt-rm { width: 1.8rem; text-align: center; }
+.mt-dot { font-size: .8rem; line-height: 1; }
+.mt-dot.mt-on { color: #5cd66b; }
+.mt-dot.mt-off { color: var(--ex-text-muted); }
+.mt-dot.mt-na { color: var(--ex-border-strong); }
+.mounts-rm { background: none; border: none; color: var(--ex-text-muted); cursor: pointer; padding: 0 .2rem; line-height: 1; }
+.mounts-rm:hover { color: #e06c75; }
+.mounts-raw { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .85rem; white-space: pre; overflow-wrap: normal; overflow-x: auto; }
+.mounts-results-head { font-size: .8rem; color: var(--ex-text-muted); margin-bottom: .25rem; }
+.mounts-result { display: flex; align-items: center; gap: .4rem; font-size: .82rem; padding: .1rem 0; }
+.mounts-result .mr-icon { width: 1rem; text-align: center; }
+.mounts-result.ok .mr-icon { color: #5cd66b; }
+.mounts-result.bad .mr-icon { color: #e06c75; }
+.mounts-result .mr-err { color: #e06c75; opacity: .85; }
+
+/* Mounts — view tabs, live table, ad-hoc mount, mount-now button */
+.mounts-tabs { display: flex; gap: .25rem; border-bottom: 1px solid var(--ex-border); }
+.mounts-tab { background: none; border: none; border-bottom: 2px solid transparent; color: var(--ex-text-muted); padding: .3rem .65rem; cursor: pointer; font-size: .9rem; }
+.mounts-tab:hover { color: var(--ex-text); }
+.mounts-tab.active { color: var(--ex-accent); border-bottom-color: var(--ex-accent); }
+.mounts-tab-count { display: inline-block; min-width: 1.2em; padding: 0 .35em; margin-left: .35em; border-radius: 9px; background: var(--ex-bg-alt); color: var(--ex-text-muted); font-size: .72rem; }
+.mounts-adhoc { border: 1px solid var(--ex-border); border-radius: 6px; padding: .5rem; }
+.mounts-adhoc-grid { display: grid; grid-template-columns: 1.4fr 1.4fr .9fr 1.2fr auto; gap: .4rem; align-items: center; }
+.mounts-live .ml-target code { font-size: .82rem; }
+.mounts-live .ml-source, .mounts-live .ml-opts { max-width: 14rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mounts-live .mt-act { width: auto; white-space: nowrap; text-align: right; }
+.ml-actions { display: inline-flex; gap: .3rem; }
+.ml-sys { font-size: .72rem; color: var(--ex-text-muted); border: 1px solid var(--ex-border); border-radius: 4px; padding: 0 .35rem; }
+.btn-xs { padding: .05rem .4rem; font-size: .75rem; line-height: 1.5; border-radius: 4px; }
+.mt-mountbtn { background: none; border: none; cursor: pointer; padding: 0; line-height: 1; }
+.mt-mountbtn:hover { color: var(--ex-accent); }
+
+/* Mounts — SMB/CIFS network share form + creds manager */
+.cifs-form { display: flex; flex-direction: column; gap: .4rem; }
+.cifs-row { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
+.cifs-row > label { min-width: 5rem; color: var(--ex-text-muted); font-size: .85rem; margin: 0; }
+.cifs-row .form-control, .cifs-row .form-select { flex: 1; min-width: 8rem; }
+.cifs-row .cifs-sm { flex: 0 0 5rem; min-width: 0; }
+.cifs-opts { gap: 1rem; }
+.cifs-opts2 > label { min-width: 0; margin-left: .5rem; }
+.cifs-hint { color: var(--ex-text-muted); font-size: .8rem; }
+.cifs-actions { margin-top: .3rem; }
+.cifs-hr { border-color: var(--ex-border); margin: .75rem 0; }
+.cifs-creds-head { font-size: .85rem; color: var(--ex-text-muted); margin-bottom: .35rem; }
+.cifs-creds-empty { color: var(--ex-text-muted); font-size: .85rem; }
+.cifs-cred { display: flex; align-items: center; gap: .5rem; padding: .15rem 0; }
+
+/* Mounts — SMB discovery status line */
+.cifs-disco-status { color: var(--ex-text-muted); font-size: .8rem; margin-top: -.1rem; }
+
+/* Mounts — discovery result chips */
+.cifs-chips { display: flex; flex-wrap: wrap; gap: .3rem; margin: -.05rem 0 .15rem; }
+.cifs-chip { font-size: .78rem; padding: .1rem .5rem; border-radius: 12px; border: 1px solid var(--ex-border-strong); background: var(--ex-bg-alt); color: var(--ex-text); cursor: pointer; }
+.cifs-chip:hover { border-color: var(--ex-accent); color: var(--ex-accent); }
+
+/* Mounts — smbclient install hint */
+.cifs-install-hint { font-size: .8rem; color: var(--ex-text-muted); margin: -.05rem 0 .2rem; display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; }
+.cifs-install-line { display: inline-flex; align-items: center; gap: .35rem; }
+.cifs-install-cmd { background: var(--ex-bg-alt); border: 1px solid var(--ex-border); border-radius: 4px; padding: .05rem .4rem; color: var(--ex-text); user-select: all; }
+.cifs-copy { background: none; border: 1px solid var(--ex-border); border-radius: 4px; color: var(--ex-text-muted); cursor: pointer; padding: 0 .35rem; line-height: 1.4; }
+.cifs-copy:hover { color: var(--ex-accent); border-color: var(--ex-accent); }
+
+/* Mounts — network-share type selector */
+.cifs-nettype { margin-bottom: .35rem; }
+
+/* GRUB editor */
+.grub-info { font-size: .82rem; color: var(--ex-text-muted); }
+.grub-table .grub-key { width: 38%; }
+.grub-table .grub-key input { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.grub-result-pre { max-height: 9rem; overflow: auto; background: var(--ex-bg-alt); border: 1px solid var(--ex-border); border-radius: 6px; padding: .4rem .6rem; font-size: .8rem; white-space: pre-wrap; margin: 0; color: var(--ex-text); }
+
+/* Terminal sub-tab-bar: paste-clipboard-image button */
+.term-paste-img {
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    padding: 2px 6px;
+    opacity: .75;
+}
+.term-paste-img:hover { opacity: 1; }
+
+/* HTTP-safe "paste your image here" fallback overlay */
+.paste-img-overlay {
+    position: fixed; inset: 0; z-index: 3000;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(0, 0, 0, .45);
+}
+.paste-img-box {
+    background: var(--bs-body-bg, #fff);
+    color: var(--bs-body-color, #1f2328);
+    border: 1px solid var(--bs-border-color, #ccc);
+    border-radius: 8px;
+    padding: 18px 20px;
+    width: min(420px, 90vw);
+    box-shadow: 0 8px 30px rgba(0, 0, 0, .3);
+    text-align: center;
+}
+.paste-img-msg { font-size: 14px; margin-bottom: 10px; }
+.paste-img-target {
+    width: 100%; height: 90px; resize: none;
+    border: 1px dashed var(--bs-border-color, #999);
+    border-radius: 6px;
+    background: transparent; color: inherit;
+    padding: 8px;
+}
+.paste-img-hint { font-size: 12px; opacity: .6; margin-top: 8px; }
+
+/* v1.1.4 — differentiate plain-terminal vs tmux panes by accent colour.
+   Scoped to the kind class so the base .term-tabbar / .term-subtab rules are
+   left intact; only a left border + active-sub-tab underline are added. */
+.term-stack--plain { --term-accent: #3b82f6; }
+.term-stack--tmux  { --term-accent: #16a34a; }
+[data-bs-theme="dark"] .term-stack--plain { --term-accent: #60a5fa; }
+[data-bs-theme="dark"] .term-stack--tmux  { --term-accent: #22c55e; }
+
+.term-stack--plain > .term-tabbar,
+.term-stack--tmux  > .term-tabbar {
+    border-left: 3px solid var(--term-accent);
+}
+.term-stack--plain .term-subtab.active,
+.term-stack--tmux  .term-subtab.active {
+    box-shadow: inset 0 -2px 0 var(--term-accent);
+    border-color: var(--term-accent);
+}
+
+/* v1.1.4 — enlarge the directory toolbar nav glyphs (← → ↑ ⌂ ⟳) so they're
+   legible; layout and behaviour are unchanged. */
+.toolbar-nav .btn {
+    font-size: 1.15rem;
+    line-height: 1;
+    padding: 0.15rem 0.55rem;
+    font-weight: 600;
+}
+
+/* ===================== Mobile / phone (≤640px) ===================== */
+/* Never let the whole app scroll sideways; wide content scrolls its own box. */
+html, body { max-width: 100%; }
+@media (max-width: 640px) {
+    body { overflow-x: hidden; }
+    /* Toolbar buttons wrap/scroll rather than forcing page width. */
+    .toolbar { flex-wrap: wrap; row-gap: 4px; }
+    /* Phone: pin the toolbar action buttons; only the tab list scrolls, so a
+       long tab title can never cover ▶ Run / ＋ / ⋯. */
+    .tab-bar { overflow-x: hidden; }
+    .tab-list { flex: 1 1 auto; min-width: 0; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    .tab-bar-spacer { display: none; }
+    .tab-new, .tab-new-term, .tab-bar-btn, .toolbar-more { flex: 0 0 auto; }
+
+    /* Wide modal tables → stacked cards: each row becomes a block, each cell a
+       full-width line, action buttons stretch so they're always on-screen. */
+    .mobile-card-table thead { display: none; }
+    .mobile-card-table, .mobile-card-table tbody, .mobile-card-table tr, .mobile-card-table td {
+        display: block; width: 100%;
+    }
+    .mobile-card-table tr {
+        border: 1px solid var(--ex-border); border-radius: 6px;
+        margin-bottom: 8px; padding: 6px 8px;
+    }
+    .mobile-card-table td { border: 0 !important; padding: 3px 0; max-width: 100% !important; }
+    .mobile-card-table td code { white-space: normal; word-break: break-all; max-width: 100% !important; }
+    .mobile-card-table td .btn { width: 100%; }
+    /* Breadcrumbs: scroll instead of forcing page width. */
+    .path-bar, .breadcrumbs { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    .breadcrumbs { flex-wrap: nowrap; white-space: nowrap; }
+
+    /* Labelled cards for the Plugin Manager (values aren't self-describing). */
+    .mobile-card-table td[data-label]::before {
+        content: attr(data-label) ": ";
+        font-weight: 600; color: var(--ex-text-muted); margin-right: 4px;
+    }
+    .plugins-table.mobile-card-table td.text-end { text-align: left !important; }
+
+    /* Actions manager: stack list over editor instead of side-by-side. */
+    #actionsModal .actions-row > .actions-left,
+    #actionsModal .actions-row > .actions-right {
+        flex: 0 0 100%; max-width: 100%; width: 100%; height: auto;
+    }
+    #actionsModal .actions-list-scroll { max-height: 38vh; }
+    #actionsModal .actions-right { max-height: none; }
+    #actionsModal .modal-content { height: 100%; }   /* full-screen dialog */
+
+    /* Mounts (and other wide tables not converted to cards): scroll, don't clip. */
+    #mountsModal .modal-body, .mounts-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    #mountsModal table { min-width: 640px; }
+}
+
+/* "⋯ More" toolbar dropdown (phone only; unguarded since it only renders when ui.phone) */
+.toolbar-more { position: relative; display: flex; align-items: stretch; }
+.toolbar-more-panel {
+    /* fixed (not absolute) so it escapes the .tab-bar overflow clip on phones;
+       anchored just under the tab bar at top-right, where the ⋯ button sits. */
+    position: fixed; top: 36px; right: 4px; z-index: 1100;
+    min-width: 190px; padding: 4px;
+    background: var(--ex-bg-alt); border: 1px solid var(--ex-border);
+    border-radius: 6px; box-shadow: 0 6px 20px rgba(0,0,0,.35);
+    display: flex; flex-direction: column;
+}
+.toolbar-more-item {
+    background: none; border: 0; text-align: left; color: var(--ex-text);
+    padding: 10px 12px; font-size: 14px; border-radius: 4px; white-space: nowrap;
+}
+.toolbar-more-item:hover, .toolbar-more-item:active { background: var(--ex-bg-tab); }
+
+/* ── AI CLI tabs (claude/codex): terminal + live diff split ── */
+.agent-tab-body { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+.agent-split { display: flex; flex: 1 1 auto; min-height: 0; }
+.agent-term { flex: 1 1 55%; min-width: 0; display: flex; position: relative; }
+.agent-term .term-container { flex: 1 1 auto; min-width: 0; }
+.agent-diff { flex: 1 1 45%; min-width: 0; display: flex; flex-direction: column;
+  border-left: 1px solid var(--border, #333); background: var(--bg, #1b1d21); overflow: hidden; }
+.agent-diff-head { display: flex; align-items: center; gap: .25rem; padding: .35rem .5rem;
+  border-bottom: 1px solid var(--border, #333); flex: 0 0 auto; }
+.agent-diff-head .btn.active { background: var(--accent, #0d6efd); color: #fff; }
+.agent-diff-wrap { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.agent-diff-files { flex: 0 0 auto; max-height: 30%; overflow: auto; padding: .25rem .5rem;
+  border-bottom: 1px solid var(--border, #333); font-size: 12px; }
+.agent-diff-filter { display: flex; gap: .5rem; align-items: center; margin-bottom: .25rem; color: var(--muted, #8b949e); }
+.agent-diff-file { white-space: nowrap; display: flex; align-items: center; gap: .1rem; cursor: pointer;
+  padding: .1rem .35rem; border-radius: 4px; }
+.agent-diff-file:hover { background: var(--hover, #2b2f34); }
+.agent-diff-file.sel { background: var(--accent, #0d6efd); }
+.agent-diff-file.sel .fn, .agent-diff-file.sel .add, .agent-diff-file.sel .rem { color: #fff; }
+.agent-diff-file .add { color: #3fb950; } .agent-diff-file .rem { color: #f85149; }
+.agent-diff-file .fn { color: var(--fg, #cfd3d8); margin-left: .35rem; overflow: hidden; text-overflow: ellipsis; }
+.agent-diff-edit { all: unset; cursor: pointer; margin-left: .4rem; opacity: .55; font-size: 12px; }
+.agent-diff-file:hover .agent-diff-edit { opacity: 1; }
+.agent-diff-body { flex: 1 1 auto; min-height: 0; overflow: auto; margin: 0; padding: .5rem 0;
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+/* Colored unified-diff lines with old/new line-number gutters (aiDiffHtml). */
+.agent-diff-body .adl { display: flex; align-items: flex-start; }
+.agent-diff-body .adl .ln { flex: 0 0 auto; width: 3em; text-align: right; padding: 0 .5em;
+  color: var(--muted, #8b949e); opacity: .55; user-select: none; -webkit-user-select: none; }
+.agent-diff-body .adl .lc { flex: 1 1 auto; white-space: pre; padding-right: .75rem; }
+.agent-diff-body .adl.add { background: rgba(63,185,80,.15); }
+.agent-diff-body .adl.add .lc { color: #56d364; }
+.agent-diff-body .adl.del { background: rgba(248,81,73,.15); }
+.agent-diff-body .adl.del .lc { color: #f85149; }
+.agent-diff-body .adl.hunk { background: rgba(88,166,255,.08); }
+.agent-diff-body .adl.hunk .lc { color: #58a6ff; }
+.agent-diff-body .adl.meta .lc { color: var(--muted, #8b949e); }
+.agent-diff-body .adl.ctx .lc { color: var(--fg, #cfd3d8); }
+.agent-diff-empty { font-size: 13px; }
+.agent-diff-collapse { line-height: 1; padding: .1rem .4rem; }
+/* Thin vertical strip shown on the right when the diff pane is hidden. */
+.agent-diff-reveal { flex: 0 0 auto; align-self: stretch; border: 0; border-left: 1px solid var(--border, #333);
+  background: var(--panel, #23262b); color: var(--muted, #8b949e); cursor: pointer; font-size: 11px;
+  writing-mode: vertical-rl; text-orientation: mixed; padding: .5rem .15rem; letter-spacing: .05em; }
+.agent-diff-reveal:hover { color: var(--fg, #cfd3d8); background: var(--hover, #2b2f34); }
+/* add-session + toolbar AI dropdown menu */
+.agent-add-wrap { position: relative; display: inline-flex; }
+/* Both AI dropdowns are position:fixed + high z-index so they escape the
+   overflow:hidden clip of their container (.tab-bar for the toolbar menu,
+   .agent-tabbar for the in-tab one). Anchored via :style from the button rect. */
+.agent-add-menu { position: fixed; z-index: 3000; min-width: 12rem;
+  background: var(--panel, #23262b); border: 1px solid var(--border, #444); border-radius: 6px;
+  box-shadow: 0 6px 18px rgba(0,0,0,.4); padding: .25rem; display: flex; flex-direction: column; }
+.agent-add-menu button { all: unset; cursor: pointer; padding: .4rem .6rem; border-radius: 4px;
+  color: var(--fg, #cfd3d8); font-size: 13px; }
+.agent-add-menu button:hover { background: var(--hover, #2b2f34); }
+@media (max-width: 700px) { .agent-split { flex-direction: column; } .agent-diff { border-left: 0; border-top: 1px solid var(--border, #333); } .agent-tree { flex-basis: 180px; border-left: 0; border-top: 1px solid var(--border, #333); } }
+
+/* ── Inline repo panel (Diff | Census) on a git-repo dir tab — scc.js aiRepoSetView ── */
+/* Thin vertical strip on the right of a git-repo dir tab; opens the panel. */
+.repo-reveal { flex: 0 0 auto; align-self: stretch; border: 0; border-left: 1px solid var(--border, #333);
+  background: var(--panel, #23262b); color: var(--muted, #8b949e); cursor: pointer; font-size: 11px;
+  writing-mode: vertical-rl; text-orientation: mixed; padding: .5rem .15rem; letter-spacing: .05em; }
+.repo-reveal:hover { color: var(--fg, #cfd3d8); background: var(--hover, #2b2f34); }
+.repo-panel { flex: 0 0 46%; min-width: 0; max-width: 62%; display: flex; flex-direction: column;
+  border-left: 1px solid var(--border, #333); background: var(--bg, #1b1d21); overflow: hidden; }
+.repo-panel-head { display: flex; align-items: center; gap: .25rem; padding: .35rem .5rem;
+  border-bottom: 1px solid var(--border, #333); flex: 0 0 auto; }
+.repo-panel-head .btn.active { background: var(--accent, #0d6efd); color: #fff; }
+.repo-panel-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+/* Only one view shows at a time (x-show on repoView); each fills the body. */
+.repo-panel-body > .agent-diff, .repo-panel-body > .agent-scc { flex: 1 1 auto; width: auto; min-height: 0; border-left: 0; }
+@media (max-width: 700px) { .repo-panel { flex-basis: 55%; } }
+
+/* ── Repo tree panel (Terminal | Tree | Diff) — js/features/agent.js aiTree* ── */
+/* Git-status colors, theme-aware: the AI panel is dark-surfaced, but the app
+   theme still picks the shade so light mode gets its own. Defaults = light. */
+:root { --ai-tree-mod: #2f6fdd; --ai-tree-new: #1a7f37; --ai-tree-untracked: #cf222e; }
+[data-bs-theme="dark"] { --ai-tree-mod: #58a6ff; --ai-tree-new: #56d364; --ai-tree-untracked: #f85149; }
+.agent-tree { flex: 0 0 auto; width: 220px; min-width: 0; display: flex; flex-direction: column;
+  border-left: 1px solid var(--border, #333); background: var(--bg, #1b1d21); overflow: hidden; }
+/* Drag handle between AI-view side columns (tree / diff / census). Mirrors the
+   terminal split resizer — see js/features/terminal.js _startColResize. */
+.col-resizer { flex: 0 0 auto; width: 5px; align-self: stretch; cursor: col-resize;
+  background: var(--border, #333); user-select: none; transition: background .15s; }
+.col-resizer:hover, .col-resizer:active { background: var(--bs-primary, #0d6efd); }
+.agent-tree-head { display: flex; align-items: center; gap: .25rem; padding: .35rem .5rem;
+  border-bottom: 1px solid var(--border, #333); flex: 0 0 auto; }
+.agent-tree-title { font-size: 12px; color: var(--muted, #8b949e); text-transform: uppercase; letter-spacing: .04em; }
+.agent-tree-body { flex: 1 1 auto; min-height: 0; overflow: auto; padding: .25rem 0;
+  font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.agent-tree-row { display: flex; align-items: center; gap: .15rem; cursor: pointer;
+  white-space: nowrap; padding-right: .35rem; }
+.agent-tree-row:hover { background: var(--hover, #2b2f34); }
+.agent-tree-row .tw { flex: 0 0 auto; width: 1em; text-align: center; font-size: 10px;
+  color: var(--muted, #8b949e); user-select: none; -webkit-user-select: none; }
+.agent-tree-row .tn { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; color: var(--fg, #cfd3d8); }
+.agent-tree-row .tcx { flex: 0 0 auto; color: var(--muted, #8b949e); font-size: 10px; opacity: .65; margin-left: .3rem; font-variant-numeric: tabular-nums; }
+.agent-tree-row:hover .tcx { opacity: .85; }
+.agent-tree-row .ta { flex: 0 0 auto; display: inline-flex; gap: .25rem; opacity: 0; }
+.agent-tree-row:hover .ta { opacity: 1; }
+.agent-tree-btn { all: unset; cursor: pointer; opacity: .7; font-size: 12px; padding: 0 .1rem; color: var(--fg, #cfd3d8); }
+.agent-tree-btn:hover { opacity: 1; }
+.agent-tree-row.mod .tn { color: var(--ai-tree-mod); }
+.agent-tree-row.new .tn { color: var(--ai-tree-new); }
+.agent-tree-row.untracked .tn { color: var(--ai-tree-untracked); }
+.agent-tree-row.dir-dirty .tn { color: var(--ai-tree-mod); }
+.agent-tree-reveal { flex: 0 0 auto; align-self: stretch; border: 0; border-left: 1px solid var(--border, #333);
+  background: var(--panel, #23262b); color: var(--muted, #8b949e); cursor: pointer; font-size: 11px;
+  writing-mode: vertical-rl; text-orientation: mixed; padding: .5rem .15rem; letter-spacing: .05em; }
+.agent-tree-reveal:hover { color: var(--fg, #cfd3d8); background: var(--hover, #2b2f34); }
+
+/* ── scc code-census pane (js/features/scc.js): sortable language table +
+   complexity hotspots, dark-surfaced like the diff/tree panes. ── */
+.agent-scc { flex: 0 0 auto; width: 340px; min-width: 0; display: flex; flex-direction: column;
+  border-left: 1px solid var(--border, #333); background: var(--bg, #1b1d21); overflow: hidden; }
+.agent-scc-head { display: flex; align-items: center; flex-wrap: wrap; gap: .25rem; padding: .35rem .5rem;
+  border-bottom: 1px solid var(--border, #333); flex: 0 0 auto; }
+.agent-scc-head .btn.active { background: var(--accent, #0d6efd); color: #fff; }
+.agent-scc-sel { flex: 1 1 auto; min-width: 0; max-width: 210px; background: #23262b; color: var(--fg, #cfd3d8);
+  border: 1px solid var(--border, #333); border-radius: 4px; font-size: 12px; padding: .15rem .3rem; }
+.agent-scc-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.agent-scc-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; }
+.agent-scc-loading { padding: .75rem; color: var(--muted, #8b949e); font-size: 12px; }
+.agent-scc-install { padding: .6rem .7rem; color: var(--fg, #cfd3d8); font-size: 12px; overflow: auto; }
+.agent-scc-cmd { background: #0d1013; border: 1px solid var(--border, #333); border-radius: 4px; padding: .4rem .5rem;
+  color: #7ee787; font: 11px/1.5 ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap; word-break: break-all; margin: .25rem 0; }
+.agent-scc-alt { color: var(--muted, #8b949e); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 10px; margin: .1rem 0; word-break: break-all; }
+.agent-scc-manual { margin: .3rem 0; color: var(--muted, #8b949e); font-size: 11px; }
+.agent-scc-manual summary { cursor: pointer; }
+/* max-content + min-width:100% lets the table grow past the pane so the census
+   scroll container scrolls horizontally (the last column, Cx, was being clipped
+   at width:100%); it still fills the pane when narrower. */
+.agent-scc-table { width: max-content; min-width: 100%; border-collapse: collapse; font: 11px/1.4 ui-monospace, Menlo, Consolas, monospace; }
+.agent-scc-table thead th { position: sticky; top: 0; background: #1e2027; color: var(--muted, #8b949e); text-align: left;
+  padding: .3rem .5rem; border-bottom: 1px solid var(--border, #333); cursor: pointer; white-space: nowrap; user-select: none; }
+.agent-scc-table thead th.num { text-align: right; }
+.agent-scc-table thead th:hover { color: var(--fg, #cfd3d8); }
+.agent-scc-table td { padding: .25rem .5rem; border-bottom: 1px solid #23262b; color: var(--fg, #cfd3d8); white-space: nowrap; }
+.agent-scc-table td.num { text-align: right; }
+.agent-scc-table td.code { font-weight: 600; }
+.agent-scc-table td.lang { max-width: 120px; overflow: hidden; text-overflow: ellipsis; }
+/* Tables with two filename columns (Duplication, Dependencies) need tighter
+   name columns so the trailing numeric column stays visible in the narrow pane;
+   the container still scrolls horizontally for anything wider. */
+.agent-scc-table.scc-wide td.lang { max-width: 95px; }
+.agent-scc-table tbody tr:hover td { background: var(--hover, #2b2f34); }
+.agent-scc-table tr.scc-total td { border-top: 2px solid var(--border, #333); border-bottom: 0; font-weight: 600; }
+.scc-kind { color: var(--muted, #8b949e); font-size: 9px; margin-left: .35rem; opacity: .8; }
+.scc-fn { color: var(--fg, #cfd3d8); }
+.scc-lang { color: var(--muted, #8b949e); font-size: 9px; margin-left: .4rem; }
+/* File-name cells that carry preview (👁) / edit (✎) actions: lay the cell out
+   as a flex row so the name still truncates, the language badge stays put, and
+   the action buttons sit at the right edge and reveal on row hover. */
+.agent-scc-table td.lang:has(.scc-fa) { display: flex; align-items: center; overflow: visible; max-width: 220px; }
+.agent-scc-table td.lang:has(.scc-fa) .scc-fn { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.scc-fa { flex: 0 0 auto; display: inline-flex; gap: .15rem; margin-left: auto; padding-left: .5rem; opacity: 0; }
+.agent-scc-table tbody tr:hover .scc-fa { opacity: 1; }
+.scc-fa button { all: unset; cursor: pointer; font-size: 11px; line-height: 1; opacity: .7; }
+.scc-fa button:hover { opacity: 1; }
+/* Duplication table is two file columns + Lines; keep file cells compact so the
+   Lines column stays visible (matches the earlier scc-wide fix). */
+.agent-scc-table.scc-wide td.lang:has(.scc-fa) { max-width: 130px; }
+.agent-scc-covtotal { padding: .35rem .5rem; color: var(--muted, #8b949e); font-size: 11px; border-bottom: 1px solid var(--border, #333); word-break: break-all; }
+.agent-scc-table td.cov-low { color: #f85149; }
+.agent-scc-table td.cov-mid { color: #d29922; }
+.agent-scc-table td.cov-high { color: #56d364; }
+.agent-scc-reveal { flex: 0 0 auto; align-self: stretch; border: 0; border-left: 1px solid var(--border, #333);
+  background: var(--panel, #23262b); color: var(--muted, #8b949e); cursor: pointer; font-size: 11px;
+  writing-mode: vertical-rl; text-orientation: mixed; padding: .5rem .15rem; letter-spacing: .05em; }
+.agent-scc-reveal:hover { color: var(--fg, #cfd3d8); background: var(--hover, #2b2f34); }
+@media (max-width: 700px) { .agent-scc { flex-basis: 220px; border-left: 0; border-top: 1px solid var(--border, #333); } }
+
+/* ── Resume-session browser: project disclosure groups ── */
+.agent-proj-list { display: flex; flex-direction: column; gap: 6px; }
+.agent-proj { border: 1px solid var(--ex-border, #333); border-radius: 6px; overflow: hidden; }
+.agent-proj-head { display: flex; align-items: center; gap: 8px; padding: 6px 8px; flex-wrap: wrap; }
+.agent-proj-toggle { all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.agent-proj-toggle:hover .agent-proj-cwd { text-decoration: underline; }
+.agent-proj-chev { width: 1em; color: var(--ex-muted, #888); font-size: 12px; }
+.agent-proj-cwd { color: var(--ex-fg, #cfd3d8); overflow: hidden; text-overflow: ellipsis; }
+.agent-proj-latest { display: flex; align-items: center; gap: 8px; margin-left: auto; min-width: 0; }
+.agent-proj-title, .agent-sess-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-proj-title { max-width: 22rem; }
+.agent-proj-body { border-top: 1px solid var(--ex-border, #333); background: rgba(0,0,0,.15); }
+.agent-sess-row { display: flex; align-items: center; gap: 8px; padding: 5px 8px 5px 28px; border-top: 1px solid rgba(255,255,255,.04); }
+.agent-sess-row:first-child { border-top: 0; }
+.agent-sess-title { flex: 1 1 auto; }
+@media (max-width: 640px) { .agent-proj-latest { margin-left: 0; width: 100%; } .agent-proj-title { max-width: 12rem; } }

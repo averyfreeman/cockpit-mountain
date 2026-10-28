@@ -1,0 +1,59 @@
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
+
+#
+# Copyright (C) 2013 Red Hat, Inc.
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
+
+import netlib
+import testlib
+
+
+@testlib.nondestructive
+class TestNetworkingVLAN(netlib.NetworkCase):
+    def testVlan(self) -> None:
+        b = self.browser
+        m = self.machine
+
+        self.login_and_go("/network")
+        b.wait_visible("#networking")
+
+        iface = 'cockpit1'
+        self.add_veth(iface, dhcp_cidr="10.111.113.2/20")
+        self.wait_for_iface(iface, active=False)
+
+        # Make a VLAN interface
+        b.click("button:contains('Add VLAN')")
+        b.wait_visible("#network-vlan-settings-dialog")
+
+        # wait until dialog initialized
+        b.wait_visible("#network-vlan-settings-dialog button[aria-label=Close]")
+        # Remove focus ring around the close button, which causes pixel tests retries.
+        b.blur("#network-vlan-settings-dialog button[aria-label=Close]")
+        b.wait_visible("#network-vlan-settings-interface-name-input")
+        b.assert_pixels("#network-vlan-settings-dialog", "networking-vlan-settings-dialog")
+
+        b.select_from_dropdown("#network-vlan-settings-parent-select", iface)
+        b.set_input_text("#network-vlan-settings-interface-name-input", "tvlan")
+        b.set_input_text("#network-vlan-settings-vlan-id-input", "123")
+        b.click("#network-vlan-settings-dialog button:contains('Add')")
+        b.wait_not_present("#network-vlan-settings-dialog")
+        self.toggle_onoff("label[for='interface-switch']")
+        b.wait_text("#network-interface-name", "tvlan")
+
+        # It automatically activates.  It won't get an IP address, but that's okay.
+        self.wait_for_iface_setting("Status", "Configuring IP")
+
+        # Check that the actual kernel device has the REORDER_HDR flag
+        # set.  NetworkManager stopped doing that for connections
+        # created via D-Bus at some point.
+        self.assertIn("REORDER_HDR", m.execute("ip -d link show tvlan | grep vlan"))
+
+        # Delete it
+        b.click("#network-interface button:contains('Delete')")
+        b.wait_visible("#networking")
+        b.wait_not_present("#networking-interfaces tr[data-interface='tvlan']")
+
+
+if __name__ == '__main__':
+    testlib.test_main()

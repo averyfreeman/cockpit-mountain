@@ -1,0 +1,90 @@
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
+
+#
+# Copyright (C) 2017 Red Hat, Inc.
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
+
+import testlib
+
+
+@testlib.nondestructive
+class TestActivePages(testlib.MachineCase):
+    def testBasic(self):
+        b = self.browser
+        m = self.machine
+
+        # disable preloads; they are different between OSes, make the counting hard, and happen asynchronously
+        self.disable_preload("packagekit", "playground", "systemd")
+
+        self.login_and_go("/system")
+
+        b.wait_visible("#overview")
+
+        def showPagesAssertCount(count):
+            b.switch_to_top()
+            b.mouse("#toggle-menu", "click", altKey=True)
+            b.click("#active-pages")
+            b.wait_visible("#active-pages-dialog")
+            b.wait_count("#active-pages-dialog tr", count)
+
+        # Initially we have /system
+        showPagesAssertCount(1)
+        b.click("button:contains('Cancel')")
+        b.wait_not_present("#active-pages-dialog")
+
+        b.go("/users")
+        b.enter_page("/users")
+        b.wait_visible("#accounts-list")
+
+        # now we have the users page be present in the pages menu
+        showPagesAssertCount(2)
+        b.click("button:contains('Cancel')")
+        b.wait_not_present("#active-pages-dialog")
+
+        # open the terminal page and start a session we can see on the machine
+        # Remove failed units which will show up in the first terminal line
+        m.execute("systemctl reset-failed")
+        b.go("/system/terminal")
+        b.enter_page("/system/terminal")
+
+        def line_sel(i):
+            return '.terminal .xterm-accessibility-tree div:nth-child(%d)' % i
+
+        # WebGL2 is not supported in firefox headless mode
+        if b.browser != "firefox":
+            # wait for prompt in first line
+            b.wait_visible(".terminal .xterm-accessibility-tree")
+            b.wait_in_text(line_sel(1), '$')
+
+            # run a command that we can easily identify, and which will die with the terminal
+            b.input_text("sleep 42\n")
+
+            # wait for command to run
+            m.execute("until pgrep -afx 'sleep 42'; do sleep 1; done")
+
+        # now close the page
+        showPagesAssertCount(3)
+        # terminal should be pre-checked by default
+        b.wait_visible('tr[data-row-id="cockpit1:localhost/system/terminal"] input[type=checkbox]:checked')
+        # click on the main page as well
+        b.click('tr[data-row-id="cockpit1:localhost/system"] input[type=checkbox]')
+        # wait until it's highlighted
+        b.wait_visible('tr[data-row-id="cockpit1:localhost/system"] input[type=checkbox]:checked')
+        # close
+        b.click("#active-pages-dialog button.pf-m-primary")
+        b.wait_not_present("#active-pages-dialog")
+
+        # this should kill the two frames
+        b.wait_not_present("iframe[name='cockpit1:localhost/system']")
+        b.wait_not_present("iframe[name='cockpit1:localhost/system/terminal']")
+
+        # running shell command should disappear on the system
+        m.execute("while pgrep -afx 'sleep 42'; do sleep 1; done")
+
+        # there should only be the original page left
+        showPagesAssertCount(1)
+
+
+if __name__ == '__main__':
+    testlib.test_main()

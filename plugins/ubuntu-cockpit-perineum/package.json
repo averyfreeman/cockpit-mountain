@@ -1,0 +1,42 @@
+{
+  "name": "cockpit-package-manager",
+  "version": "0.1.1",
+  "description": "Cockpit-based package manager using PackageKit",
+  "license": "LGPL-2.1-or-later",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node esbuild.config.js",
+    "watch": "node esbuild.config.js --watch",
+    "typecheck": "tsc",
+    "test": "vitest",
+    "test:ui": "vitest --ui",
+    "test:run": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "lint": "oxlint ."
+  },
+  "devDependencies": {
+    "@patternfly/patternfly": "catalog:",
+    "@patternfly/react-core": "catalog:",
+    "@patternfly/react-icons": "catalog:",
+    "@patternfly/react-table": "catalog:",
+    "@playwright/test": "^1.56.1",
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "@types/react-window": "^1.8.8",
+    "@vitest/ui": "catalog:",
+    "dotenv": "^17.2.3",
+    "esbuild": "catalog:",
+    "react": "catalog:",
+    "react-dom": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:",
+    "oxlint": "catalog:"
+  },
+  "dependencies": {
+    "react-window": "^2.2.2"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

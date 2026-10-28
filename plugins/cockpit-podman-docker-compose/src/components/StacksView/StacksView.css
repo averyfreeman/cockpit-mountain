@@ -1,0 +1,136 @@
+.sv-loading {
+  display: flex;
+  justify-content: center;
+  padding: 4rem;
+}
+
+/* Toolbar search + filter chips */
+.sv-toolbar .pf-v6-c-toolbar__content {
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.sv-search-trigger.pf-v6-c-button {
+  width: 1.875rem;
+  height: 1.875rem;
+  padding: 0.25rem;
+  min-width: unset;
+  border-radius: var(--pf-t--global--border--radius--base, 4px);
+  color: var(--pf-t--global--text--color--subtle, #6a6e73);
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.sv-search-trigger.pf-v6-c-button:hover {
+  color: var(--pf-t--global--text--color--regular, #151515);
+  background: rgba(0, 0, 0, 0.06);
+}
+
+.sv-search-wrap {
+  display: flex;
+  align-items: center;
+}
+
+.sv-search {
+  width: 220px;
+  animation: sv-search-in 0.15s ease-out;
+}
+
+@keyframes sv-search-in {
+  from { opacity: 0; transform: scaleX(0.88); transform-origin: right center; }
+  to   { opacity: 1; transform: scaleX(1); }
+}
+
+.sv-status-badges {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.sv-bulk-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  animation: sv-search-in 0.15s ease-out;
+}
+
+.sv-bulk-count {
+  font-size: var(--pf-t--global--font--size--sm);
+  color: var(--pf-t--global--text--color--subtle);
+  white-space: nowrap;
+}
+
+.sv-filter-chip {
+  cursor: pointer;
+  user-select: none;
+  transition: opacity 140ms ease, box-shadow 140ms ease;
+  opacity: 0.65;
+}
+
+.sv-filter-chip:hover {
+  opacity: 0.85;
+}
+
+.sv-filter-chip--active {
+  opacity: 1;
+  box-shadow: 0 0 0 2px currentColor;
+}
+
+/* Bulk action bar */
+.sv-bulk-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.4rem 0.75rem;
+  margin-bottom: 0.5rem;
+  background: var(--pf-t--global--background--color--secondary--default);
+  border: 1px solid var(--pf-t--global--border--color--default);
+  border-radius: var(--pf-t--global--border--radius--200);
+  font-size: 0.875rem;
+}
+
+.sv-select-all-label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+}
+
+.sv-select-all-checkbox {
+  width: 1rem;
+  height: 1rem;
+  cursor: pointer;
+  accent-color: var(--pf-t--global--color--brand--default);
+}
+
+.sv-bulk-count {
+  font-weight: 600;
+  color: var(--pf-t--global--text--color--regular);
+}
+
+.sv-bulk-hint {
+  color: var(--pf-t--global--text--color--subtle);
+}
+
+/* Subtle refresh indicator while polling with existing stacks */
+.sv-refresh-indicator {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0.25rem 0.5rem 0;
+  opacity: 0.5;
+}
+
+/* Minimal layout — responsive card grid */
+.sv-minimal-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 0.625rem;
+  padding: 0.25rem 0;
+}
+
+/* Pretty layout — CSS columns gives each card its own height; expanding one card doesn't affect others */
+.sv-pretty-grid {
+  columns: 3;
+  column-gap: 0.875rem;
+  padding: 0.25rem 0;
+}
+

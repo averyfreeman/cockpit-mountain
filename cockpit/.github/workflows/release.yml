@@ -1,0 +1,144 @@
+name: release
+on:
+  push:
+    tags:
+      # this is a glob, not a regexp
+      - '[0-9]*'
+
+
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    permissions:
+      # create GitHub release
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Workaround for https://github.com/actions/checkout/pull/697
+        run: git fetch --force origin $(git describe --tags):refs/tags/$(git describe --tags)
+
+      - name: Build release
+        run: tools/release '${{ github.server_url }}/${{ github.repository }}' '${{ github.ref_name }}'
+
+      - id: publish
+        name: Create a release
+        run: |
+          set -x
+
+          TAG_VERSION="$(git describe --tags)"
+          git tag -l --format='%(contents:body)' ${TAG_VERSION} > release-note.txt
+
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          gh release create --title ${TAG_VERSION} --notes-file release-note.txt  \
+            ${TAG_VERSION} \
+            ${REPO_NAME}-${TAG_VERSION}.tar.xz \
+            ${REPO_NAME}-node-${TAG_VERSION}.tar.xz
+
+          # Set outputs for downstream jobs
+          {
+            echo "filename=${REPO_NAME}-${TAG_VERSION}.tar.xz"
+            echo "download=${{ github.server_url }}/${{ github.repository }}/releases/download/${TAG_VERSION}/${REPO_NAME}-${TAG_VERSION}.tar.xz"
+            echo "checksum=$(sha256sum ${REPO_NAME}-${TAG_VERSION}.tar.xz | cut -d ' ' -f 1)"
+            echo "body<<EOF"
+            cat release-note.txt
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+    outputs:
+      filename: ${{ steps.publish.outputs.filename }}
+      checksum: ${{ steps.publish.outputs.checksum }}
+      download: ${{ steps.publish.outputs.download }}
+      body: ${{ steps.publish.outputs.body }}
+
+  flathub:
+    needs: source
+    environment: flathub
+    env:
+      COCKPITUOUS_TOKEN: ${{ secrets.COCKPITUOUS_TOKEN }}
+    permissions: {}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source repository
+        uses: actions/checkout@v7
+        with:
+          path: src
+
+      - name: Checkout flathub repository
+        uses: actions/checkout@v7
+        with:
+          path: flathub
+          repository: flathub/org.cockpit_project.CockpitClient
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
+          # this is needed so we can push to a different repository
+          fetch-depth: 0
+
+      - name: Update flathub repository
+        env:
+          DOWNLOAD: ${{ needs.source.outputs.download }}
+          CHECKSUM: ${{ needs.source.outputs.checksum }}
+          TAG_BODY: ${{ needs.source.outputs.body }}
+        run: |
+          set -x
+
+          git config --global user.name "GitHub Workflow"
+          git config --global user.email "cockpituous@cockpit-project.org"
+
+          cd flathub
+          git checkout -b "${{ github.ref_name }}"
+          printf '%s\n' "${TAG_BODY}" | ../src/containers/flatpak/add-release \
+             org.cockpit_project.CockpitClient.releases.xml \
+             "${{ github.ref_name }}" \
+             "$(date +%Y-%m-%d)"
+          git add "$(../src/containers/flatpak/prepare --packages=upstream --sha256="${CHECKSUM}" "${DOWNLOAD}")"
+          git add org.cockpit_project.CockpitClient.packages.json
+          git add org.cockpit_project.CockpitClient.releases.xml
+          git commit -m "Update to version ${{ github.ref_name }}"
+          git show
+          git push git@github.com:cockpit-project/org.cockpit_project.CockpitClient HEAD
+
+          echo ${{ env.COCKPITUOUS_TOKEN }} >> auth.txt
+          gh auth login --with-token < auth.txt
+
+          gh pr create \
+            --fill \
+            -H cockpit-project:${{ github.ref_name }} \
+            -R flathub/org.cockpit_project.CockpitClient
+
+
+  node-cache:
+    # doesn't depend on it, but let's make sure the build passes before we do this
+    needs: [source]
+    runs-on: ubuntu-latest
+    environment: node-cache
+    # done via deploy key, token needs no write permissions at all
+    permissions: {}
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@v7
+
+      - name: Set up git
+        run: |
+            git config user.name "GitHub Workflow"
+            git config user.email "cockpituous@cockpit-project.org"
+
+      - name: Tag node-cache
+        run: |
+          set -eux
+          # this is a shared repo, prefix with project name
+          TAG="${GITHUB_REPOSITORY#*/}-$(basename $GITHUB_REF)"
+          tools/node-modules checkout
+          cd node_modules
+          git tag "$TAG"
+          git remote add cache "ssh://git@github.com/${GITHUB_REPOSITORY%/*}/node-cache"
+          eval $(ssh-agent)
+          ssh-add - <<< '${{ secrets.DEPLOY_KEY }}'
+          # make this idempotent: delete an existing tag
+          git push cache :"$TAG" || true
+          git push cache tag "$TAG"
+          ssh-add -D

@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "allowJs": true,
+    "checkJs": true,
+    "exactOptionalPropertyTypes": true,
+    "noUncheckedSideEffectImports": false,
+    "jsx": "react-jsx",
+    "lib": [
+      "dom",
+      "es2021"
+    ],
+    "paths": {
+      "*": [
+        "./pkg/lib/*"
+      ]
+    },
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "noEmit": true,
+    "strict": true,
+    "target": "es2021"
+  },
+  "include": [
+    "src/**/*"
+  ]
+}

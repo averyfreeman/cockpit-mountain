@@ -1,0 +1,25 @@
+Source: cockpit-podman
+Section: admin
+Priority: optional
+Maintainer: Martin Pitt <mpitt@debian.org>
+Uploaders: Reinhard Tartler <siretart@tauware.de>
+Build-Depends: debhelper-compat (= 13),
+               esbuild,
+               nodejs,
+Standards-Version: 4.7.3
+Rules-Requires-Root: no
+Homepage: https://github.com/cockpit-project/cockpit-podman
+Vcs-Git: https://salsa.debian.org/debian/cockpit-podman.git
+Vcs-Browser: https://salsa.debian.org/debian/cockpit-podman
+
+Package: cockpit-podman
+Architecture: all
+Multi-Arch: foreign
+Depends: ${misc:Depends},
+         cockpit-bridge,
+         podman (>= 2.0.4),
+Description: Cockpit component for Podman containers
+ The Cockpit Web Console enables users to administer GNU/Linux servers using a
+ web browser.
+ .
+ This package adds an user interface for Podman containers.

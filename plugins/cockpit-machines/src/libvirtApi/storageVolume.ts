@@ -1,0 +1,84 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ *
+ * Copyright (C) 2021 Red Hat, Inc.
+ */
+
+/*
+ * Provider for Libvirt using libvirt-dbus API.
+ * See https://github.com/libvirt/libvirt-dbus
+ */
+
+import type {
+    optString,
+    ConnectionName,
+    StorageVolume,
+} from '../types';
+
+import { getVolumeXML } from '../libvirt-xml-create.js';
+import { parseStorageVolumeDumpxml } from '../libvirt-xml-parse.js';
+import { storagePoolRefresh } from './storagePool.js';
+import { call, timeout } from './helpers.js';
+
+export async function storageVolumeCreate({
+    connectionName,
+    poolName,
+    volName,
+    size,
+    format
+} : {
+    connectionName: ConnectionName,
+    poolName: string,
+    volName: string,
+    size: number,
+    format: optString,
+}): Promise<void> {
+    const volXmlDesc = getVolumeXML(volName, size, format);
+
+    const [path] = await call<[string]>(connectionName, '/org/libvirt/QEMU', 'org.libvirt.Connect', 'StoragePoolLookupByName',
+                                        [poolName], { timeout, type: 's' });
+    await call(connectionName, path, 'org.libvirt.StoragePool', 'StorageVolCreateXML', [volXmlDesc, 0], { timeout, type: 'su' });
+    await storagePoolRefresh({ connectionName, objPath: path });
+}
+
+export async function storageVolumeDelete({
+    connectionName,
+    poolName,
+    volName
+} : {
+    connectionName: ConnectionName,
+    poolName: string,
+    volName: string,
+}): Promise<void> {
+    const [poolPath] = await call<[string]>(connectionName, '/org/libvirt/QEMU', 'org.libvirt.Connect', 'StoragePoolLookupByName',
+                                            [poolName], { timeout, type: 's' });
+    const [volPath] = await call<[string]>(connectionName, poolPath, 'org.libvirt.StoragePool', 'StorageVolLookupByName',
+                                           [volName], { timeout, type: 's' });
+    await call(connectionName, volPath, 'org.libvirt.StorageVol', 'Delete', [0], { timeout, type: 'u' });
+}
+
+export async function storageVolumeGetAll({
+    connectionName,
+    poolName
+} : {
+    connectionName: ConnectionName,
+    poolName: optString,
+}): Promise<StorageVolume[] | undefined> {
+    try {
+        const [storagePoolPath] = await call<[string]>(connectionName, '/org/libvirt/QEMU', 'org.libvirt.Connect', 'StoragePoolLookupByName',
+                                                       [poolName], { timeout, type: 's' });
+        const [objPaths] = await call<[string[]]>(connectionName, storagePoolPath, 'org.libvirt.StoragePool', 'ListStorageVolumes', [0],
+                                                  { timeout, type: 'u' });
+
+        const storageVolumesPropsPromises = objPaths.map(objPath =>
+            call<[string]>(connectionName, objPath, 'org.libvirt.StorageVol', 'GetXMLDesc', [0], { timeout, type: 'u' })
+        );
+
+        const volumeXmlList = await Promise.allSettled(storageVolumesPropsPromises);
+        return volumeXmlList
+                .filter(vol => vol.status === 'fulfilled')
+                .map(vol => parseStorageVolumeDumpxml(connectionName, vol.value[0]));
+    } catch (ex) {
+        console.warn("GET_STORAGE_VOLUMES action failed for pool", poolName, ":", String(ex));
+    }
+}

@@ -1,0 +1,273 @@
+# Changelog
+
+## 2.1.0
+
+### Added
+- **Configurable disk cache.** Settings → Limits now has a **Disk cache (MiB)**
+  field (default 64, `0` disables it). It's aria2's in-RAM write buffer that
+  batches disk writes — useful on network mounts. It's a startup option (aria2
+  ignores it on a running instance), so Manifest writes it to `aria2.conf` and
+  offers to restart aria2 to apply it — active downloads resume automatically.
+- **Editable path in the folder picker.** Every Browse dialog (Quick Add,
+  Configure, Settings) now has a path field — type or paste an absolute path and
+  press Enter/Go to jump straight there instead of clicking down the tree.
+- **Search in the folder picker.** A filter box narrows the current folder's
+  subfolders as you type (case-insensitive).
+
+## 2.0.3
+
+### Fixed
+- **Magnet downloads no longer come back paused after a reboot / aria2 restart.**
+  Manifest adds magnets with `pause-metadata=true` so you can pick files once the
+  torrent metadata arrives — but that flag was left on the download afterwards, so
+  aria2 saved it into `aria2.session` and re-paused the download on every restart
+  (you had to hit *Resume all*). Confirming your file selection now clears
+  `pause-metadata`, so restarts resume the queue automatically. Existing paused
+  magnets fix themselves the next time they're resumed.
+
+## 2.0.2
+
+### Added
+- **"Listen on all interfaces" RPC toggle** (Settings → RPC). Off (the default)
+  keeps the aria2 RPC bound to loopback — reachable from this machine only. On
+  binds it on all interfaces so it's reachable from your LAN — e.g. for the
+  [Aria2 Explorer](https://github.com/alexhua/Aria2-Explorer) browser extension.
+  The RPC secret is then the only thing gating access, so use it on a trusted
+  network. `rpc-listen-all` is a startup option, so toggling regenerates
+  `aria2.conf` and restarts aria2 to re-bind.
+
+## 2.0.1
+
+### Fixed
+- **Downloads to network mounts (CIFS/NFS/SMB) no longer stall periodically, and
+  selected-subset torrents no longer look like they grabbed everything.** aria2's
+  default `file-allocation=prealloc` calls `fallocate` — which stalls hard on
+  network filesystems (the "pauses" during large downloads) and pre-allocates
+  even *unselected* torrent files to full size. The generated `aria2.conf` now
+  sets `file-allocation=none`, `disk-cache=64M` (buffer writes, fewer flushes),
+  and `bt-remove-unselected-file=true` (drop unselected files on completion).
+- The config is now regenerated on service start, so config improvements from an
+  update take effect on the next start — not only at first Setup.
+
+## 2.0.0
+
+Feature parity pass inspired by webui-aria2.
+
+### Added
+- **Full aria2 global-options editor.** Settings → *Advanced — all aria2
+  options* loads every current global option into a searchable, editable list
+  and applies only the ones you changed (live, via `changeGlobalOption`).
+- **Per-download options.** A new **Options** tab in the detail panel changes a
+  single download's connections/server, split, max-peers, and ↓/↑ speed limits
+  live (`changeOption`).
+- **One-click global actions.** A toolbar on the filter row: **Pause all**,
+  **Resume all**, and **Clear finished** (purges completed/errored entries from
+  the list; files on disk are kept).
+- **Add-time options.** Quick Add has an *Advanced options* section — set
+  connections/server, split, max download speed, and an output filename per add.
+- **Desktop notifications.** Opt-in (Settings → Notifications) browser
+  notifications when a download completes or fails. Only fires on an actual
+  transition, so a reload never re-announces old completions.
+
+## 1.2.1
+
+### Fixed
+- Switching detail tabs (Files/Peers/Trackers) now shows a **loading spinner**
+  while the fetch is in flight, so a slow `getPeers`/`getFiles` no longer looks
+  frozen with a blank/stale tab. The indicator only appears on an explicit tab
+  switch — the routine ~1.5s poll refresh stays silent (no flicker).
+
+## 1.2.0
+
+### Changed
+- **Detail is now a docked, resizable panel** pinned to the bottom of the window
+  (above the taskbar) instead of a centered modal. Drag the top grip up/down to
+  resize it; the height persists.
+- **The bottom taskbar is permanent** and lists every open detail session as a
+  chip (the one shown in the panel is highlighted). Clicking a chip focuses it;
+  clicking the focused chip collapses the panel; × closes the session.
+
+### Added
+- **Auto-open on start:** when a download begins downloading its detail opens
+  automatically. Several starting at once each get a taskbar chip (all open);
+  closing a session stops it re-opening while that download is still active.
+- **Sortable columns:** the download table now sorts on every column (name,
+  size, progress, ↓, ↑, ETA, status), and the detail **Peers** and **Trackers**
+  tables are sortable too. Click a header to sort; click again to reverse.
+
+### Fixed
+- **Peers/Trackers tables no longer shake:** they use a fixed layout, so a
+  changing speed value can't widen a column and shove the rest sideways (same
+  fix as the main table).
+- **Detail panel no longer permanently visible / empty on start.** The panel's
+  height binding used a string `:style`, which overwrote the inline `display:none`
+  that `x-show` sets — so the panel rendered even when closed, showing empty data
+  on load. Switched to object `:style` so `x-show` and the height coexist. (Plus
+  it auto-closes when its download disappears, and only renders when it points at
+  a live download.)
+- **Modals sit above the dock:** the docked detail panel and the taskbar now
+  render below the modal layer, so Quick Add / Paste / Settings are no longer
+  covered by the panel.
+- **Auto-open only while downloading:** a torrent that is merely seeding
+  (100% complete but still "active" in aria2) no longer pops its detail open.
+
+## 1.1.4
+
+### Added
+- Minimized detail dialogs now persist across sessions: chips docked to the
+  bottom taskbar are saved to `settings.yml` and restored on re-login. A chip
+  whose download no longer exists (e.g. removed directly) is dropped once
+  downloads are polled.
+
+### Fixed
+- Theme selection now persists immediately instead of through the shared 400ms
+  save debounce, so reloading or switching Cockpit pages right after picking a
+  theme can no longer drop the change. Added `saveSettingsImmediate()` for
+  discrete, deliberate setting changes.
+- Detail dialog close (×) is now visible on the custom dark themes (aqua, nord,
+  solarized, dracula, gruvbox, catppuccin, tokyo night, rosé pine, sunset).
+  Bootstrap only whitens `.btn-close` for `data-bs-theme="dark"`, so on the
+  custom dark themes it was rendering as a near-black glyph on a dark header.
+- Peers tab: peer clients with non-UTF-8 peer ids showed percent-escaped
+  gibberish (e.g. `%2DBT7b0W%2D%97%B8`). Peer ids are now decoded byte-wise
+  (peer-id decode moved to `core/peerid.js`), and the Azureus version parse
+  accepts base62 versions, so clients read cleanly (e.g. `BitTorrent 7b0W`).
+
+## 1.1.3
+
+### Changed
+- The destination picker (Quick Add and Paste-to-Queue's Configure step) now
+  splits its chips into two labelled groups — **Saved** (your bookmarks) and
+  **Recent** — instead of one mixed row. A path that's already a saved bookmark
+  no longer also shows under Recent.
+
+## 1.1.2
+
+### Fixed
+- Removing (or Remove & delete) an actively-downloading torrent took two
+  clicks: the first stopped it but left the row behind. `aria2.remove` does a
+  graceful stop that contacts trackers first, so the download was still
+  transitioning when the purge ran and the row came back on the next poll.
+  Active downloads are now stopped with `aria2.forceRemove` (immediate, no
+  tracker wait) and the purge retries briefly, so it clears in one pass.
+
+## 1.1.1
+
+### Fixed
+- Detail dialog: the minimize (–) and close (×) buttons were rendering next to
+  the title instead of at the header's right edge (wrapping the close button in
+  a group dropped Bootstrap's implicit `margin-left:auto`). They're now
+  right-aligned and vertically centred, and long titles truncate again.
+
+## 1.1.0
+
+### Download detail
+- **Minimize to a bottom bar.** The detail dialog now has a minimize button
+  that docks it to a fixed taskbar at the bottom of the window (like Explorer's
+  file preview/editor). Click a chip to restore the dialog, × to dismiss it;
+  multiple details can be minimized at once. Minimized chips are pruned
+  automatically when their download is removed.
+- **Percent on the progress bar (General tab).** The General tab's progress now
+  shows the percentage centered on the bar, matching the main table, instead of
+  as separate text below it. The bar is also coloured by status (green complete
+  / red error).
+
+### Download table
+- **Details in the selection bar.** When exactly one row is selected, the
+  bulk-action bar shows a **Details** button that opens that download's dialog.
+
+## 1.0.2
+
+### Download table
+- **Row selection checkboxes + bulk actions.** Each row now has a checkbox
+  (with a header select-all/indeterminate checkbox); selecting one or more rows
+  reveals a bulk-action bar. Every operation aria2 supports per-row can be
+  applied across the selection at once: **Resume, Pause, Retry, Remove, and
+  Remove & delete files** (the two destructive ones confirm first, naming the
+  count). A per-row failure is toasted without aborting the rest of the batch.
+- Selection is pruned automatically as rows are removed/purged, so the bar's
+  count never drifts above what's on screen.
+- A checkbox column was added, so the table now has 10 columns. A column-width
+  layout saved by 1.0.1 (9 columns) safely resets to the new defaults on first
+  load rather than rendering misaligned.
+
+## 1.0.1
+
+### Download table
+- **Resizable columns** — every column has a drag grip on its right edge;
+  widths are stored as percentages in `settings.yml` (`columns.widths`) and
+  restored on load. A corrupt or out-of-date saved layout falls back to the
+  defaults rather than breaking the table.
+- **Fixed table layout** — the table now uses `table-layout: fixed`, so a
+  column's width no longer depends on its cell content. This fixes rows
+  shaking left/right when a speed value flipped between one and two digits
+  (e.g. `9 MiB/s` → `11 MiB/s`); cell content that overflows a column is
+  ellipsized instead of widening it.
+
+## 1.0.0
+
+Initial release.
+
+### Backend / provisioning
+- Turnkey aria2 provisioning: package-manager detection (`dnf`/`apt`/`pacman`/
+  `zypper`), EPEL-aware install plan on RHEL-family hosts, and a static-binary
+  fallback when no supported package manager is available or install fails.
+- aria2 runs as a per-user `systemctl --user` unit (`manifest-aria2.service`),
+  driven entirely over JSON-RPC via the Cockpit bridge (`cockpit.http`) — the
+  browser never talks to aria2 directly.
+- RPC port auto-picked from the loopback range 16800–26800 (never the aria2
+  default 6800), re-verified free on every service start.
+- Per-user state under `~/.config/cockpit/manifest/`: `aria2.conf`,
+  `aria2.session`, `settings.yml`, `queue.json`.
+
+### Downloads
+- Live download table with polling, aggregate stats, and a horizontal filter
+  pill row (no side rail).
+- **Quick Add** — single-item add with source auto-detection (magnet / HTTP /
+  FTP / Metalink / `.torrent`), `.torrent` files sent base64-encoded through
+  the bridge to avoid binary-upload corruption.
+- **Paste-to-Queue** — stage many mixed sources at once, then Configure-on-
+  Start with a shared destination and (for torrents) per-file selection and
+  magnet metadata fetch.
+- Row/context actions: pause, resume, remove, open destination in Explorer.
+- Torrent detail view: General, Files (per-file select), Peers, and Trackers
+  tabs.
+
+### Settings
+- Settings modal (no sidebar — a modal, stacked sections): Appearance,
+  Destinations (default destination, bookmarks, recents), Limits &
+  connections, RPC, and Updates.
+- Limits & connections tuning: max concurrent downloads, max connections per
+  server (1–16), splits per download, min split size, max peers per torrent,
+  global download/upload limits, seed ratio, seed time — live-applied via
+  `changeGlobalOption` where aria2 allows, the rest taking effect on new
+  downloads.
+- RPC port is editable and re-verified free before restart; poll interval is
+  configurable.
+
+### Appearance
+- Theme system: System, Light, Dark (required), Aqua, Nord, Solarized, and
+  Dracula, built on Bootstrap 5.3 `data-bs-theme` with CSS-variable overrides
+  — no build step. Applied live from the Appearance section of Settings and
+  follows OS/Cockpit preference when set to System.
+
+### Self-update & release
+- Version badge in the top bar checks the configured GitHub repo's latest
+  release via the bridge (`curl` through `cockpit.spawn`, not browser
+  `fetch`, respecting the `connect-src 'self'` CSP) and offers a one-click
+  in-UI update: bridge-downloaded release zip, superuser `make install`, and
+  a detached `systemd-run --no-block` Cockpit restart that survives the page
+  disconnecting.
+- `Makefile` release flow: `make zip` / `make publish` (GitHub release via
+  `gh`), `make install` / `make uninstall`.
+- Explorer-style README covering per-distro Cockpit install, plugin install
+  (source, release zip, or self-update), aria2 provisioning, the settings
+  file layout, and self-update mechanics.
+
+### Testing
+- Unit tests (`node --test`) for every pure module: `util`, `detect`,
+  `rpcenvelope`, `aria2conf`, `portpick`, `installcmd`, `defaults`,
+  `destlist`, `queuemodel`, `themes`.
+- Smoke test (`tests/smoke.mjs`, Playwright) through the live Cockpit shell.
+- e2e test (`tests/e2e.mjs`, Playwright) covering setup, add, progress, and
+  actions, including the base64 `.torrent` bridge-quirk regression.

@@ -1,0 +1,24 @@
+Source: cockpit-starter-kit
+Section: admin
+Priority: optional
+Maintainer: Cockpit <cockpit-devel@lists.fedorahosted.org>
+Build-Depends: debhelper-compat (= 13),
+               esbuild,
+               nodejs,
+               gettext (>= 0.19.7),
+               gettext (>= 0.21) | appstream
+Standards-Version: 4.7.3
+Rules-Requires-Root: no
+Homepage: https://github.com/cockpit-project/starter-kit
+
+Package: cockpit-starter-kit
+Architecture: all
+Multi-Arch: foreign
+Depends: ${misc:Depends},
+         cockpit-bridge
+Description: Cockpit starter kit example module
+ The Cockpit Web Console enables users to administer GNU/Linux servers using a
+ web browser.
+ .
+ This package installs the example module used to start building a Cockpit
+ application.

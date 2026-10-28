@@ -1,0 +1,118 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ *
+ * Copyright (C) 2018 Red Hat, Inc.
+ */
+
+import React from 'react';
+
+import type { VM, StoragePool, StorageVolume } from '../../types';
+
+import { ListingTable } from "cockpit-components-table.jsx";
+import { InlineNotification } from 'cockpit-components-inline-notification.jsx';
+import { StorageVolumeDelete } from './storageVolumeDelete.jsx';
+import { StorageVolumeCreate } from './storageVolumeCreate.jsx';
+import { storagePoolId, convertToUnit, units, getStorageVolumesUsage } from '../../helpers.js';
+import cockpit from 'cockpit';
+
+import './storagePoolVolumesTab.css';
+
+const _ = cockpit.gettext;
+
+interface StoragePoolVolumesTabProps {
+    storagePool: StoragePool,
+    vms: VM[],
+}
+
+interface StoragePoolVolumesTabState {
+    rows: StorageVolume[];
+    deleteError?: string | undefined;
+    deleteErrorDetail?: string | undefined;
+}
+
+export class StoragePoolVolumesTab extends React.Component<StoragePoolVolumesTabProps, StoragePoolVolumesTabState> {
+    constructor(props: StoragePoolVolumesTabProps) {
+        super(props);
+
+        this.state = {
+            rows: props.storagePool.volumes.map(row => {
+                row.selected = false;
+                return row;
+            }),
+        };
+        this.deleteErrorHandler = this.deleteErrorHandler.bind(this);
+        this.onSelect = this.onSelect.bind(this);
+    }
+
+    static getDerivedStateFromProps(props: Readonly<StoragePoolVolumesTabProps>, current_state: StoragePoolVolumesTabState) {
+        if (props.storagePool.volumes.length !== current_state.rows.length) {
+            return { rows: props.storagePool.volumes };
+        }
+        return null;
+    }
+
+    deleteErrorHandler(deleteError: string, deleteErrorDetail: string) {
+        this.setState({ deleteError, deleteErrorDetail });
+    }
+
+    onSelect(_event: React.FormEvent, isSelected: boolean, rowId: number): void {
+        let rows;
+        if (rowId === -1) {
+            rows = this.state.rows.map(oneRow => {
+                oneRow.selected = isSelected;
+                return oneRow;
+            });
+        } else {
+            rows = [...this.state.rows];
+            rows[rowId].selected = isSelected;
+        }
+        this.setState({ rows });
+    }
+
+    render() {
+        const { storagePool, vms } = this.props;
+        const storagePoolIdPrefix = storagePoolId(storagePool.name, storagePool.connectionName);
+        const volumes = this.state.rows;
+        const isVolumeUsed = getStorageVolumesUsage(vms, storagePool);
+        const columnTitles = [_("Name"), _("Used by"), _("Size")];
+        const actions = [
+            <StorageVolumeDelete key='volume-delete-action'
+                    storagePool={storagePool}
+                    isVolumeUsed={isVolumeUsed}
+                    volumes={volumes.filter(row => row.selected)}
+                    deleteErrorHandler={this.deleteErrorHandler} />,
+            <StorageVolumeCreate key='volume-create-action'
+                    storagePool={storagePool} />
+        ];
+
+        const sortFunction = (volumeA: StorageVolume, volumeB: StorageVolume) => volumeA.name.localeCompare(volumeB.name);
+        const rows = volumes
+                .sort(sortFunction)
+                .map(volume => {
+                    const allocation = parseFloat(convertToUnit(volume.allocation, units.B, units.GiB).toFixed(2));
+                    const capacity = parseFloat(convertToUnit(volume.capacity, units.B, units.GiB).toFixed(2));
+                    const columns = [
+                        { title: <div id={`${storagePoolIdPrefix}-volume-${volume.name}-name`}>{volume.name}</div> },
+                        { title: <div id={`${storagePoolIdPrefix}-volume-${volume.name}-usedby`}>{(isVolumeUsed[volume.name] || []).join(', ')}</div>, },
+                        { title: <div id={`${storagePoolIdPrefix}-volume-${volume.name}-size`}>{`${allocation} / ${capacity} GB`}</div> },
+                    ];
+                    return { columns, selected: !!volume.selected, props: { key: volume.name } };
+                });
+
+        return (
+            <>
+                { this.state.deleteError &&
+                <InlineNotification type='danger' text={this.state.deleteError}
+                    {...this.state.deleteErrorDetail && { detail: this.state.deleteErrorDetail }}
+                    onDismiss={() => this.setState({ deleteError: undefined }) } /> }
+                <ListingTable variant='compact'
+                    actions={actions}
+                    aria-label={`Storage pool ${storagePool.name} Volumes`}
+                    emptyCaption={storagePool.active ? _("No storage volumes defined for this storage pool") : _("Activate the storage pool to administer volumes")}
+                    columns={columnTitles}
+                    onSelect={this.onSelect}
+                    rows={rows} />
+            </>
+        );
+    }
+}

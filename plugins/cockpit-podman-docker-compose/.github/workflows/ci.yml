@@ -1,0 +1,17 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: RXTX4816/cockpit-plugin-base-react/.github/workflows/ci-plugin.yml@main
+    with:
+      plugin-name: cockpit-compose
+    secrets: inherit

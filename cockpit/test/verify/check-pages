@@ -1,0 +1,1145 @@
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
+
+#
+# Copyright (C) 2013 Red Hat, Inc.
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
+
+import json
+import os
+import subprocess
+import tempfile
+import time
+from pathlib import Path
+
+import testlib
+from lib.constants import TEST_OS_DEFAULT
+
+RHEL_DOC_BASE = "https://docs.redhat.com/en/documentation"
+
+
+@testlib.nondestructive
+class TestPages(testlib.MachineCase):
+    def checkDocs(self, items):
+        m = self.machine
+        b = self.browser
+
+        b.click("#toggle-docs")
+        b.wait_visible("#toggle-docs-menu")
+        expected = "Web Console"
+        expected += "".join(items)
+        expected += "About Web Console"
+        # DOCUMENTATION_URL is only in Fedora, RHEL and Arch
+        if "fedora" in m.image:
+            expected = "Fedora Linux documentation" + expected
+        elif m.image.startswith("rhel"):
+            expected = "Red Hat Enterprise Linux documentation" + expected
+        elif m.image == "arch":
+            expected = "Arch Linux documentation" + expected
+
+        b.wait_collected_text("#toggle-docs-menu", expected)
+        b.click("#toggle-docs")
+        b.wait_not_present("#toggle-docs-menu")
+
+    def check_system_menu(self, label, present):
+        b = self.browser
+        if present:
+            b.wait_visible(f"#host-apps li a:contains('{label}')")
+        else:
+            b.wait_not_present(f"#host-apps li a:contains('{label}')")
+
+    def open_lang_modal(self):
+        self.browser.switch_to_top()
+        self.browser.open_session_menu()
+
+        self.browser.click("button.display-language-menu")
+        self.browser.wait_visible('#display-language-modal')
+
+    def testBasic(self):
+        m = self.machine
+        b = self.browser
+
+        self.restore_dir("/etc/systemd/system", post_restore_action="systemctl daemon-reload")
+        self.addCleanup(m.execute, "systemctl stop test.timer test.service")
+        m.write("/etc/systemd/system/test.service",
+                """
+[Unit]
+Description=Test Service
+
+[Service]
+ExecStart=/bin/true
+
+[Install]
+WantedBy=default.target
+""")
+        m.write("/etc/systemd/system/test.timer",
+                """
+[Unit]
+Description=Test timer
+
+[Timer]
+OnCalendar=daily
+""")
+        # After writing files out tell systemd about them
+        m.execute("systemctl daemon-reload")
+
+        m.execute("systemctl start test.timer")
+
+        self.allow_journal_messages("Failed to get realtime timestamp: Cannot assign requested address")
+
+        # On Debian and Ubuntu we have to generate the other locales
+        if "debian" in m.image:
+            m.write("/etc/locale.gen", "de_DE.UTF-8 UTF-8\n", append=True)
+            m.execute("locale-gen; update-locale")
+        elif "arch" == m.image:
+            m.write("/etc/locale.gen", "de_DE.UTF-8 UTF-8\n", append=True)
+            m.execute("locale-gen")
+        elif "ubuntu" in m.image:
+            m.execute("locale-gen de_DE; locale-gen de_DE.UTF-8; update-locale")
+
+        # login so that we have a cookie.
+        self.login_and_go("/system/services#/test.service")
+
+        # check that reloading a page with parameters works
+        b.enter_page("/system/services")
+        b.reload()
+        b.enter_page("/system/services")
+        b.wait_text(".service-name", "Test Service")
+        b.switch_to_top()
+        self.checkDocs(["Managing services"])
+        b.click("#toggle-docs")
+        b.wait_visible(f'#toggle-docs-menu a:contains("Managing services")[href^="{RHEL_DOC_BASE}"]')
+        b.wait_visible(f'#toggle-docs-menu a:contains("Web Console")[href^="{RHEL_DOC_BASE}"]')
+        b.click("#toggle-docs")
+        b.wait_not_present("#toggle-docs-menu")
+        b.go("/network")
+        self.checkDocs(["Managing networking bonds", "Managing networking teams",
+                        "Managing networking bridges", "Managing VLANs", "Managing firewall"])
+        b.go("/system")
+        self.checkDocs(["Configuring system settings"])
+        b.go("/network/firewall")
+        self.checkDocs(["Managing networking bonds", "Managing networking teams",
+                        "Managing networking bridges", "Managing VLANs", "Managing firewall"])
+        b.go("/system/services")
+
+        m.restart_cockpit()
+        b.relogin("/system/services")
+        b.wait_text(".service-name", "Test Service")
+
+        # check that navigating away and back preserves place
+        b.click_system_menu("/system")
+        b.wait_visible("#system_information_systime_button")
+        b.switch_to_top()
+        self.checkDocs(["Configuring system settings"])
+        b.click_system_menu("/system/services")
+        b.wait_visible("ol.pf-v6-c-breadcrumb__list")
+        b.wait_text(".service-name", "Test Service")
+        b.switch_to_top()
+        b.wait_js_cond('window.location.pathname === "/system/services"')
+        b.wait_js_cond('window.location.hash === "#/test.service"')
+
+        # check that when inside the component clicking the navbar
+        # takes you home
+        b.click_system_menu("/system/services")
+        b.wait_visible("#services-list")
+        b.wait_not_present("#service-details")
+        b.switch_to_top()
+        b.wait_js_cond('window.location.pathname === "/system/services"')
+        b.wait_js_cond('window.location.hash === ""')
+
+        # Navigate inside an iframe
+        b.switch_to_top()
+        b.go("/@localhost/playground/test")
+        b.enter_page("/playground/test")
+        b.click("button:contains('Go down')")
+        b.click("button:contains('Go down')")
+        b.switch_to_top()
+        b.wait_js_cond("window.location.hash == '#/0/1?length=1'")
+
+        # This should be visible now
+        b.switch_to_frame("cockpit1:localhost/playground/test")
+        b.wait_visible("#hidden")
+
+        # This should now say invisible
+        b.switch_to_top()
+        b.go("/@localhost/system/services")
+        b.switch_to_frame("cockpit1:localhost/playground/test")
+        b.wait_not_visible("#hidden")
+
+        # Test 'parent' manifest option
+        b.switch_to_top()
+        b.go("/metrics")
+        self.check_system_menu("Overview", present=True)
+        self.checkDocs(["Performance Co-Pilot"])
+
+        # Lets try changing the language
+
+        self.open_lang_modal()
+        b.click('#display-language-modal li[data-value=de-de] button')
+        b.click("#display-language-modal footer button.pf-m-primary")
+        b.wait_language("de-de")
+
+        # Wait for the shell to be fully loaded again so that b.go()
+        # starts working.
+        b.enter_page("/metrics")
+
+        # Check that the system page is translated
+        b.go("/system")
+        b.enter_page("/system")
+        b.click(".ct-overview-header button:contains('Neustart')")
+
+        # Restart dialog is loaded from pkg/lib and it also needs to be translated
+        b.wait_in_text("#shutdown-dialog", "Nachricht an angemeldete Benutzer")
+
+        # Systemd timer localization
+        b.go("/system/services")
+        b.switch_to_top()
+        b.wait_js_cond('document.title.indexOf("Dienste") === 0')
+        b.enter_page("/system/services")
+        b.click('#services-filter li:nth-child(4) a')
+        # HACK: the timers' next run/last trigger (col 3/4) don't always get filled (issue #9439)
+        # b.wait_in_text("tr[data-goto-unit='test\.timer'] td:nth-child(3)", "morgen um")
+
+        # BIOS date parsing; we don't want to introduce too many assumptions, just that the original MM/DD/YYYY
+        # was parsed at all, and the bios is from the 21st century (20YY)
+        # TestSystemInfo.testHardwareInfo does this more carefully
+        b.go("/system/hwinfo")
+        b.enter_page("/system/hwinfo")
+        b.wait_in_text('#hwinfo-system-info-list .hwinfo-system-info-list-item:nth-of-type(2) .pf-v6-c-description-list__group:nth-of-type(3) dd', " 20")
+
+        # Check the playground page
+        b.switch_to_top()
+        b.go("/playground/translate")
+        b.wait_js_cond('document.title.indexOf("Entwicklung") === 0')
+        b.enter_page("/playground/translate")
+
+        # HTML section
+        self.assertEqual(b.text("#translate-html"), "Bereit")
+        self.assertEqual(b.text("#translate-html-context"), "Bereiten")
+        self.assertEqual(b.text("#translate-html-yes"), "Nicht bereit")
+
+        # Glade section
+        self.assertEqual(b.text("#translatable-glade"), "Leer")
+        self.assertEqual(b.text("#translatable-glade-context"), "Leeren")
+
+        # Javascript
+        self.assertEqual(b.text("#underscore-empty"), "Leer")
+        self.assertEqual(b.text("#underscore-context-empty"), "Leeren")
+        self.assertEqual(b.text("#cunderscore-context-empty"), "Leeren")
+        self.assertEqual(b.text("#gettext-control"), "Steuerung")
+        self.assertEqual(b.text("#gettext-context-control"), "Strg")
+        self.assertEqual(b.text("#ngettext-disks-1"), "$0 Festplatte fehlt")
+        self.assertEqual(b.text("#ngettext-disks-2"), "$0 Festplatten fehlen")
+        self.assertEqual(b.text("#ngettext-context-disks-1"), "$0 Datenträger fehlt")
+        self.assertEqual(b.text("#ngettext-context-disks-2"), "$0 Datenträger fehlen")
+
+        # Frame title
+        b.switch_to_top()
+        b.wait_attr("iframe[name='cockpit1:localhost/system']", "title", "Überblick")
+
+        # Log out and check that login page is translated now
+        b.logout()
+        b.wait_visible('#password-group')
+        b.wait_text("#password-group > label", "Passwort")
+
+    def testAllLanguages(self):
+        # Test that pages do not oops
+        m = self.machine
+        b = self.browser
+
+        def line_sel(i):
+            return '.terminal .xterm-accessibility-tree div:nth-child(%d)' % i
+
+        pages = ["/system", "/system/logs", "/network", "/users", "/system/services", "/system/terminal"]
+
+        self.login_and_go('/system')
+        b.wait_visible('#overview')
+
+        self.open_lang_modal()
+        languages = b.eval_js("ph_select('#display-language-list li').map(e => e.attributes['data-value'].nodeValue)")
+        self.assertIn('en-us', languages)
+        b.click("#display-language-modal footer button.pf-m-link")  # Close the menu
+
+        for language in languages:
+            # Remove failed units which will show up in the first terminal line
+            m.execute("systemctl reset-failed")
+
+            b.go("/system")
+            b.enter_page("/system")
+
+            self.open_lang_modal()
+            b.click(f"#display-language-modal li[data-value={language}] button")
+            b.click("#display-language-modal footer button.pf-m-primary")
+            b.wait_language(language)
+
+            # Test some pages
+            for page in pages:
+                b.go(page)
+                b.enter_page(page)
+                b.wait_language(language)
+
+            # FIXME: bridge does not set locale
+            # locale = language.split("-")
+            # if len(locale) == 1:
+            #     locale.append("")
+            # locale = f"{locale[0]}_{locale[1].upper()}.UTF-8"
+
+            # b.wait_visible(".terminal .xterm-accessibility-tree")
+            # b.wait_in_text(line_sel(1), "admin")
+            # b.input_text("echo $LANG\n")
+            # b.wait_in_text(line_sel(2), locale)
+
+            b.switch_to_top()
+
+            b.wait_js_func("""(function (lang) {
+                let correct = true;
+                const rtl_langs = ["ar-eg", "fa-ir", "he-il", "ur-in"];
+                const dir = rtl_langs.includes(lang) ? "rtl" : "ltr";
+                document.querySelectorAll('#content iframe').forEach(el => {
+                    if (el.contentDocument.documentElement.lang !== lang)
+                        correct = false;
+                    if (el.contentDocument.documentElement.dir !== dir)
+                        correct = false;
+                });
+                return correct;
+            })""", language)
+            b.wait_attr(".index-page", "lang", language)
+
+        self.allow_restart_journal_messages()
+
+    def testPtBRLocale(self):
+        m = self.machine
+        b = self.browser
+
+        m.execute('useradd scruffy -s /bin/bash -c Scruffy')
+        m.execute('echo scruffy:foobar | chpasswd')
+
+        if "debian" in m.image:
+            m.execute('echo \'pt_BR.UTF-8 UTF-8\' >> /etc/locale.gen; locale-gen; update-locale')
+        elif "ubuntu" in m.image:
+            m.execute('locale-gen pt_BR; locale-gen pt_BR.UTF-8; update-locale')
+        elif "arch" == m.image:
+            m.execute('echo \'pt_BR.UTF-8 UTF-8\' >> /etc/locale.gen; locale-gen')
+
+        self.login_and_go('/system')
+        b.wait_visible('#overview')
+        self.open_lang_modal()
+        b.click('#display-language-modal li[data-value=pt-br] button')
+        b.click('#display-language-modal footer button.pf-m-primary')
+        b.wait_language("pt-br")
+
+        # Check that the system page is translated
+        b.go('/system')
+        b.enter_page('/system')
+        b.wait_language("pt-br")
+        b.wait_in_text('.ct-overview-header', 'Reiniciar')
+
+        # Systemd timer localization
+        b.go('/system/services')
+        b.enter_page('/system/services')
+        b.wait_language("pt-br")
+        b.click('#services-filter li:nth-child(4) a')
+        # HACK: the timers' next run/last trigger (col 3/4) don't always get filled (issue #9439)
+        # b.wait_in_text('tr[data-goto-unit=\'test\.timer\'] td:nth-child(3)', 'morgen um')
+
+        # Check the playground page
+        b.switch_to_top()
+        b.go('/playground/translate')
+        b.enter_page('/playground/translate')
+        b.wait_language("pt-br")
+
+        # HTML section
+        self.assertEqual(b.text('#translate-html'), 'Pronto')
+        self.assertEqual(b.text('#translate-html-context'), 'Pronto')
+        self.assertEqual(b.text('#translate-html-yes'), 'Não está pronto')
+
+        # Glade section
+        self.assertEqual(b.text('#translatable-glade'), 'Vazio')
+        self.assertEqual(b.text('#translatable-glade-context'), 'Vazio')
+
+        # Javascript
+        self.assertEqual(b.text('#underscore-empty'), 'Vazio')
+        self.assertEqual(b.text('#underscore-context-empty'), 'Vazio')
+        self.assertEqual(b.text('#cunderscore-context-empty'), 'Vazio')
+        self.assertEqual(b.text('#gettext-control'), 'Controle')
+        self.assertEqual(b.text('#gettext-context-control'), 'Controle')
+        self.assertEqual(b.text('#ngettext-disks-1'), '$0 disco não encontrado')
+        self.assertEqual(b.text('#ngettext-disks-2'), '$0 discos não encontrados')
+        self.assertEqual(b.text('#ngettext-context-disks-1'), '$0 disco não encontrado')
+        self.assertEqual(b.text('#ngettext-context-disks-2'), '$0 discos não encontrados')
+
+        # Log out and check that login page is translated now
+        b.logout()
+        b.wait_text('#password-group > label', 'Senha')
+
+        # translated variants of standard messages in testlib.py
+        self.allow_journal_messages("xargs: basename: .*13.*")
+
+    def testFrameReload(self):
+        b = self.browser
+        m = self.machine
+
+        frame = "cockpit1:localhost/playground/test"
+        self.addCleanup(self.machine.execute, "rm -f /tmp/counter")
+
+        self.login_and_go("/playground/test")
+
+        # Check that channels are closed when a frame is reloaded.
+
+        # Lock a file, that keeps a channel open.
+        m.execute("touch /tmp/playground-test-lock")
+        b.click(".lock-channel button")
+        b.wait_in_text(".lock-channel span", 'locked')
+        m.execute("! flock --nonblock /tmp/playground-test-lock true")
+
+        # Now reload the frame by kicking its "src" attribute.
+        b.switch_to_top()
+        b.eval_js('ph_set_attr("iframe[name=\'%s\']", "src", "../playground/test.html?i=1#/")' % frame)
+
+        # The channel and the lock should have gone away
+        m.execute("flock --timeout 10 /tmp/playground-test-lock true")
+
+        b.enter_page("/playground/test")
+        b.wait_not_in_text(".lock-channel span", 'locked')
+
+        self.allow_restart_journal_messages()
+
+    @testlib.skipBeiboot("no local overrides/config in beiboot mode")
+    def testShellReload(self):
+        b = self.browser
+        m = self.machine
+
+        self.login_and_go()
+
+        self.check_system_menu("Overview", present=True)
+        self.restore_dir("/home/admin")
+        m.write("/home/admin/.local/share/cockpit/foo/manifest.json",
+                '{ "menu": { "index": { "label": "FOO!" } } }')
+        b.reload()
+        self.check_system_menu("FOO!", present=True)
+
+    def testMenuSearch(self):
+        b = self.browser
+        m = self.machine
+
+        # On Ubuntu and Debian we would need to generate locales - just ignore it
+        self.allow_journal_messages("invalid or unusable locale: de_DE.UTF-8")
+
+        self.login_and_go()
+
+        filter_sel = ".pf-v6-c-text-input-group__text-input"
+
+        # Check that some page disappears and some stay
+        b.focus(filter_sel)
+        b.input_text("se")
+        b.wait_not_present("#host-apps li a:contains('Logs')")
+        b.wait_visible("#host-apps li a:contains('Services')")
+        b.wait_text("#host-apps li a[href='/system/services'] mark", "Se")
+
+        b.focus(filter_sel)
+        b.key("Backspace", 2)
+        b.wait_visible("#host-apps li a:contains('Logs')")
+        b.wait_visible("#host-apps li a:contains('Services')")
+
+        # Check that any substring work
+        b.focus(filter_sel)
+        b.input_text("CoUN")
+        b.wait_not_present("#host-apps li a:contains('Overview')")
+        b.wait_visible("#host-apps li a:contains('Accounts')")
+        b.wait_text("#host-apps li a[href='/users'] mark", "coun")
+
+        # Check it can also search by keywords
+        b.focus(filter_sel)
+        b.key("Backspace", 4)
+        b.input_text("systemd")
+        b.wait_visible("#host-apps li a:contains('Services')")
+        b.wait_text("#host-apps li a:contains('Services')", "ServicesContains: systemd")
+        b.wait_text("#host-apps li a[href='/system/services'] mark", "systemd")
+
+        # Clean up failed services for screenshots
+        m.execute("systemctl reset-failed")
+        b.wait_not_present("#services-error")
+
+        b.assert_pixels("#nav-system", "menu-search", skip_layouts=["mobile"])
+        b.set_layout("mobile")
+        b.click("#nav-system-item")
+        b.assert_pixels_in_current_layout("#nav-system", "menu-search")
+        b.click("#nav-system-item")
+        b.set_layout("desktop")
+
+        # Check that enter activates first result
+        b.focus(filter_sel)
+        b.key("Backspace", 7)
+        b.input_text("logs")
+        b.wait_not_present("#host-apps li a:contains('Services')")
+        b.wait_visible("#host-apps li a:contains('Logs')")
+        b.focus(filter_sel)
+        b.key("Enter")
+        b.enter_page("/system/logs")
+        b.wait_visible("#journal")
+
+        # Visited page, search should be cleaned up
+        b.switch_to_top()
+        b.wait_val(filter_sel, "")
+
+        # Check that escape cleans the search
+        b.input_text("logs")
+        b.wait_not_present("#host-apps li a:contains('Services')")
+        b.wait_visible("#host-apps li a:contains('Logs')")
+        b.focus(filter_sel)
+        b.key("Escape")
+        b.wait_val(filter_sel, "")
+        b.wait_visible("#host-apps li a:contains('Services')")
+
+        # Check that clicking on `Clear search` cleans the search
+        b.input_text("logs")
+        b.wait_not_present("#host-apps li a:contains('Services')")
+        b.wait_visible("#host-apps li a:contains('Logs')")
+        b.click("button:contains('Clear search')")
+        b.key("Backspace", 4)
+        b.wait_visible("#host-apps li a:contains('Services')")
+        b.wait_not_present("button:contains('Clear search')")
+
+        # Check that arrows navigate the menu
+        b.focus(filter_sel)
+        b.input_text("s")
+        b.wait_not_present("#host-apps li a:contains('Logs')")
+        b.key("ArrowDown", 2)
+        b.key("Enter")
+        # CoreOS images don't have cockpit-storaged; all others including bootc do
+        if "coreos" in m.image:
+            b.enter_page("/users")
+        else:
+            b.enter_page("/storage")
+
+        # Check we jump into subpage when defined in manifest
+        b.switch_to_top()
+        b.focus(filter_sel)
+        b.input_text("firew")
+        b.wait_visible("#host-apps li a:contains('Networking')")
+        b.wait_not_present("#host-apps li a:contains('Overview')")
+        b.click("#host-apps li a:contains('Networking')")
+        b.enter_page("/network/firewall")
+
+        # Search internationalized menu
+        self.open_lang_modal()
+
+        # Filter the available languages
+        b.set_input_text('#display-language-modal input[type=search]', "Deutsch")
+        b.click('#display-language-modal li[data-value=de-de] button')
+        b.wait_count("#display-language-modal li", 1)
+        b.set_input_text('#display-language-modal input[type=search]', "")
+
+        b.click('#display-language-modal li[data-value=de-de] button')
+        b.click("#display-language-modal footer button.pf-m-primary")
+        b.wait_language("de-de")
+
+        # Wait for the shell to be fully loaded again so that b.go()
+        # starts working.
+        b.enter_page("/network/firewall")
+
+        b.go("/system")
+        b.enter_page("/system")
+        b.wait_in_text(".ct-overview-header", "Neustart")
+
+        b.switch_to_top()
+        b.wait_visible("#host-apps li a:contains('Dienste')")
+        b.wait_visible("#host-apps li a:contains('Protokolle')")
+        b.focus(filter_sel)
+        b.input_text("dien")
+        b.wait_not_present("#host-apps li a:contains('Protokolle')")
+        b.wait_visible("#host-apps li a:contains('Dienste')")
+        b.wait_text("#host-apps li a[href='/system/services'] mark", "Dien")
+
+    def testShellPreload(self):
+        b = self.browser
+        m = self.machine
+
+        self.login_and_go()
+
+        # Check what's going on while playground/preloaded is still invisible
+        b.switch_to_top()
+        b.wait_attr('iframe[name="cockpit1:localhost/playground/preloaded"]', 'data-loaded', 1)
+        b.switch_to_frame("cockpit1:localhost/playground/preloaded")
+        b.wait_js_func('ph_text_is', "#host", m.execute("hostname").replace("\n", ""))
+        time.sleep(3)
+        b.wait_js_func('ph_text_is', "#release", "")
+
+        # Now navigate to it.
+        b.switch_to_top()
+        b.go("/playground/preloaded")
+        b.enter_page("/playground/preloaded")
+        b.wait_text("#release", m.execute("cat /etc/os-release").replace("\n", ""))
+
+    def testReactPatterns(self):
+        b = self.browser
+        m = self.machine
+
+        self.restore_dir('/home/admin')
+
+        stuff = os.path.join(self.vm_tmpdir, "stuff")
+        # prepare a directory for testing file autocomplete widget
+        m.execute(f"mkdir -p {stuff}/dir")
+        m.execute(f"mkdir -p {stuff}/dir1")
+        m.write(f"{stuff}/file1.txt", "")
+
+        self.login_and_go("/playground/react-patterns")
+
+        # test file completion widget
+        b.focus("#demo-file-ac input[type=text]")
+        b.input_text(stuff + "/")
+        # need to wait for the widget's "fast typing" inhibition delay to trigger the completion popup
+        b.wait_in_text(".pf-v6-c-menu li:nth-of-type(1) button", stuff + "/")
+        b.wait_in_text(".pf-v6-c-menu li:nth-of-type(2) button", "dir/")
+        b.wait_in_text(".pf-v6-c-menu li:nth-of-type(3) button", "dir1/")
+        b.wait_in_text(".pf-v6-c-menu li:nth-of-type(4) button", "file1.txt")
+        b.click(".pf-v6-c-menu li:nth-of-type(2) button")
+
+        # clear the file completion widget
+        b.click("#demo-file-ac div:first-of-type div:first-of-type button:nth-of-type(1)")
+        # test if input matches one entry, but is the prefix of other entry, widget should not descend into directory
+        b.focus("#demo-file-ac input[type=text]")
+        b.input_text(stuff + "/dir")
+        b.wait_in_text(".pf-v6-c-menu li:nth-of-type(1) button", stuff + "/dir")
+        b.wait_in_text(".pf-v6-c-menu li:nth-of-type(2) button", stuff + "/dir1")
+
+        # clear the file completion widget
+        b.click("#demo-file-ac div:first-of-type div:first-of-type button:nth-of-type(1)")
+        b.focus("#demo-file-ac input[type=text]")
+        b.input_text(stuff + "/")
+        b.wait_in_text(".pf-v6-c-menu li:nth-of-type(1) button", stuff + "/")
+        b.wait_in_text(".pf-v6-c-menu li:nth-of-type(4) button", "file1.txt")
+        b.click(".pf-v6-c-menu li:nth-of-type(4) button")
+        b.wait_not_present(".pf-v6-c-menu")
+
+        # now update file1, check robustness with dynamic events
+        m.execute(f"touch {stuff}/file1.txt")
+        b.focus("#demo-file-ac input[type=text]")
+        time.sleep(1)
+        b.key("End")
+        b.key("Backspace", 5)
+        # input is now $stuff/file
+        b.wait_in_text(".pf-v6-c-menu li:nth-of-type(1) button", "file1.txt")
+        b.key("Backspace", 4)
+        # input is now $stuff/, so all listings should be available
+        b.wait_in_text(".pf-v6-c-menu li:nth-of-type(4) button", "file1.txt")
+
+        # add new file
+        m.execute(f"touch {stuff}/other")
+        b.focus("#demo-file-ac input[type=text]")
+        # We need to tickle the widget to re-read the directory by changing to
+        # the previous directory and back to the directory we want to list.
+        # This is an implementation choice, to avoid re-reading the directories
+        # content with every user input change, which is definitely a performance cost
+        b.key("Backspace", 6)
+        time.sleep(1)
+        b.input_text("stuff/")
+        b.wait_in_text(".pf-v6-c-menu li:nth-of-type(5) button", "other")
+        # close the selector
+        b.click("#demo-file-ac input")
+        b.wait_not_present(".pf-v6-c-menu")
+
+        # Create test folder with known files
+        m.execute("mkdir /home/admin/newdir")
+        m.execute("mkdir /home/admin/newdir/dir1")
+        m.execute("mkdir /home/admin/newdir/dir2")
+        m.execute("touch /home/admin/newdir/file1")
+        m.execute("touch /home/admin/newdir/file2")
+        # test pre-selected autocomplete widget
+        b.wait_val("#demo-file-ac-preselected input", "/home/admin/newdir/file1")
+        # open the selector
+        b.click("#demo-file-ac-preselected input")
+        b.wait_visible(".pf-v6-c-menu")
+        # close and open again to reload the dir (which just got created)
+        b.click("#demo-file-ac-preselected .pf-v6-c-menu-toggle__button")
+        b.wait_not_present(".pf-v6-c-menu")
+        b.click("#demo-file-ac-preselected input")
+        # selection has all the files in the directory
+        paths = ["/home/admin/newdir", "/home/admin/newdir/dir1", "/home/admin/newdir/dir2", "/home/admin/newdir/file1", "/home/admin/newdir/file2"]
+        for i in range(5):
+            b.wait_in_text(f".pf-v6-c-menu li:nth-of-type({i + 1}) button", paths[i])
+
+    @testlib.skipOstree("No PCP available")
+    def testPlots(self):
+        b = self.browser
+        m = self.machine
+
+        self.addCleanup(m.execute, "systemctl stop pmcd")
+        m.execute("systemctl start pmcd")
+
+        # settroubleshootd eats memory in an unpredictable manner, silence it to reduce test flakes
+        if m.image.startswith(("fedora-", "rhel-")):
+            self.addCleanup(m.execute, "systemctl unmask setroubleshootd")
+            m.execute("systemctl mask --now setroubleshootd")
+
+        # packagekit/dnf often eats a lot of CPU/Memory; silence it to have better control over memory usage
+        packagekitd = "/usr/lib/packagekitd" if m.image == "arch" else "/usr/libexec/packagekitd"
+        m.execute(f"systemctl mask packagekit && killall -9 {packagekitd} && killall -9 dnf || true")
+        self.addCleanup(m.execute, "systemctl unmask packagekit")
+
+        # packagekitd consumes tons of memory on logging into Cockpit
+        self.disable_preload("packagekit")
+
+        self.login_and_go("/playground/plot")
+        b.wait_visible("#plot-direct")
+        b.wait_visible("#plot-pmcd")
+
+        def read_mem_info(machine):
+            info = {}
+            for line in machine.execute("cat /proc/meminfo").splitlines():
+                (name, value) = line.strip().split(":")
+                if value.endswith("kB"):
+                    info[name] = int(value[:-2]) * 1024
+                else:
+                    info[name] = int(value)
+            return info
+
+        # When checking whether the plots show the expected results,
+        # we look for a segment of the data of a certain duration
+        # whose average is in a certain range.  Otherwise any short
+        # outlier will make us miss the expected plateau.  Such
+        # outliers happen frequently with the CPU plot.  We also
+        # insist that the first and last value of the segment are in
+        # range, otherwise we would find any arbitrary average in a
+        # graph with a slope.
+
+        b.eval_js("""
+          ph_plateau = function (data, min, max, duration, label) {
+              var i, j;
+              var sum;  // sum of data[i..j]
+
+              function ok(val) {
+                  return val >= min && val <= max;
+              }
+
+              sum = 0;
+              i = 0;
+              for (j = 0; j < data.length; j++) {
+                  sum += data[j][1];
+                  while (i < j && (data[j][0] - data[i][0]) > duration * 1000) {
+                      avg = sum / (j - i + 1);
+                      if (ok(avg) && ok(data[i][1]) && ok(data[j][1]))
+                          return true;
+                      sum -= data[i][1];
+                      i++;
+                  }
+              }
+            return false;
+          }
+        """)
+
+        b.eval_js("""
+          ph_plot_data_plateau = function (sel, min, max, duration, label) {
+            return ph_plateau(window.plot_state.data(sel)[0].data, min, max, duration, label);
+          }
+        """)
+
+        meminfo = read_mem_info(m)
+        mem_avail = meminfo['MemAvailable']
+        with b.wait_timeout(60):
+            b.wait_js_func("ph_plot_data_plateau", "direct", mem_avail * 0.85, mem_avail * 1.15, 15, "mem")
+
+        meminfo = read_mem_info(m)
+        mem_avail = meminfo['MemAvailable']
+        with b.wait_timeout(60):
+            b.wait_js_func("ph_plot_data_plateau", "pmcd", mem_avail * 0.85, mem_avail * 1.15, 15, "mem")
+
+        # Internal metrics only has memory used (memory.used) as a metric not available memory.
+        meminfo = read_mem_info(m)
+        mem_avail = meminfo['MemTotal'] - meminfo['MemAvailable']
+        with b.wait_timeout(60):
+            b.wait_js_func("ph_plot_data_plateau", "internal", mem_avail * 0.85, mem_avail * 1.15, 15, "mem")
+
+    def testPageStatus(self):
+        b = self.browser
+
+        self.login_and_go("/playground")
+
+        b.set_input_text("#type", "info")
+        b.set_input_text("#title", "My Little Page Status")
+        b.click("#set-status")
+
+        b.switch_to_top()
+        b.wait_visible("#development-info")
+        b.mouse("#development-info", "mouseenter")
+        b.wait_in_text(".pf-v6-c-tooltip", "My Little Page Status")
+        b.mouse("#development-info", "mouseleave")
+        b.wait_not_present(".pf-v6-c-tooltip")
+
+        b.go("/playground/notifications-receiver")
+        b.enter_page("/playground/notifications-receiver")
+        b.wait_text("#received-type", "info")
+        b.wait_text("#received-title", "My Little Page Status")
+
+        b.switch_to_top()
+        b.go("/playground")
+        b.enter_page("/playground")
+        b.click("#clear-status")
+
+        b.switch_to_top()
+        b.wait_not_present("#development-info")
+
+        b.go("/playground/notifications-receiver")
+        b.enter_page("/playground/notifications-receiver")
+        b.wait_text("#received-type", "-")
+        b.wait_text("#received-title", "-")
+
+    def testHistory(self):
+
+        b = self.browser
+
+        def assert_location(path_hash):
+            self.assertEqual(path_hash,
+                             self.browser.eval_js("window.location.pathname + window.location.hash"))
+
+        self.login_and_go("/system")
+
+        # Create a login entry so that the "View last login" button appears
+        b.logout()
+        self.login_and_go("/system")
+
+        b.switch_to_top()
+        assert_location("/system")
+
+        b.click('#nav-system a[href="/users"]')
+        b.enter_page("/users")
+        b.switch_to_top()
+        assert_location("/users")
+
+        b.enter_page("/users")
+        b.click('a[href="#/root"]')
+        b.wait_visible("#account-title")
+        self.assertIn(b.text("#account-title"), ["root", "Super User"])
+        b.switch_to_top()
+        assert_location("/users#/root")
+
+        b.enter_page("/users")
+        b.click("nav a:contains('Accounts')")
+        b.wait_visible("button:contains('Create new account')")
+        b.switch_to_top()
+        assert_location("/users")
+
+        b.eval_js("window.history.back()")
+        b.enter_page("/users")
+        b.wait_visible("#account-title")
+        self.assertIn(b.text("#account-title"), ["root", "Super User"])
+        b.switch_to_top()
+        assert_location("/users#/root")
+
+        b.eval_js("window.history.forward()")
+        b.enter_page("/users")
+        b.wait_visible("button:contains('Create new account')")
+        b.switch_to_top()
+        assert_location("/users")
+
+        b.eval_js("window.history.back()")
+        b.enter_page("/users")
+        b.wait_visible("#account-title")
+        self.assertIn(b.text("#account-title"), ["root", "Super User"])
+        b.switch_to_top()
+        assert_location("/users#/root")
+
+        b.eval_js("window.history.back()")
+        b.enter_page("/users")
+        b.wait_visible("button:contains('Create new account')")
+        b.switch_to_top()
+        assert_location("/users")
+
+        b.click('#nav-system a[href="/system/terminal"]')
+        b.enter_page("/system/terminal")
+        b.switch_to_top()
+        assert_location("/system/terminal")
+
+        b.eval_js("window.history.back()")
+        b.enter_page("/users")
+        b.wait_visible("button:contains('Create new account')")
+        b.switch_to_top()
+        assert_location("/users")
+
+        b.eval_js("window.history.back()")
+        b.enter_page("/system")
+        b.switch_to_top()
+        assert_location("/system")
+
+        # ws container does not keep login history
+        if not self.machine.ws_container:
+
+            b.enter_page("/system")
+            b.click("button:contains('View login history')")
+            b.enter_page("/users")
+            b.wait_text("#account-title", "Administrator")
+            b.switch_to_top()
+            assert_location("/users#/admin")
+
+            b.eval_js("window.history.back()")
+            b.enter_page("/system")
+            b.switch_to_top()
+            assert_location("/system")
+
+    def testAllNavEntries(self):
+        b = self.browser
+        self.login_and_go()
+
+        # the <a> links should be unique by their href= attributes, so get these
+        hrefs = b.eval_js("[...document.querySelectorAll('#nav-system .nav-item a')].map(el => el.getAttribute('href'))")
+        for href in hrefs:
+            b.click(f"#nav-system .nav-item a[href='{href}']")
+            b.wait_visible(f"iframe.container-frame[name='cockpit1:localhost{href}'][data-loaded]")
+
+        # Same skips as in test/verify/check-kdump
+        img = self.machine.image
+        expect_kdump = (img != "arch" and
+                        not img.startswith("debian") and
+                        not img.startswith("ubuntu") and
+                        "coreos" not in img)  # does show up on bootc
+        self.check_system_menu("Kernel dump", present=expect_kdump)
+
+        # logging out too fast, some D-Bus services get disconnected
+        self.allow_restart_journal_messages()
+
+    def testUpload(self) -> None:
+        b = self.browser
+        m = self.machine
+
+        self.restore_dir("/home/admin")
+        self.login_and_go("/playground/react-patterns")  # , debugging="upload")
+        files_dir = Path(testlib.TEST_DIR) / "verify" / "files" / "metrics-archives"
+        test_upload_file = str(files_dir / "double_events.zip")
+        dest_file = "/home/admin/double_events.zip"
+
+        filehash = subprocess.check_output(["sha512sum", test_upload_file]).strip().decode().split(' ')[0]
+        filesize = subprocess.check_output(["stat", "--format", "%s", test_upload_file]).strip().decode()
+
+        b.upload_files("#demo-upload input[type='file']", [test_upload_file])
+
+        testlib.wait(lambda: m.execute(f"test -f {dest_file} && echo {dest_file} || echo 'no'").strip() == dest_file)
+        self.assertEqual(m.execute(f"stat --format '%s' {dest_file}").strip(), filesize)
+        self.assertEqual(m.execute(f"sha512sum {dest_file} | awk '{{ print $1 }}'").strip(), filehash)
+        b.wait_visible("#upload-file-btn:not(:disabled)")
+
+        # Various cases of big file upload
+        with tempfile.TemporaryDirectory() as tmpdir:
+
+            if b.browser == 'chromium':
+                # Chromium BiDi driver craps out with uploading large files, so throttle network speed there
+                # https://issues.chromium.org/issues/399131925
+                b.cdp_command("Network.emulateNetworkConditions",
+                              offline=False, latency=0, downloadThroughput=-1, uploadThroughput=50000)
+                big_size = "15MB"
+                expected_size = 15 * 1000 * 1000
+            else:
+                # BiDi does not have a network speed API, so we can't throttle on Firefox
+                # but that's happy with large files
+                big_size = "1500MB"
+                expected_size = 1500 * 1000 * 1000
+
+            big_file = str(Path(tmpdir) / "bigfile.img")
+            # the VM has a total of 1.5G memory, so this would fill it
+            # use SI sizes to make sure we test the last incomplete block
+            subprocess.check_call(["truncate", "-s", big_size, big_file])
+
+            # Uploaded to completion.  It's slow, so only do it on default OS.
+            # We do this to make sure the file is spooled to disk, not memory.
+            if self.machine.image == TEST_OS_DEFAULT:
+                b.upload_files("#demo-upload input[type='file']", [big_file])
+                b.wait(lambda: b.get_pf_progress_value(".upload-progress-0") >= 2)
+                with b.wait_timeout(120):
+                    b.wait_visible("#upload-file-btn:not(:disabled)")
+                self.assertEqual(int(m.execute('stat -c%s /home/admin/bigfile.img')), expected_size)
+                m.execute('rm /home/admin/bigfile.img')
+
+            # Cancelled
+            b.upload_files("#demo-upload input[type='file']", [big_file])
+            b.wait(lambda: b.get_pf_progress_value(".upload-progress-0") >= 2)
+            b.click(".cancel-button-0")
+            b.wait_visible("#upload-file-btn:not(:disabled)")
+            b.wait_in_text(".pf-v6-c-alert", "Aborted")
+            m.execute('! test -f /home/admin/bigfile.img')
+
+            # Early ENOSPC error (before we would block on 'ack')
+            m.execute("mkdir -p /mnt/upload; mount -t tmpfs -o size=1M none /mnt/upload;")
+            self.addCleanup(m.execute, "umount /mnt/upload; rmdir /mnt/upload;")
+            b.set_file_autocomplete_val("#demo-upload", "/mnt/upload/")
+            b.upload_files("#demo-upload input[type='file']", [big_file])
+            b.wait_visible("#upload-file-btn:not(:disabled)")
+            b.wait_in_text(".pf-v6-c-alert", "No space left on device")
+            self.assertEqual(m.execute('ls -A /mnt/upload'), '')  # nothing left behind
+
+            # Later ENOSPC error (after we've blocked)
+            m.execute("umount /mnt/upload; mount -t tmpfs -o size=10M none /mnt/upload;")
+            b.set_file_autocomplete_val("#demo-upload", "/mnt/upload/")
+            b.upload_files("#demo-upload input[type='file']", [big_file])
+            b.wait_visible("#upload-file-btn:not(:disabled)")
+            b.wait_in_text(".pf-v6-c-alert", "No space left on device")
+            self.assertEqual(m.execute('ls -A /mnt/upload'), '')
+
+        # Upload permission error
+        b.drop_superuser()
+        b.set_file_autocomplete_val("#demo-upload", "/var/")
+        b.upload_files("#demo-upload input[type='file']", [test_upload_file])
+        b.wait_in_text(".pf-v6-c-alert", "Not permitted to perform this action")
+
+    def testUploadMultiple(self) -> None:
+        b = self.browser
+        m = self.machine
+
+        self.restore_dir("/home/admin")
+        dest_dir = "/home/admin/keys/"
+        m.execute(['runuser', '-u', 'admin', 'mkdir', dest_dir])
+        files_dir = Path(testlib.TEST_DIR) / "verify" / "files" / "ssh"
+        files = [str(files_dir / f) for f in os.listdir(files_dir)]
+        print("to be uploaded files", files)
+
+        self.login_and_go("/playground/react-patterns")  # , debugging="upload")
+        b.wait_visible("#demo-upload")
+        b.set_file_autocomplete_val("#demo-upload", dest_dir)
+        b.upload_files("#demo-upload input[type='file']", files)
+
+        with b.wait_timeout(30):
+            b.wait(lambda: int(m.execute(f"ls {dest_dir} | wc -l").strip()) == len(files))
+        b.wait_visible("#upload-file-btn:not(:disabled)")
+
+    def testUserInfo(self) -> None:
+        b = self.browser
+        m = self.machine
+
+        m.execute("""
+            groupadd test
+            gpasswd -a admin test
+        """)
+
+        self.login_and_go("/playground/test")
+        b.wait_visible("#user-info")
+        b.wait(lambda: "groups" in b.text("#user-info"))
+        user_info = json.loads(b.text("#user-info"))
+        self.assertEqual(user_info["home"], "/var/home/admin" if m.ostree_image else "/home/admin")
+        # default group is first
+        self.assertEqual(user_info["groups"][0], m.execute("id -gn admin").strip())
+        self.assertIn("test", user_info["groups"])
+        self.assertEqual(str(user_info["id"]), m.execute("id -u admin").strip())
+        self.assertEqual(str(user_info["gid"]), m.execute("id -g admin").strip())
+
+    @testlib.skipImage("No SELinux", "debian-*", "ubuntu-*", "arch")
+    def testFSReplaceSELinuxContext(self) -> None:
+        b = self.browser
+        m = self.machine
+
+        def set_content_and_validate(path, content, custom_context):
+            b.set_input_text("#fsreplace1-filename", path)
+            b.set_input_text("#fsreplace1-content", content)
+            b.set_checked("#fsreplace1-use-tag", val=True)
+            b.click("#fsreplace1-create")
+            b.wait_visible("#fsreplace1-create:not(:disabled)")
+
+            self.assertEqual(m.execute(f"cat {path}"), content)
+            se_context = m.execute(f"stat --format=%C {path}").strip()
+            self.assertEqual(se_context, custom_context)
+
+        path = f"{self.vm_tmpdir}/custom-selinux-context"
+        custom_context = "system_u:object_r:proc_t:s0"
+        m.execute(f"""
+            touch {path}
+            chcon {custom_context} {path}
+        """)
+
+        self.login_and_go("/playground/test")
+        b.wait_visible("#fsreplace1-create")
+        set_content_and_validate(path, "data", custom_context)
+
+        # As normal user
+        b.drop_superuser()
+        self.restore_dir("/home/admin")
+        path = "/home/admin/custom-selinux-context-user"
+        custom_context = "system_u:object_r:proc_t:s0"
+        m.execute("runuser -u admin -- sh -ex", input=f"touch {path}")
+        m.execute(f"chcon {custom_context} {path}")
+
+        b.wait_visible("#fsreplace1-create")
+        set_content_and_validate(path, "user data", custom_context)
+
+    @testlib.skipBeiboot("no local overrides/config in beiboot mode")
+    def testInvalidManifest(self):
+        b = self.browser
+        m = self.machine
+
+        self.login_and_go("/system")
+        b.switch_to_top()
+        self.check_system_menu("Overview", present=True)
+        self.check_system_menu("Networking", present=True)
+
+        # Break the Networking manifest by violating the type of the "order" field.
+        m.write("/etc/cockpit/networkmanager.override.json", '{"menu":{"index":{"order":"not-a-number"}}}')
+
+        b.reload()
+        self.check_system_menu("Overview", present=True)
+        self.check_system_menu("Networking", present=False)
+
+    def testFsreplaceOwnership(self) -> None:
+        b = self.browser
+
+        self.login_and_go("/playground/test")
+
+        def stat(fmt: str, path: str) -> str:
+            return self.machine.execute(['stat', f'--format={fmt}', path]).strip()
+
+        def assert_stat(fmt: str, path: str, expected: str) -> None:
+            self.assertEqual(stat(fmt, path), expected)
+
+        def assert_mode(path: str, mode: str) -> None:
+            assert_stat('%a', path, mode)
+
+        def assert_owner(path: str, owner: str) -> None:
+            assert_stat('%U:%G', path, owner)
+
+        def assert_content(path: str, expected: str) -> None:
+            self.assertEqual(self.machine.execute(f"cat {path}").strip(), expected)
+
+        def set_file_bits(filename: str, content: str,
+                          owner: str = "", group: str = "",
+                          mode: str | None = None) -> None:
+            b.set_input_text("#fsreplace1-filename", filename)
+            b.set_input_text("#fsreplace1-content", content)
+            b.set_input_text("#fsreplace1-user", owner)
+            b.set_input_text("#fsreplace1-group", group)
+            if mode is not None:
+                b.set_input_text("#fsreplace1-mode", mode)
+
+            b.click("#fsreplace1-create")
+            b.wait_visible("#fsreplace1-create:not(:disabled)")
+
+        # Set file permissions on new files
+        filename = "/home/admin/admin.txt"
+        content = "adminfile"
+        set_file_bits(filename, content, "admin", "root")
+        assert_owner(filename, "admin:root")
+        assert_content(filename, content)
+
+        filename = "/home/admin/root.txt"
+        content = "rootfile"
+        set_file_bits(filename, content, "root", "root")
+        assert_owner(filename, "root:root")
+        assert_content(filename, content)
+
+        filename = "/home/admin/root.txt"
+        content = "rootfile"
+        set_file_bits(filename, content, "root", "root")
+        assert_owner(filename, "root:root")
+        assert_content(filename, content)
+
+        filename = f"{self.vm_tmpdir}/root-mode.txt"
+        set_file_bits(filename, content, "root", "root", str(0o600))
+        assert_owner(filename, "root:root")
+        assert_mode(filename, "600")
+        assert_content(filename, content)
+
+        # Mode on existing files
+        filename = f"{self.vm_tmpdir}/existing.txt"
+        self.machine.execute(f"install -m 644 -g admin -o admin /dev/null {filename}")
+        set_file_bits(filename, content, "root", "root", str(0o600))
+        assert_owner(filename, "root:root")
+        assert_mode(filename, "600")
+        assert_content(filename, content)
+
+
+if __name__ == '__main__':
+    testlib.test_main()

@@ -1,0 +1,115 @@
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
+
+#
+# Copyright (C) 2013 Red Hat, Inc.
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
+
+import testlib
+
+
+@testlib.nondestructive
+class TestReauthorize(testlib.MachineCase):
+    def testBasic(self):
+        self.allow_journal_messages('.*dropping message while waiting for child to exit.*')
+        b = self.browser
+        m = self.machine
+
+        # Log in without being authorized
+        self.login_and_go("/playground/test", superuser=False)
+        b.leave_page()
+        b.check_superuser_indicator("Limited access")
+        b.enter_page("/playground/test")
+        b.click(".cockpit-internal-reauthorize button")
+        b.wait_in_text(".cockpit-internal-reauthorize span", 'result:')
+        self.assertEqual(b.text(".cockpit-internal-reauthorize span"), 'result: access-denied')
+
+        # Log in again but be authorized
+        b.relogin("/playground/test", superuser=True)
+        b.leave_page()
+        b.check_superuser_indicator("Administrative access")
+        b.enter_page("/playground/test")
+        b.click(".cockpit-internal-reauthorize button")
+        b.wait_in_text(".cockpit-internal-reauthorize span", 'result:')
+        self.assertEqual(b.text(".cockpit-internal-reauthorize span"), 'result: authorized')
+
+        # Lock a file so that we can check that the lock went away
+        # after deauthorizing.
+        m.execute("touch /tmp/playground-test-lock")
+        b.click(".lock-channel button")
+        b.wait_in_text(".lock-channel span", 'locked')
+        m.execute("! flock --nonblock /tmp/playground-test-lock true")
+
+        # Deauthorize user
+        b.drop_superuser()
+        m.execute("flock --timeout 10 /tmp/playground-test-lock true")
+        b.click(".cockpit-internal-reauthorize button")
+        b.wait_in_text(".cockpit-internal-reauthorize span", 'result:')
+        self.assertEqual(b.text(".cockpit-internal-reauthorize span"), 'result: access-denied')
+
+    @testlib.skipWsContainer("ssh root login not allowed")
+    def testSuper(self):
+        b = self.browser
+
+        self.login_and_go("/playground/test")
+
+        b.click(".super-channel button")
+        b.wait_in_text(".super-channel span", 'result: uid=0')
+
+        # Deauthorize
+        b.drop_superuser()
+        b.click(".super-channel button")
+        b.wait_in_text(".super-channel span", 'result: access-denied')
+
+        # When root, the 'Limited access' etc indicators should not be visible
+        b.logout()
+        self.login_and_go("/playground/test", user="root", enable_root_login=True)
+        b.click(".super-channel button")
+        b.wait_in_text(".super-channel span", 'result: uid=0')
+        b.leave_page()
+        b.check_superuser_indicator("")
+
+    @testlib.skipImage("TODO: fix for OpenSUSE", "opensuse-tumbleweed")
+    def testSudo(self):
+        m = self.machine
+        b = self.browser
+
+        m.execute("useradd user -s /bin/bash -c Barney")
+        m.execute("echo user:foobar | chpasswd")
+
+        b.default_user = "user"
+        self.login_and_go("/playground/test")
+        b.click(".super-channel button")
+        b.wait_in_text(".super-channel span", 'result: ')
+
+        # TODO: this should only be 'access-denied'
+        legit_results = [f'result: {err}' for err in ('access-denied', 'authentication-failed', 'terminated')]
+        self.assertIn(b.text(".super-channel span"), legit_results)
+
+        b.logout()
+
+        # So first ask the user to retype their password
+        self.write_file("/etc/sudoers.d/user-override", "user ALL=(ALL) ALL", append=True)
+        self.login_and_go("/playground/test")
+        b.click(".super-channel button")
+        b.wait_in_text(".super-channel span", 'result: ')
+        self.assertIn('result: uid=0', b.text(".super-channel span"))
+        b.logout()
+
+        # Next login without starting a privileged bridge
+        self.login_and_go("/playground/test", superuser=False)
+        b.click(".super-channel button")
+        b.wait_in_text(".super-channel span", 'result: ')
+        self.assertEqual(b.text(".super-channel span"), 'result: access-denied')
+        b.logout()
+
+        # Even if sudo doesn't require a password, we shouldn't start a privileged bridge
+        self.write_file("/etc/sudoers.d/user-override", "user ALL=(ALL) NOPASSWD:ALL", append=True)
+        self.login_and_go("/playground/test", superuser=False)
+        b.click(".super-channel button")
+        b.wait_in_text(".super-channel span", 'result: ')
+        self.assertEqual(b.text(".super-channel span"), 'result: access-denied')
+
+
+if __name__ == '__main__':
+    testlib.test_main()

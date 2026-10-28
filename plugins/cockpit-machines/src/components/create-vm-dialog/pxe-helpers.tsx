@@ -1,0 +1,164 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ *
+ * Copyright (C) 2019 Red Hat, Inc.
+ */
+
+import cockpit from 'cockpit';
+
+import type { optString, ConnectionName, NodeDevice, Network } from '../../types';
+import { appState } from '../../state';
+
+import { DialogDropdownSelectOption } from 'cockpit/dialog';
+
+const _ = cockpit.gettext;
+
+/*
+ * Removes the virbr*-nic libvirt devices from a given Network Node Devices array
+ */
+function filterVirtualBridgesFromNetNodeDevices(
+    netNodeDevices: NodeDevice[],
+    virtualNetworks: Network[]
+): NodeDevice[] {
+    /* Do not show to the user the libvirt virbrX-nic devices since these are
+     * supposed to be managed through virtual networks
+     */
+    const libvirtVirBridges = getLibvirtNetworkBridges(virtualNetworks);
+
+    return netNodeDevices.filter(netNodeDevice => {
+        cockpit.assert(netNodeDevice.capability.type == "net");
+        if (!netNodeDevice.capability.interface || !netNodeDevice.capability.interface.endsWith('-nic'))
+            return true;
+
+        for (const i in libvirtVirBridges) {
+            if (netNodeDevice.capability.interface == (libvirtVirBridges[i] + '-nic'))
+                return false;
+        }
+        return true;
+    });
+}
+
+/**
+ * Returns a list of all virbrX Virtual Networks.
+ */
+function getLibvirtNetworkBridges(virtualNetworks: Network[]): string[] {
+    return virtualNetworks
+            .filter(network => network.bridge && network.bridge.name)
+            .map(network => network.bridge!.name!);
+}
+
+/**
+ * Filters an array of node devices returning only devices of specific capability.
+ */
+function getNodeDevicesOfType(nodeDevices: NodeDevice[], type: string): NodeDevice[] {
+    return nodeDevices.filter(nodeDevice => nodeDevice.capability.type == type);
+}
+
+/**
+ * Return the Virtual Network matching a name from a Virtual Networks list.
+ */
+export function getVirtualNetworkByName(connectionName: ConnectionName, virtualNetworkName: string): Network {
+    return appState.networks.filter(virtualNetwork => virtualNetwork.connectionName == connectionName && virtualNetwork.name == virtualNetworkName)[0];
+}
+
+/**
+ * Return a short description of the Virtual Network.
+ */
+function getVirtualNetworkDescription(virtualNetwork: Network): string {
+    let mode;
+    let dev;
+    const forward = virtualNetwork.forward;
+
+    if (forward) {
+        mode = forward.mode;
+        dev = forward.dev;
+    }
+
+    if (mode || dev) {
+        if (!mode || mode == 'nat') {
+            if (dev)
+                return cockpit.format(_("NAT to $0"), dev);
+            else
+                return 'NAT';
+        } else if (mode == 'route') {
+            if (dev)
+                return cockpit.format(_("Route to $0"), dev);
+            else
+                return _("Routed network");
+        } else {
+            if (dev)
+                return cockpit.format('$0 to $1', mode, dev);
+            else
+                return cockpit.format(_("$0 network"), mode.toUpperCase());
+        }
+    } else {
+        return _("Isolated network");
+    }
+}
+
+export function getVirtualNetworkPXESupport(virtualNetwork: Network): boolean {
+    if (virtualNetwork.forward && virtualNetwork.forward.mode != 'nat') {
+        return true;
+    }
+
+    return !!virtualNetwork.ip.find(ip => ip.dhcp.bootp);
+}
+
+/**
+ * Returns the first available Network Resource to be used for showing
+   to PXE Network Sources list.
+ */
+export function getPXEInitialNetworkSource(nodeDevices: NodeDevice[], virtualNetworks: Network[]): optString {
+    if (virtualNetworks.length > 0)
+        return cockpit.format('network=$0', virtualNetworks[0].name);
+
+    const netNodeDevices = filterVirtualBridgesFromNetNodeDevices(
+        getNodeDevicesOfType(nodeDevices, 'net'),
+        virtualNetworks
+    );
+
+    // Don't use localhost as default PXE source
+    const source = netNodeDevices.find(dev => dev.capability.type == "net" && dev.capability.interface !== "lo");
+    if (source && source.capability.type == "net")
+        return cockpit.format('type=direct,source=$0,source.mode=bridge', source.capability.interface);
+}
+
+/**
+ * Returns the Select Entries rows for the PXE Network Sources.
+ */
+export function getPXENetworkOptions(connectionName: ConnectionName): DialogDropdownSelectOption<string>[] {
+    const nodeDevices = appState.nodeDevices.filter(d => d.connectionName == connectionName);
+    const virtualNetworks = appState.networks.filter(n => n.connectionName == connectionName);
+
+    /* Do not show to the user the libvirt virbrX-nic devices since these are
+     * supposed to be managed through virtual networks
+     */
+    const netNodeDevices = filterVirtualBridgesFromNetNodeDevices(
+        getNodeDevicesOfType(nodeDevices, 'net'),
+        virtualNetworks
+    );
+
+    const virtualNetworkRows = virtualNetworks.map(network => {
+        const data = cockpit.format('network=$0', network.name);
+        const label = cockpit.format("$0 $1: $2", _("Virtual network"), network.name, getVirtualNetworkDescription(network));
+
+        return { value: data, label };
+    });
+
+    const netNodeDevicesRows = netNodeDevices.map(netNodeDevice => {
+        cockpit.assert(netNodeDevice.capability.type == "net");
+        const iface = netNodeDevice.capability.interface;
+        const data = cockpit.format('type=direct,source=$0,source.mode=bridge', iface);
+        const label = cockpit.format("$0 $1: macvtap", _("Host device"), iface);
+
+        return { value: data, label };
+    });
+
+    if (virtualNetworkRows.length == 0 && netNodeDevicesRows.length == 0) {
+        const label = _("No networks available");
+
+        return [{ value: 'no-resource', label }];
+    }
+
+    return [...virtualNetworkRows, ...netNodeDevicesRows];
+}

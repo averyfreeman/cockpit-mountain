@@ -1,0 +1,36 @@
+# Managed by Cockpit Sudo Manager
+# DO NOT EDIT BY HAND
+#
+# Global sudo policy primitives.
+# This file defines only minimal, reusable aliases.
+# No role intent. No service names. No package management.
+
+# ==========================================================
+# RunAs aliases
+# ==========================================================
+Runas_Alias ROOT     = root
+Runas_Alias SERVICES = root, wwwrun
+
+# ==========================================================
+# systemctl primitives (shape only)
+# ==========================================================
+Cmnd_Alias SYSTEMCTL_STATUS  = /usr/bin/systemctl status *
+Cmnd_Alias SYSTEMCTL_START   = /usr/bin/systemctl start *
+Cmnd_Alias SYSTEMCTL_STOP    = /usr/bin/systemctl stop *
+Cmnd_Alias SYSTEMCTL_RESTART = /usr/bin/systemctl restart *
+Cmnd_Alias SYSTEMCTL_RELOAD  = /usr/bin/systemctl reload *
+Cmnd_Alias SYSTEMCTL_ENABLE  = /usr/bin/systemctl enable *
+Cmnd_Alias SYSTEMCTL_DISABLE = /usr/bin/systemctl disable *
+
+# ==========================================================
+# journalctl primitives (read-only)
+# ==========================================================
+Cmnd_Alias JOURNALCTL_READ = \
+  /usr/bin/journalctl, \
+  /usr/bin/journalctl -xe, \
+  /usr/bin/journalctl -u *
+
+# ==========================================================
+# system lifecycle primitives
+# ==========================================================
+Cmnd_Alias SYSTEM_REBOOT = /usr/sbin/reboot

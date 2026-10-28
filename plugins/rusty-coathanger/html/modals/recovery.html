@@ -1,0 +1,659 @@
+<!-- Recovery screen + the "Verify recovery" drill dialog.
+     boot.js injects this into #hangar-partials before Alpine starts. The screen
+     itself is teleported into #hangar-recovery so the markup and the modal share
+     one component instance — the drill needs the ISO path the build produced, and
+     two x-data roots could not agree on it. -->
+<!-- No x-init="init()" here: Alpine 3 calls init() by itself when the x-data
+     object defines one, so writing it out ran init TWICE — two listeners for
+     every event, and a dialog that received its own open event twice. The
+     second delivery resolved the caller's promise with null, so pressing Save
+     on a job closed the dialog and wrote nothing, in silence. -->
+<div x-data="hangarRecoveryUi()">
+
+<template x-teleport="#hangar-recovery">
+<div>
+
+    <!-- The debt, stated once ---------------------------------------------- -->
+    <div class="alert alert-warning">
+        <h2 class="h6 mb-2">How this works, and what it costs</h2>
+        <p class="mb-2">
+            Relax-and-Recover (ReaR) builds the bootable rescue image, and restic holds
+            the data. ReaR has no restic workflow, so hangar generates a
+            <span class="hangar-mono">BACKUP=EXTERNAL</span> configuration — an approach
+            ReaR's own documentation calls a last resort, and which its maintainers do
+            not support.
+        </p>
+        <p class="mb-0">
+            hangar generates that file rather than leaving you to hand-write the
+            unsupported part, and gives you a way to check it on this machine:
+            <strong>Verify recovery</strong> boots the image you just built in a
+            throwaway VM and reports whether recovery finished.
+        </p>
+    </div>
+
+    <div x-show="loading" class="hangar-empty" role="status">Loading disaster recovery configuration…</div>
+
+    <div x-show="!loading">
+
+        <!-- 1. Configure --------------------------------------------------- -->
+        <h2 class="h5 mt-2">1. Configure</h2>
+
+        <div class="row g-3">
+            <div class="col-md-6">
+                <label class="form-label" for="hangar-dr-repo">Recover from repository</label>
+
+                <!-- No empty dropdowns anywhere in hangar: a picker with nothing in
+                     it offers a choice that does not exist. When there is no
+                     repository, the control is replaced by the action that makes
+                     one. -->
+                <template x-if="repos.length">
+                    <select id="hangar-dr-repo" class="form-select"
+                            x-model="form.repoId" @change="onRepoChange()">
+                        <option value="">Choose a repository…</option>
+                        <template x-for="r in repos" :key="r.id">
+                            <option :value="r.id" x-text="r.id + ' — ' + r.label"></option>
+                        </template>
+                    </select>
+                </template>
+
+                <template x-if="!repos.length">
+                    <div class="hangar-empty py-3">
+                        <p class="mb-2">There is no repository yet.</p>
+                        <p class="small mb-3">Disaster recovery restores from a repository, so there
+                           has to be one before a rescue image can be configured.</p>
+                        <button type="button" class="btn btn-sm btn-primary"
+                                @click="goCreateRepository()">Create one now</button>
+                    </div>
+                </template>
+            </div>
+
+            <div class="col-md-6">
+                <label class="form-label" for="hangar-dr-url">Repository URL</label>
+                <input id="hangar-dr-url" class="form-control hangar-mono"
+                       x-model="form.repoUrl" spellcheck="false" autocomplete="off">
+            </div>
+
+            <div class="col-md-3">
+                <label class="form-label" for="hangar-dr-kind">Backend</label>
+                <select id="hangar-dr-kind" class="form-select" x-model="form.repoKind">
+                    <template x-for="k in ['local','sftp','rest','s3','b2','azure','gs','rclone']" :key="k">
+                        <option :value="k" x-text="k"></option>
+                    </template>
+                </select>
+            </div>
+
+            <div class="col-md-4">
+                <label class="form-label" for="hangar-dr-host">Snapshot host filter</label>
+                <input id="hangar-dr-host" class="form-control" x-model="form.host"
+                       placeholder="this machine's hostname" autocomplete="off">
+                <div class="form-text">
+                    Restricts <span class="hangar-mono">restore latest</span> to snapshots
+                    from one host, so a shared repository cannot restore someone else's
+                    machine onto this one.
+                </div>
+            </div>
+
+            <div class="col-md-5">
+                <label class="form-label" for="hangar-dr-keypath">Password file</label>
+                <input id="hangar-dr-keypath" class="form-control hangar-mono"
+                       x-model="form.keyPath" spellcheck="false" autocomplete="off"
+                       placeholder="/etc/hangar/repos/&lt;id&gt;.key">
+            </div>
+
+            <div class="col-md-6">
+                <label class="form-label" for="hangar-dr-paths">Paths to back up</label>
+                <div class="d-flex gap-2 align-items-start">
+                    <div class="flex-grow-1">
+                        <textarea id="hangar-dr-paths" class="form-control hangar-mono" rows="3"
+                              x-model="form.backupPaths" spellcheck="false"></textarea>
+                    </div>
+                    <button type="button" class="btn btn-outline-secondary text-nowrap align-self-start"
+                            @click="browsePath('backupPaths', { multi: true, mode: 'any', title: 'Add a path to back up' })" aria-label="Browse for a path to back up">Browse…</button>
+                </div>
+                <div class="form-text">One absolute path per line.</div>
+            </div>
+
+            <div class="col-md-6">
+                <label class="form-label" for="hangar-dr-excludes">Excludes</label>
+                <textarea id="hangar-dr-excludes" class="form-control hangar-mono" rows="3"
+                          x-model="form.excludes" spellcheck="false"></textarea>
+                <div class="form-text">
+                    restic applies no implicit excludes. Removing
+                    <span class="hangar-mono">/proc</span>, <span class="hangar-mono">/sys</span>
+                    or <span class="hangar-mono">/dev</span> from this list will back up the
+                    kernel's virtual filesystems.
+                </div>
+            </div>
+
+            <!-- The same exclude file a backup job uses. A machine's exclusions are
+                 a property of the machine, not of one job: pointing both at one file
+                 means the disaster-recovery snapshot skips what the nightly one
+                 skips, and editing the file changes both. -->
+            <div class="col-md-6">
+                <label class="form-label" for="hangar-dr-excludefile">Exclude file</label>
+                <div class="d-flex gap-2 align-items-start">
+                    <div class="flex-grow-1">
+                        <input id="hangar-dr-excludefile" class="form-control hangar-mono"
+                               x-model="form.excludeFile" spellcheck="false" autocomplete="off"
+                               placeholder="/home/you/excludes.txt">
+                        <div class="form-text">
+                            Optional. One pattern per line, passed to restic as
+                            <span class="hangar-mono">--exclude-file</span>. Use the same file as
+                            your backup job so both skip the same things.
+                        </div>
+                    </div>
+                    <button type="button" class="btn btn-outline-secondary text-nowrap align-self-start"
+                            @click="browsePath('excludeFile', { mode: 'file', title: 'Choose the exclude file' })"
+                            aria-label="Browse for the exclude file">Browse…</button>
+                </div>
+            </div>
+
+            <div class="col-md-6">
+                <label class="form-label" for="hangar-dr-output">ISO output location</label>
+                <div class="d-flex gap-2 align-items-start">
+                    <div class="flex-grow-1">
+                        <input id="hangar-dr-output" class="form-control hangar-mono"
+                           x-model="form.outputUrl" spellcheck="false" autocomplete="off"
+                           placeholder="file:///home/you">
+                    </div>
+                    <button type="button" class="btn btn-outline-secondary text-nowrap align-self-start"
+                            @click="browsePath('outputUrl', { mode: 'dir', title: 'Choose where to write the rescue image' })" aria-label="Browse for the rescue image output folder">Browse…</button>
+                </div>
+            </div>
+
+            <div class="col-md-3">
+                <label class="form-label" for="hangar-dr-isodefault">Rescue boot default</label>
+                <select id="hangar-dr-isodefault" class="form-select" x-model="form.isoDefault">
+                    <option value="boothd">Boot the hard disk</option>
+                    <option value="manual">Wait for a human</option>
+                    <option value="automatic">Recover automatically</option>
+                </select>
+            </div>
+
+            <div class="col-md-3">
+                <label class="form-label" for="hangar-dr-timeout">Prompt timeout (seconds)</label>
+                <input id="hangar-dr-timeout" class="form-control" type="number" min="0" step="1"
+                       x-model="form.userInputTimeout">
+            </div>
+        </div>
+
+        <details class="mt-3">
+            <summary>Advanced rescue-system options</summary>
+            <div class="row g-3 mt-1">
+                <div class="col-md-6">
+                    <label class="form-label" for="hangar-dr-autoshrink">
+                        Allow the replacement disk to be smaller by (%)
+                    </label>
+                    <input id="hangar-dr-autoshrink" class="form-control" type="number"
+                           min="0" max="100" step="1" placeholder="ReaR's default: 2"
+                           x-model="form.autoshrinkPercent">
+                    <div class="form-text">
+                        Recovery recreates the original partition table, so it stops when the
+                        new disk is more than this much smaller than the original. Raising it
+                        lets ReaR shrink the <em>last</em> partition to fit — nothing else.
+                        If that partition holds LVM, the volumes inside are still recreated at
+                        their recorded sizes, so a substantially smaller disk needs a
+                        hand-adapted <code>disklayout.conf</code>. Leave empty to keep ReaR's 2%.
+                    </div>
+                </div>
+
+                <div class="col-md-6">
+                    <label class="form-label" for="hangar-dr-copy">Extra files to copy into the rescue system</label>
+                    <textarea id="hangar-dr-copy" class="form-control hangar-mono" rows="3"
+                              x-model="form.extraCopyAsIs" spellcheck="false"></textarea>
+                    <div class="form-text">
+                        The password file and any backend credentials are added automatically.
+                    </div>
+                </div>
+
+                <div class="col-md-6">
+                    <label class="form-label" for="hangar-dr-progs">Extra programs the rescue system needs</label>
+                    <textarea id="hangar-dr-progs" class="form-control hangar-mono" rows="3"
+                              x-model="form.extraRequiredProgs" spellcheck="false"></textarea>
+                    <div class="form-text">
+                        A binary that is not named here does not exist at recovery time, and by
+                        then it is too late to add it.
+                    </div>
+                </div>
+
+                <div class="col-md-4">
+                    <label class="form-label" for="hangar-dr-isoprefix">ISO filename prefix</label>
+                    <input id="hangar-dr-isoprefix" class="form-control" x-model="form.isoPrefix"
+                           autocomplete="off">
+                </div>
+
+                <div class="col-md-4">
+                    <label class="form-label" for="hangar-dr-isovolid">ISO volume id</label>
+                    <input id="hangar-dr-isovolid" class="form-control" x-model="form.isoVolid"
+                           autocomplete="off">
+                </div>
+
+                <div class="col-md-4">
+                    <label class="form-label" for="hangar-dr-backupurl">BACKUP_URL (optional)</label>
+                    <input id="hangar-dr-backupurl" class="form-control hangar-mono"
+                           x-model="form.backupUrl" spellcheck="false" autocomplete="off">
+                </div>
+
+                <div class="col-12">
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" id="hangar-dr-dhclient"
+                               x-model="form.useDhclient">
+                        <label class="form-check-label" for="hangar-dr-dhclient">
+                            Bring up networking in the rescue system (required for a remote repository)
+                        </label>
+                    </div>
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" id="hangar-dr-keepbuild"
+                               x-model="form.keepBuildDir">
+                        <label class="form-check-label" for="hangar-dr-keepbuild">
+                            Keep ReaR's build directory for debugging
+                        </label>
+                    </div>
+                </div>
+            </div>
+        </details>
+
+        <div x-show="problems().length" class="alert alert-danger mt-3 mb-0" role="alert">
+            <strong>This configuration cannot be written yet.</strong>
+            <ul class="mb-0 mt-1">
+                <template x-for="p in problems()" :key="p">
+                    <li x-text="p"></li>
+                </template>
+            </ul>
+        </div>
+
+        <div class="d-flex align-items-center gap-2 mt-3">
+            <button type="button" class="btn btn-primary"
+                    @click="save()" :disabled="saving || !valid()">
+                <span x-show="!saving">Write /etc/rear/local.conf</span>
+                <span x-show="saving">Writing…</span>
+            </button>
+
+            <button type="button" class="btn btn-outline-secondary"
+                    @click="showPreview = !showPreview" :disabled="!valid()"
+                    :aria-expanded="showPreview" aria-controls="hangar-dr-preview">
+                <span x-text="showPreview ? 'Hide generated file' : 'Show generated file'"></span>
+            </button>
+
+            <span x-show="saved" class="text-success small" role="status">
+                <span class="hangar-dot ok" aria-hidden="true"></span>Written.
+            </span>
+        </div>
+
+        <!-- A remediation that worked has to say so, or the user re-runs it. -->
+        <div x-show="notice" class="alert alert-success mt-3 mb-0 py-2 px-3 small"
+             role="status" x-text="notice"></div>
+
+        <!-- The generated file is shown, not summarised: it is the unsupported
+             part, so the user must be able to read exactly what hangar wrote. -->
+        <div id="hangar-dr-preview" x-show="showPreview && preview()" class="mt-3">
+            <pre class="hangar-rawlog mb-0" x-text="preview()"></pre>
+        </div>
+
+        <!-- 2. Build ------------------------------------------------------- -->
+        <h2 class="h5 mt-4">2. Build the rescue image</h2>
+
+        <!-- `rear mkrescue` reads /etc/rear/local.conf, not this form. Building with
+             unsaved changes produces an image from the OLD configuration, minutes
+             later, with nothing on screen to say so. -->
+        <div x-show="unwritten" class="alert alert-warning py-2 px-3 small" role="alert">
+            <strong>Write the configuration first.</strong>
+            <span class="hangar-mono">/etc/rear/local.conf</span> does not match the form above,
+            and <span class="hangar-mono">rear mkrescue</span> reads the file, not the form — so
+            this would build an image from the old configuration. Press
+            <strong>Write /etc/rear/local.conf</strong>, then build.
+        </div>
+
+        <div class="d-flex align-items-center gap-2">
+            <button type="button" class="btn btn-primary"
+                    @click="build()" :disabled="building || !valid()">
+                <span x-show="!building">Build rescue image</span>
+                <span x-show="building">Building…</span>
+            </button>
+            <span class="text-secondary small">
+                Runs <span class="hangar-mono">rear -v mkrescue</span>. This takes several minutes.
+            </span>
+        </div>
+
+        <div class="mt-3" x-show="building || progress.phase !== 'idle'">
+            <div class="d-flex justify-content-between small" aria-live="polite">
+                <span x-text="progress.label"></span>
+                <span x-text="progress.percent + '%'"></span>
+            </div>
+            <div class="progress hangar-progress mt-1" role="progressbar"
+                 aria-label="Rescue image build progress"
+                 :aria-valuenow="progress.percent" aria-valuemin="0" aria-valuemax="100">
+                <div class="progress-bar" :style="'width:' + progress.percent + '%'"></div>
+            </div>
+        </div>
+
+        <!-- Unrecognised output is surfaced verbatim. hangar refuses to
+             paraphrase a recovery-tool log it did not understand. -->
+        <div x-show="progress.unrecognised" class="alert alert-warning mt-3 mb-0" role="alert">
+            <strong x-text="progress.label"></strong>
+        </div>
+
+        <div x-show="progress.showRaw && progress.rawTail" class="mt-2">
+            <div class="small text-secondary mb-1" id="hangar-dr-rawlog-label">
+                Relax-and-Recover output, unedited:
+            </div>
+            <pre class="hangar-rawlog mb-0" tabindex="0" role="region"
+                 aria-labelledby="hangar-dr-rawlog-label" x-text="progress.rawTail"></pre>
+        </div>
+
+        <!-- READ_ERRORS is a partial success: the image exists, some files did
+             not. Reporting it as a failure would teach the operator to ignore
+             the failures that matter. -->
+        <div x-show="partial" class="alert alert-warning mt-3 mb-0" role="alert">
+            <div class="d-flex align-items-start gap-3">
+                <div class="flex-grow-1">
+                    <strong>Built, with unreadable files.</strong>
+                    <p class="mb-1 small">
+                        The rescue image was produced. These files could not be read and are
+                        therefore not in the backup:
+                    </p>
+                </div>
+                <button type="button" class="btn btn-sm btn-outline-secondary"
+                        x-show="unreadable().length"
+                        @click="showUnreadable = !showUnreadable"
+                        :aria-expanded="showUnreadable"
+                        aria-controls="hangar-dr-unreadable"
+                        x-text="showUnreadable ? 'Hide unreadable files' : 'Show unreadable files'"></button>
+            </div>
+            <ul id="hangar-dr-unreadable" class="mb-0 small hangar-mono"
+                x-show="showUnreadable && unreadable().length">
+                <template x-for="(f, i) in unreadable()" :key="i">
+                    <li x-text="f"></li>
+                </template>
+            </ul>
+            <!-- An empty list is not an empty warning: without this the alert
+                 would claim files were skipped and then name none of them. -->
+            <div class="small mb-0" x-show="!unreadable().length">
+                Relax-and-Recover did not name the files. The unedited log above is
+                the only record of which ones they were.
+            </div>
+        </div>
+
+        <div x-show="error" class="alert alert-danger mt-3 mb-0" role="alert">
+            <div class="d-flex align-items-start gap-3">
+                <div class="flex-grow-1">
+                    <strong x-text="error && error.message"></strong>
+                </div>
+                <button type="button" class="btn btn-sm btn-outline-light"
+                        x-show="remediation()" @click="applyRemediation()"
+                        x-text="remediationLabel()"></button>
+            </div>
+        </div>
+
+        <!-- A recorded image that is no longer there. Said plainly, because the
+             alternative is a screen that quietly forgets an image ever existed. -->
+        <div x-show="isoMissing" class="alert alert-warning py-2 px-3 small" role="status">
+            <strong>The rescue image is gone.</strong>
+            hangar built <span class="hangar-mono" x-text="isoMissing"></span>, and it is no
+            longer there. If you moved it to a USB stick, that is fine — build a new one here
+            when you want to verify recovery again.
+        </div>
+
+        <div x-show="iso" class="alert alert-success mt-3 mb-0" role="status">
+            <strong>Rescue image ready.</strong>
+            <div class="hangar-mono small" x-text="iso"></div>
+            <div class="small mt-1">
+                Write it to a USB stick, or keep it somewhere that survives the machine
+                it was built on.
+            </div>
+        </div>
+
+        <!-- 3. Verify ------------------------------------------------------ -->
+        <h2 class="h5 mt-4">3. Verify recovery</h2>
+
+        <p class="mb-2">
+            Boots the image in a throwaway libvirt VM and reports whether recovery
+            completed. This is the only evidence that the unsupported ReaR/restic path
+            works on this machine; without it, the first test of the rescue image is
+            the emergency.
+        </p>
+
+        <!-- libvirt's absence is explained, not treated as an error: the rescue
+             image is unaffected by it. -->
+        <div x-show="libvirt.checked && !libvirt.available" class="alert alert-secondary" role="status">
+            <strong>The drill cannot run on this host.</strong>
+            <div class="small" x-text="libvirt.reason"></div>
+            <div class="small mt-1">
+                The rescue image is still valid. Boot it on the target hardware, or copy
+                it to a machine with libvirt and run the drill there.
+            </div>
+        </div>
+
+        <div class="d-flex align-items-center gap-2">
+            <button type="button" class="btn btn-outline-primary"
+                    data-bs-toggle="modal" data-bs-target="#hangar-recovery-drill"
+                    :disabled="!iso || !libvirt.available">
+                Verify recovery…
+            </button>
+            <span class="text-secondary small" x-show="!iso">Build the rescue image first.</span>
+        </div>
+
+        <div x-show="drillResult" class="mt-3">
+            <div class="alert mb-0" role="alert"
+                 :class="drillResult && drillResult.outcome === 'recovered' ? 'alert-success'
+                       : (drillResult && drillResult.outcome === 'failed' ? 'alert-danger' : 'alert-warning')">
+                <strong x-text="drillResult && drillResult.label"></strong>
+                <div class="small hangar-mono mt-1"
+                     x-show="drillResult && drillResult.evidence"
+                     x-text="drillResult && drillResult.evidence"></div>
+            </div>
+        </div>
+
+    </div>
+</div>
+</template>
+
+<!-- ---------------------------------------------------------------------- -->
+<!-- Drill dialog                                                            -->
+<div class="modal fade" id="hangar-recovery-drill" tabindex="-1"
+     aria-labelledby="hangar-recovery-drill-title" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content">
+
+            <div class="modal-header">
+                <h5 class="modal-title" id="hangar-recovery-drill-title">Verify recovery</h5>
+                <!-- Not data-bs-dismiss: closing while a drill is running has to
+                     ask what to do with the VM, and bootstrap would have hidden
+                     the dialog before anyone could be asked. -->
+                <button type="button" class="btn-close" @click="closeDrill()" aria-label="Close"></button>
+            </div>
+
+            <div class="modal-body">
+
+                <p class="small text-secondary">
+                    A temporary VM is defined, booted from the rescue image, and then
+                    destroyed along with its disk. Nothing on this machine is modified.
+                </p>
+
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label" for="hangar-drill-name">VM name</label>
+                        <input id="hangar-drill-name" class="form-control hangar-mono"
+                               x-model="drillOpts.name" autocomplete="off" spellcheck="false">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label" for="hangar-drill-mem">Memory (MiB)</label>
+                        <input id="hangar-drill-mem" class="form-control" type="number" min="1024" max="1048576" step="256"
+                               x-model.number="drillOpts.memoryMb">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label" for="hangar-drill-cpu">vCPUs</label>
+                        <input id="hangar-drill-cpu" class="form-control" type="number" min="1" max="512" step="1"
+                               x-model.number="drillOpts.vcpus">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label" for="hangar-drill-disk">Disk (GB)</label>
+                        <input id="hangar-drill-disk" class="form-control" type="number" min="1" max="65536" step="1"
+                               x-model.number="drillOpts.diskGb">
+                    </div>
+                    <!-- The libvirt pool is on / on a default install, which is the
+                         filesystem of the machine being tested. A drill disk big
+                         enough to hold its restore is big enough to fill it, and
+                         virt-install refuses rather than let that happen. -->
+                    <div class="col-md-6">
+                        <label class="form-label" for="hangar-drill-diskdir">Disk location</label>
+                        <div class="d-flex gap-2 align-items-start">
+                            <div class="flex-grow-1">
+                                <input id="hangar-drill-diskdir" class="form-control hangar-mono"
+                                       x-model="drillOpts.diskDir" spellcheck="false" autocomplete="off"
+                                       placeholder="/var/lib/libvirt/images">
+                                <div class="form-text">
+                                    Where the throwaway disk is created. Point it at a filesystem with
+                                    room for a full restore — not the one you are testing.
+                                </div>
+                            </div>
+                            <button type="button" class="btn btn-outline-secondary text-nowrap align-self-start"
+                                    @click="browsePath('diskDir', { mode: 'dir', bag: 'drillOpts', title: 'Choose where to create the drill disk' })"
+                                    aria-label="Browse for the drill disk location">Browse…</button>
+                        </div>
+                    </div>
+
+                    <div class="col-md-3">
+                        <label class="form-label" for="hangar-drill-sysgb">System size (GB)</label>
+                        <input id="hangar-drill-sysgb" class="form-control" type="number" min="0" step="1"
+                               x-model.number="drillOpts.systemGb">
+                        <div class="form-text">Optional; used to warn about too small a disk.</div>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label" for="hangar-drill-net">Network</label>
+                        <input id="hangar-drill-net" class="form-control" x-model="drillOpts.network"
+                               autocomplete="off">
+                        <div class="form-text">libvirt network name, or <span class="hangar-mono">none</span>.</div>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label" for="hangar-drill-fw">Firmware</label>
+                        <select id="hangar-drill-fw" class="form-select" x-model="drillOpts.firmware">
+                            <option value="bios">BIOS</option>
+                            <option value="uefi">UEFI</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label" for="hangar-drill-wait">Give up after (minutes)</label>
+                        <input id="hangar-drill-wait" class="form-control" type="number" min="1" max="1440" step="1"
+                               x-model.number="drillOpts.timeoutMin">
+                    </div>
+                </div>
+
+                <!-- The commonest reason a drill proves nothing: the image boots the
+                     hard disk, the VM has no screen to press a key on, and it waits
+                     until the timeout. Measured on a real host — 100% of a CPU and
+                     zero bytes written to the target disk, for ten minutes. -->
+                <div x-show="drillWillWait()" class="alert alert-warning py-2 px-3 small mt-3" role="alert">
+                    <strong>This image will not start recovery on its own.</strong>
+                    Its boot default is
+                    <span class="hangar-mono"
+                          x-text="form.isoDefault === 'manual' ? 'wait for a human' : 'boot the hard disk'"></span>,
+                    and the drill VM has no screen anyone can type at — so it will sit at the boot
+                    menu until it gives up. Set <strong>Rescue boot default</strong> to
+                    <strong>Recover automatically</strong> and rebuild to make this drill mean
+                    something. That setting is right for a drill and wrong for a rescue USB: one
+                    left in a running server should never start recovering by itself.
+                </div>
+
+                <div class="mt-3" x-show="plan().warnings.length" role="alert">
+                    <template x-for="w in plan().warnings" :key="w.code">
+                        <div class="alert py-2 px-3 small mb-2"
+                             :class="w.level === 'error' ? 'alert-danger' : 'alert-warning'"
+                             x-text="w.message"></div>
+                    </template>
+                </div>
+
+                <div class="mt-3">
+                    <div class="small text-secondary mb-1" id="hangar-drill-cmd-label">
+                        Command that will run:
+                    </div>
+                    <pre class="hangar-rawlog mb-0" tabindex="0" role="region"
+                         aria-labelledby="hangar-drill-cmd-label" x-text="planCommand()"></pre>
+                </div>
+
+                <div class="mt-3" x-show="drillLog">
+                    <div class="small text-secondary mb-1" id="hangar-drill-log-label">
+                        Drill console, unedited:
+                    </div>
+                    <pre class="hangar-rawlog mb-0" tabindex="0" role="region"
+                         aria-labelledby="hangar-drill-log-label" x-text="drillLog"></pre>
+                </div>
+
+                <div class="mt-3" x-show="drillResult">
+                    <div class="alert mb-0" role="alert"
+                         :class="drillResult && drillResult.outcome === 'recovered' ? 'alert-success'
+                               : (drillResult && drillResult.outcome === 'failed' ? 'alert-danger' : 'alert-warning')">
+                        <strong x-text="drillResult && drillResult.label"></strong>
+                    </div>
+                </div>
+
+                <!-- A typed failure gets its action here too. Without it a locked
+                     repository surfacing through virt-install is a dead end. -->
+                <div class="mt-3" x-show="drillError">
+                    <div class="alert alert-danger mb-0" role="alert">
+                        <div class="d-flex align-items-start gap-3">
+                            <div class="flex-grow-1" x-text="drillError && drillError.message"></div>
+                            <button type="button" class="btn btn-sm btn-outline-light"
+                                    x-show="drillRemediation()" @click="applyDrillRemediation()"
+                                    x-text="drillRemediationLabel()"></button>
+                        </div>
+                    </div>
+                </div>
+
+                <p class="small text-secondary mt-3 mb-0" x-show="drillCleaned && !keptDisk" role="status">
+                    The drill VM and its disk have been removed.
+                </p>
+
+                <!-- The one thing a drill can leave on the machine. It stays on
+                     screen, with the way to remove it, until it is gone. -->
+                <div class="alert alert-secondary mt-3 mb-0 d-flex align-items-center gap-3"
+                     x-show="keptDisk" role="status">
+                    <div class="flex-grow-1">
+                        The drill VM is gone; its disk was kept at
+                        <span class="hangar-mono" x-text="keptDisk"></span>.
+                        The recovery log is inside it, under
+                        <span class="hangar-mono">/var/log/rear/recover/</span>.
+                    </div>
+                    <button type="button" class="btn btn-sm btn-outline-danger text-nowrap"
+                            @click="offerToRemoveKeptDisk()">Remove it now</button>
+                </div>
+
+            </div>
+
+            <div class="modal-body pt-0" x-show="!drillRunning">
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox"
+                           id="hangar-drill-keepdisk" x-model="drillOpts.keepDisk">
+                    <label class="form-check-label" for="hangar-drill-keepdisk">
+                        Keep the drill disk afterwards
+                    </label>
+                    <div class="form-text">
+                        ReaR copies its recovery log into the restored system, so the
+                        only record of what went wrong lives on this disk — which is
+                        normally deleted with the VM. Keep it to investigate a warning,
+                        and remove it yourself when you are done.
+                    </div>
+                </div>
+            </div>
+
+            <div class="modal-footer">
+                <!-- me-auto: this is the destructive action, so it sits away from
+                     the two buttons a person reaches for by habit. Disabled when
+                     nothing is running, because there is then nothing to stop. -->
+                <button type="button" class="btn btn-outline-danger me-auto"
+                        @click="abortDrill()" :disabled="!drillRunning">
+                    Stop the drill
+                </button>
+                <button type="button" class="btn btn-secondary" @click="closeDrill()">Close</button>
+                <button type="button" class="btn btn-primary"
+                        @click="runDrill()" :disabled="drillRunning || !plan().ok">
+                    <span x-show="!drillRunning">Run the drill</span>
+                    <span x-show="drillRunning">Running…</span>
+                </button>
+            </div>
+
+        </div>
+    </div>
+</div>
+
+</div>

@@ -1,0 +1,25 @@
+#embed-links .card-pf-body {
+    opacity: 0.3;
+}
+
+#embed-here {
+    display: block;
+    inline-size: 1024px;
+    block-size: 768px;
+}
+
+#embed-address {
+    display: block;
+    margin-block-end: 20px;
+}
+
+a[target] {
+    cursor: pointer;
+}
+
+iframe {
+    display: block;
+    inline-size: 100%;
+    block-size: 100%;
+    border: 1px solid #ddd;
+}

@@ -1,0 +1,107 @@
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
+
+#
+# Copyright (C) 2015 Red Hat, Inc.
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
+
+import testlib
+
+
+@testlib.nondestructive
+@testlib.skipOstree("No tuned packaged")
+class TestTuned(testlib.MachineCase):
+
+    def testBasic(self) -> None:
+        b = self.browser
+        m = self.machine
+
+        recommended_profile = m.execute("tuned-adm recommend").strip()
+
+        # Stop tuned in case it is running by default, as on RHEL.
+
+        m.execute("systemctl stop tuned")
+        m.execute("systemctl disable tuned")
+        self.addCleanup(m.execute, "tuned-adm auto_profile")  # Enable and set default profile
+
+        # Login and check initial state
+
+        self.login_and_go("/system")
+
+        def check_status_tooltip(expected: str) -> None:
+            b.mouse("#tuned-status-button", "mouseenter")
+            b.wait_text("#tuned-status-tooltip", expected)
+            # move mouse away again, to let the tooltip disappear and update
+            b.mouse("#tuned-status-button", "mouseleave")
+            b.wait_not_present("#tuned-status-tooltip")
+
+        b.wait_text('#tuned-status-button', "none")
+        check_status_tooltip("Tuned is not running")
+
+        # Start tuned manually. The recommended profile will be activated automatically.
+        m.execute("systemctl start tuned")
+        b.wait_text('#tuned-status-button', recommended_profile)
+        check_status_tooltip("This system is using the recommended profile")
+
+        # Disabled when not authorized
+        b.relogin('/system', superuser=False)
+        b.wait_text('#tuned-status-button.pf-m-aria-disabled', recommended_profile)
+        # page adjusts to privilege changes, button becomes clickable
+        b.become_superuser()
+
+        # Switch the profile
+
+        b.wait_text('#tuned-status-button', recommended_profile)
+        b.click('#tuned-status-button')
+        b.wait_text(".pf-v6-c-modal-box__title-text", "Change performance profile")
+        b.wait_visible(".pf-v6-c-modal-box li > button.pf-m-selected p")
+
+        # Make sure we see the recommended profile and its badges
+        b.wait_in_text(".pf-v6-c-modal-box li > button.pf-m-selected p", recommended_profile)
+        b.wait_visible(".pf-v6-c-modal-box li > button.pf-m-selected .pf-v6-c-label:contains('recommended')")
+        b.wait_visible(".pf-v6-c-modal-box li > button.pf-m-selected .pf-v6-c-label:contains('active')")
+
+        b.click(".pf-v6-c-modal-box li[data-value='desktop'] > button")
+        b.wait_in_text(".pf-v6-c-modal-box li > button.pf-m-selected p", "desktop")
+
+        b.click(".pf-v6-c-modal-box button.pf-m-primary")
+        b.wait_not_present(".pf-v6-c-modal-box")
+
+        b.wait_text('#tuned-status-button', "desktop")
+        check_status_tooltip("This system is using a custom profile")
+
+        # Check the status of tuned, it should show the profile
+        output = m.execute("tuned-adm active 2>&1 || true")
+        self.assertIn("desktop", output)
+        output = m.execute("systemctl status tuned")
+        self.assertIn("enabled;", output)
+
+        # Now disable tuned
+        b.click('#tuned-status-button')
+        b.wait_text(".pf-v6-c-modal-box__title-text", "Change performance profile")
+        b.wait_visible(".pf-v6-c-modal-box li > button.pf-m-selected p")
+
+        b.click(".pf-v6-c-modal-box li > button p:contains('None')")
+        b.wait_in_text(".pf-v6-c-modal-box li > button.pf-m-selected p", "None")
+        b.click(".pf-v6-c-modal-box button.pf-m-primary")
+        b.wait_not_present(".pf-v6-c-modal-box")
+
+        b.wait_text('#tuned-status-button', "none")
+
+        # Check the status of tuned, it should show disabled
+        output = m.execute("tuned-adm active 2>&1 || true")
+        self.assertIn("No current active profile", output)
+        output = m.execute("systemctl status tuned")
+        self.assertIn("disabled;", output)
+
+        # Click on the button again
+        b.click('#tuned-status-button')
+        b.wait_text(".pf-v6-c-modal-box__title-text", "Change performance profile")
+
+        # Tuned should still be disabled
+        output = m.execute("systemctl status tuned")
+        self.assertIn("disabled;", output)
+
+
+if __name__ == '__main__':
+    testlib.test_main()

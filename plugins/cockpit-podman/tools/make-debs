@@ -1,0 +1,138 @@
+#!/bin/bash
+#
+# Build the Debian binary package for a Cockpit module.
+#
+# Copyright (C) 2026 Cockpit Project
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
+set -euo pipefail
+
+caller_dir=$PWD
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo_root=$(cd -- "$script_dir/.." && pwd)
+
+usage() {
+    printf 'Usage: %s [--quick] [source-tarball]\n' "${0##*/}"
+}
+
+quick=0
+source_arg=
+while (($#)); do
+    case "$1" in
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        -q|--quick)
+            quick=1
+            ;;
+        --)
+            shift
+            break
+            ;;
+        -*)
+            printf '%s: unknown option: %s\n' "${0##*/}" "$1" >&2
+            usage >&2
+            exit 2
+            ;;
+        *)
+            if [[ -n "$source_arg" ]]; then
+                usage >&2
+                exit 2
+            fi
+            source_arg=$1
+            ;;
+    esac
+    shift
+done
+if (($#)); then
+    if [[ -n "$source_arg" || $# -gt 1 ]]; then
+        usage >&2
+        exit 2
+    fi
+    source_arg=$1
+fi
+
+if ((quick)); then
+    DEB_BUILD_OPTIONS="${DEB_BUILD_OPTIONS:+$DEB_BUILD_OPTIONS }nocheck"
+    export DEB_BUILD_OPTIONS
+fi
+
+cd -- "$repo_root"
+package_name=$(awk '/"name":/ { gsub(/[",]/, "", $2); print $2; exit }' package.json)
+if [[ -z "$package_name" ]]; then
+    printf '%s: could not determine package name from package.json\n' "${0##*/}" >&2
+    exit 1
+fi
+deb_name="cockpit-${package_name}"
+
+if [[ -n "$source_arg" ]]; then
+    if [[ "$source_arg" = /* ]]; then
+        source_archive=$(realpath -e -- "$source_arg")
+    else
+        source_archive=$(cd -- "$caller_dir" && realpath -e -- "$source_arg")
+    fi
+    archive_name=${source_archive##*/}
+    archive_prefix="${deb_name}-"
+    if [[ "$archive_name" != "$archive_prefix"*.tar.xz ]]; then
+        printf '%s: expected a %s-<version>.tar.xz source archive, got %s\n' \
+            "${0##*/}" "$deb_name" "$archive_name" >&2
+        exit 2
+    fi
+    version=${archive_name#"$archive_prefix"}
+    version=${version%.tar.xz}
+    node_archive="$(dirname -- "$source_archive")/${deb_name}-node-${version}.tar.xz"
+else
+    version=$(make -s --no-print-directory print-version)
+    if [[ -z "$version" ]]; then
+        printf '%s: could not determine package version\n' "${0##*/}" >&2
+        exit 1
+    fi
+    make -s --no-print-directory dist node-cache
+    source_archive="${repo_root}/${deb_name}-${version}.tar.xz"
+    node_archive="${repo_root}/${deb_name}-node-${version}.tar.xz"
+fi
+
+if [[ ! -f "$source_archive" ]]; then
+    printf '%s: source archive not found: %s\n' "${0##*/}" "$source_archive" >&2
+    exit 1
+fi
+if [[ ! -f "$node_archive" ]]; then
+    printf '%s: companion Node archive not found: %s\n' "${0##*/}" "$node_archive" >&2
+    exit 1
+fi
+
+jobs=1
+if command -v nproc >/dev/null 2>&1; then
+    jobs=$(nproc)
+fi
+build_dir=$(mktemp -d "${TMPDIR:-/tmp}/${deb_name}.deb-build.XXXXXXXX")
+trap 'rm -rf -- "$build_dir"' EXIT
+source_dir="$build_dir/source"
+mkdir -p "$source_dir/node"
+
+tar --strip-components=1 -xf "$source_archive" -C "$source_dir"
+tar --strip-components=1 -xf "$node_archive" -C "$source_dir/node"
+
+if [[ ! -f "$source_dir/packaging/debian/control" || ! -f "$source_dir/node/.package-lock.json" ]]; then
+    printf '%s: source or Node archive is missing required packaging files\n' "${0##*/}" >&2
+    exit 1
+fi
+cp -a "$source_dir/packaging/debian" "$source_dir/debian"
+
+printf 'Building %s version %s\n' "$deb_name" "$version"
+(
+    cd -- "$source_dir"
+    dpkg-buildpackage -us -uc -b -j"$jobs"
+)
+
+shopt -s nullglob
+artifacts=("$build_dir"/"${deb_name}_"*.deb)
+if ((${#artifacts[@]} == 0)); then
+    printf '%s: dpkg-buildpackage produced no %s binary package\n' "${0##*/}" "$deb_name" >&2
+    exit 1
+fi
+for artifact in "${artifacts[@]}"; do
+    mv -f -- "$artifact" "$repo_root/"
+    printf 'Built %s\n' "$repo_root/${artifact##*/}"
+done

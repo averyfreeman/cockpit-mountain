@@ -1,0 +1,573 @@
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { render, screen, fireEvent, act, within, waitFor } from "@testing-library/react";
+import { StackRow } from "./StackRow";
+import type { ComposeStack } from "../../api";
+
+vi.mock("../../hooks/useStackActions", () => ({
+  useStackActions: vi.fn(),
+}));
+vi.mock("../../hooks/useServiceActions", () => ({
+  useServiceActions: vi.fn(),
+}));
+vi.mock("../../hooks/useStackContainers", () => ({
+  useStackContainers: vi.fn(),
+}));
+vi.mock("../../hooks/useAutoRefresh", () => ({
+  useAutoRefresh: vi.fn(),
+}));
+vi.mock("./StatsCell", () => ({
+  StatsCell: () => <span>StatsCell</span>,
+}));
+
+import { useStackActions } from "../../hooks/useStackActions";
+import { useServiceActions } from "../../hooks/useServiceActions";
+import { useStackContainers } from "../../hooks/useStackContainers";
+import { useAutoRefresh } from "../../hooks/useAutoRefresh";
+const mockUseStackActions = vi.mocked(useStackActions);
+const mockUseServiceActions = vi.mocked(useServiceActions);
+const mockUseStackContainers = vi.mocked(useStackContainers);
+const mockUseAutoRefresh = vi.mocked(useAutoRefresh);
+
+const stack: ComposeStack = {
+  Name: "myapp",
+  Status: "running(2)",
+  ConfigFiles: "/path/compose.yml",
+};
+
+const multiFileStack: ComposeStack = {
+  Name: "myapp",
+  Status: "running(2)",
+  ConfigFiles: "/path/base.yml,/path/override.yml",
+};
+
+const defaultProps = {
+  stack,
+  expanded: false,
+  onToggle: vi.fn(),
+  onLogs: vi.fn(),
+  onYaml: vi.fn(),
+  onInfo: vi.fn(),
+  onDown: vi.fn(),
+  onKill: vi.fn(),
+  onUp: vi.fn(),
+  onPull: vi.fn(),
+  onEvents: vi.fn(),
+  onTop: vi.fn(),
+  onExec: vi.fn(),
+  onRun: vi.fn(),
+  onPrune: vi.fn(),
+  onBackup: vi.fn(),
+  onScale: vi.fn(),
+  onActingChange: vi.fn(),
+  onRefresh: vi.fn(),
+};
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  mockUseStackActions.mockReturnValue({ acting: false, actionError: null, doAction: vi.fn() });
+  mockUseServiceActions.mockReturnValue({ actingService: null, doServiceAction: vi.fn() });
+  mockUseStackContainers.mockReturnValue({
+    containers: [],
+    loading: false,
+    load: vi.fn(),
+    clear: vi.fn(),
+  });
+});
+
+describe("StackRow", () => {
+  it("renders stack name", () => {
+    render(<StackRow {...defaultProps} />);
+    expect(screen.getByText("myapp")).toBeInTheDocument();
+  });
+
+  it("renders service count", () => {
+    render(<StackRow {...defaultProps} />);
+    expect(screen.getByText(/2 services/i)).toBeInTheDocument();
+  });
+
+  it("renders Up button", () => {
+    render(<StackRow {...defaultProps} />);
+    expect(screen.getByRole("button", { name: /^Up$/i })).toBeInTheDocument();
+  });
+
+  it("renders Stop button when running", () => {
+    render(<StackRow {...defaultProps} />);
+    expect(screen.getByRole("button", { name: /Stop/i })).toBeInTheDocument();
+  });
+
+  it("renders Start button when down", () => {
+    render(<StackRow {...defaultProps} stack={{ ...stack, Status: "exit(2)" }} />);
+    expect(screen.queryByRole("button", { name: /^Stop$/i })).toBeNull();
+    expect(screen.getByRole("button", { name: /^Start$/i })).toBeInTheDocument();
+  });
+
+  // #318: a paused stack used to lose both Stop and Start.
+  it("keeps Stop available and greys Up out for a paused stack", () => {
+    const onUp = vi.fn();
+    render(<StackRow {...defaultProps} onUp={onUp} stack={{ ...stack, Status: "paused(2)" }} />);
+    expect(screen.getByRole("button", { name: /^Stop$/i })).toBeEnabled();
+    const up = screen.getByRole("button", { name: /^Up$/i });
+    expect(up).toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(up);
+    expect(onUp).not.toHaveBeenCalled();
+  });
+
+  it("offers Stop for a crash-looping (restarting) stack instead of hiding it", () => {
+    render(<StackRow {...defaultProps} stack={{ ...stack, Status: "restarting(1)" }} />);
+    expect(screen.getByRole("button", { name: /^Stop$/i })).toBeInTheDocument();
+  });
+
+  it("renders Logs button", () => {
+    render(<StackRow {...defaultProps} />);
+    expect(screen.getByRole("button", { name: /Logs/i })).toBeInTheDocument();
+  });
+
+  it("renders Edit button", () => {
+    render(<StackRow {...defaultProps} />);
+    expect(screen.getByRole("button", { name: /Edit/i })).toBeInTheDocument();
+  });
+
+  it("calls onLogs when Logs button clicked", () => {
+    const onLogs = vi.fn();
+    render(<StackRow {...defaultProps} onLogs={onLogs} />);
+    fireEvent.click(screen.getByRole("button", { name: /Logs/i }));
+    expect(onLogs).toHaveBeenCalledOnce();
+  });
+
+  it("calls onYaml when Edit button clicked", () => {
+    const onYaml = vi.fn();
+    render(<StackRow {...defaultProps} onYaml={onYaml} />);
+    fireEvent.click(screen.getByRole("button", { name: /Edit/i }));
+    expect(onYaml).toHaveBeenCalledOnce();
+  });
+
+  it("calls onToggle when toggle button clicked", () => {
+    const onToggle = vi.fn();
+    render(<StackRow {...defaultProps} onToggle={onToggle} />);
+    // DataListToggle renders with the id we pass: id="toggle-{name}"
+    const toggleBtn = document.getElementById("toggle-myapp");
+    expect(toggleBtn).not.toBeNull();
+    fireEvent.click(toggleBtn!);
+    expect(onToggle).toHaveBeenCalledOnce();
+  });
+
+  it("shows action error alert when actionError is set", () => {
+    mockUseStackActions.mockReturnValue({
+      acting: false,
+      actionError: "Failed to start",
+      doAction: vi.fn(),
+    });
+    render(<StackRow {...defaultProps} />);
+    expect(screen.getByText("Failed to start")).toBeInTheDocument();
+  });
+
+  it("shows spinner when loading containers (expanded)", () => {
+    mockUseStackContainers.mockReturnValue({
+      containers: [],
+      loading: true,
+      load: vi.fn(),
+      clear: vi.fn(),
+    });
+    render(<StackRow {...defaultProps} expanded />);
+    expect(screen.getByRole("progressbar")).toBeInTheDocument();
+  });
+
+  it("shows No containers found when expanded with no containers", () => {
+    render(<StackRow {...defaultProps} expanded />);
+    expect(screen.getByText(/No containers found/i)).toBeInTheDocument();
+  });
+
+  it("calls onUp when Up button clicked", () => {
+    const onUp = vi.fn();
+    render(<StackRow {...defaultProps} onUp={onUp} />);
+    fireEvent.click(screen.getByRole("button", { name: /^Up$/i }));
+    expect(onUp).toHaveBeenCalledOnce();
+  });
+
+  it("calls doAction with stop when Stop button clicked and confirmed", () => {
+    const doAction = vi.fn();
+    mockUseStackActions.mockReturnValue({ acting: false, actionError: null, doAction });
+    render(<StackRow {...defaultProps} />);
+    // Stop opens a confirm modal — click row Stop then confirm
+    fireEvent.click(screen.getByRole("button", { name: /^Stop$/i }));
+    const dialog = screen.getByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /^Stop$/i }));
+    expect(doAction).toHaveBeenCalledWith("stop", expect.any(Function));
+  });
+
+  it("calls onRefresh once the stop action's success callback runs (#289)", async () => {
+    // Regression: completing a stack action used to only reload this row's own container
+    // list, never the page-level stack list — so the top-level status badge only updated on
+    // the next scheduled poll, which can now be several seconds out on slow hardware, making
+    // a finished action look stuck. The success callback passed to doAction must also call
+    // onRefresh so the page-level list updates immediately.
+    const doAction = vi.fn();
+    mockUseStackActions.mockReturnValue({ acting: false, actionError: null, doAction });
+    const onRefresh = vi.fn();
+    render(<StackRow {...defaultProps} onRefresh={onRefresh} />);
+    fireEvent.click(screen.getByRole("button", { name: /^Stop$/i }));
+    const dialog = screen.getByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /^Stop$/i }));
+
+    const afterAction = doAction.mock.calls[0][1] as () => Promise<void>;
+    expect(onRefresh).not.toHaveBeenCalled();
+    await act(async () => { await afterAction(); });
+    expect(onRefresh).toHaveBeenCalledOnce();
+  });
+
+  it("calls doAction with start when Start button clicked on a down stack", () => {
+    const doAction = vi.fn();
+    mockUseStackActions.mockReturnValue({ acting: false, actionError: null, doAction });
+    render(<StackRow {...defaultProps} stack={{ ...stack, Status: "exit(2)" }} />);
+    fireEvent.click(screen.getByRole("button", { name: /^Start$/i }));
+    expect(doAction).toHaveBeenCalledWith("start", expect.any(Function));
+  });
+
+  it("closes stop confirm modal when Cancel is clicked", () => {
+    render(<StackRow {...defaultProps} />);
+    fireEvent.click(screen.getByRole("button", { name: /^Stop$/i }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: /^Cancel$/i }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("closes stop confirm modal when X button is clicked", () => {
+    render(<StackRow {...defaultProps} />);
+    fireEvent.click(screen.getByRole("button", { name: /^Stop$/i }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: /close/i }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("closes restart confirm modal when Cancel is clicked", async () => {
+    render(<StackRow {...defaultProps} />);
+    fireEvent.click(screen.getByRole("button", { name: /^Restart$/i }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: /^Cancel$/i }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await act(async () => {});
+  });
+
+  it("closes restart confirm modal when X button is clicked", async () => {
+    render(<StackRow {...defaultProps} />);
+    fireEvent.click(screen.getByRole("button", { name: /^Restart$/i }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: /close/i }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await act(async () => {});
+  });
+
+  it("calls onInfo when Info button clicked", () => {
+    const onInfo = vi.fn();
+    render(<StackRow {...defaultProps} onInfo={onInfo} />);
+    fireEvent.click(screen.getByRole("button", { name: /Info/i }));
+    expect(onInfo).toHaveBeenCalledOnce();
+  });
+
+  it("opens dropdown when more-actions toggle clicked", async () => {
+    render(<StackRow {...defaultProps} />);
+    fireEvent.click(screen.getByRole("button", { name: /More actions for myapp/i }));
+    // Restart moved to row; dropdown should have Pause
+    expect(screen.getByRole("menuitem", { name: /^Pause$/i })).toBeInTheDocument();
+    await act(async () => {});
+  });
+
+  it("calls doAction with restart when Restart row button clicked and confirmed", async () => {
+    const doAction = vi.fn();
+    mockUseStackActions.mockReturnValue({ acting: false, actionError: null, doAction });
+    render(<StackRow {...defaultProps} />);
+    // Restart is now a row icon button that opens a confirm modal
+    fireEvent.click(screen.getByRole("button", { name: /^Restart$/i }));
+    const dialog = screen.getByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /^Restart$/i }));
+    expect(doAction).toHaveBeenCalledWith("restart", expect.any(Function));
+    await act(async () => {});
+  });
+
+  it("calls onPull when Pull button clicked", () => {
+    const onPull = vi.fn();
+    render(<StackRow {...defaultProps} onPull={onPull} />);
+    fireEvent.click(screen.getByRole("button", { name: /pull latest images/i }));
+    expect(onPull).toHaveBeenCalledOnce();
+  });
+
+  it("calls onDown when ↓ Down button clicked", () => {
+    const onDown = vi.fn();
+    render(<StackRow {...defaultProps} onDown={onDown} />);
+    fireEvent.click(screen.getByRole("button", { name: /down \(remove containers\)/i }));
+    expect(onDown).toHaveBeenCalledOnce();
+  });
+
+  it("calls onKill when Kill item clicked", async () => {
+    const onKill = vi.fn();
+    render(<StackRow {...defaultProps} onKill={onKill} />);
+    fireEvent.click(screen.getByRole("button", { name: /More actions for myapp/i }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /^Kill$/i }));
+    expect(onKill).toHaveBeenCalledOnce();
+    await act(async () => {});
+  });
+
+  it("calls onEvents when Events item clicked", async () => {
+    const onEvents = vi.fn();
+    render(<StackRow {...defaultProps} onEvents={onEvents} />);
+    fireEvent.click(screen.getByRole("button", { name: /More actions for myapp/i }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /^Events$/i }));
+    expect(onEvents).toHaveBeenCalledOnce();
+    await act(async () => {});
+  });
+
+  it("calls onTop when Top item clicked", async () => {
+    const onTop = vi.fn();
+    render(<StackRow {...defaultProps} onTop={onTop} />);
+    fireEvent.click(screen.getByRole("button", { name: /More actions for myapp/i }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /^Top$/i }));
+    expect(onTop).toHaveBeenCalledOnce();
+    await act(async () => {});
+  });
+
+  it("calls onExec when Shell row button clicked", () => {
+    const onExec = vi.fn();
+    render(<StackRow {...defaultProps} onExec={onExec} />);
+    // Shell moved from dropdown to row icon button
+    fireEvent.click(screen.getByRole("button", { name: /^Shell$/i }));
+    expect(onExec).toHaveBeenCalledOnce();
+  });
+
+  it("calls onRun when Run item clicked", async () => {
+    const onRun = vi.fn();
+    render(<StackRow {...defaultProps} onRun={onRun} />);
+    fireEvent.click(screen.getByRole("button", { name: /More actions for myapp/i }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /^Run$/i }));
+    expect(onRun).toHaveBeenCalledOnce();
+    await act(async () => {});
+  });
+
+  it("calls onPrune when Prune item clicked", async () => {
+    const onPrune = vi.fn();
+    render(<StackRow {...defaultProps} onPrune={onPrune} />);
+    fireEvent.click(screen.getByRole("button", { name: /More actions for myapp/i }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /^Prune$/i }));
+    expect(onPrune).toHaveBeenCalledOnce();
+    await act(async () => {});
+  });
+
+  it("shows Prune item before Kill in kebab menu", async () => {
+    render(<StackRow {...defaultProps} />);
+    fireEvent.click(screen.getByRole("button", { name: /More actions for myapp/i }));
+    const pruneItem = screen.getByRole("menuitem", { name: /^Prune$/i });
+    expect(pruneItem).toBeInTheDocument();
+    const items = screen.getAllByRole("menuitem");
+    const pruneIdx = items.findIndex(el => /^Prune$/i.test(el.textContent ?? ""));
+    const killIdx = items.findIndex(el => /^Kill$/i.test(el.textContent ?? ""));
+    expect(pruneIdx).toBeLessThan(killIdx);
+    // Down is no longer in the dropdown menu — it is a direct button
+    expect(screen.queryByRole("menuitem", { name: /Down \(remove\)/i })).not.toBeInTheDocument();
+    await act(async () => {});
+  });
+
+  it("shows Pause in kebab when running", async () => {
+    render(<StackRow {...defaultProps} />);
+    fireEvent.click(screen.getByRole("button", { name: /More actions for myapp/i }));
+    expect(screen.getByRole("menuitem", { name: /^Pause$/i })).toBeInTheDocument();
+    await act(async () => {});
+  });
+
+  it("shows Unpause in kebab when paused", async () => {
+    render(<StackRow {...defaultProps} stack={{ ...stack, Status: "paused(2)" }} />);
+    fireEvent.click(screen.getByRole("button", { name: /More actions for myapp/i }));
+    expect(screen.getByRole("menuitem", { name: /^Unpause$/i })).toBeInTheDocument();
+    await act(async () => {});
+  });
+
+  it("calls doAction with pause when Pause clicked", async () => {
+    const doAction = vi.fn();
+    mockUseStackActions.mockReturnValue({ acting: false, actionError: null, doAction });
+    render(<StackRow {...defaultProps} />);
+    fireEvent.click(screen.getByRole("button", { name: /More actions for myapp/i }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /^Pause$/i }));
+    expect(doAction).toHaveBeenCalledWith("pause", expect.any(Function));
+    await act(async () => {});
+  });
+
+  it("passes full configFiles array to useStackActions for multi-file stack", () => {
+    render(<StackRow {...defaultProps} stack={multiFileStack} />);
+    expect(mockUseStackActions).toHaveBeenCalledWith(
+      "myapp",
+      ["/path/base.yml", "/path/override.yml"],
+      expect.any(Function),
+    );
+  });
+
+  it("passes full configFiles array to useStackContainers for multi-file stack", () => {
+    render(<StackRow {...defaultProps} stack={multiFileStack} />);
+    expect(mockUseStackContainers).toHaveBeenCalledWith(
+      "myapp",
+      ["/path/base.yml", "/path/override.yml"],
+      expect.any(String),
+    );
+  });
+
+  it("calls doAction with unpause when Unpause clicked", async () => {
+    const doAction = vi.fn();
+    mockUseStackActions.mockReturnValue({ acting: false, actionError: null, doAction });
+    render(<StackRow {...defaultProps} stack={{ ...stack, Status: "paused(2)" }} />);
+    fireEvent.click(screen.getByRole("button", { name: /More actions for myapp/i }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /^Unpause$/i }));
+    expect(doAction).toHaveBeenCalledWith("unpause", expect.any(Function));
+    await act(async () => {});
+  });
+
+  it("afterAction clears containers when not expanded", async () => {
+    const clearContainers = vi.fn();
+    const loadContainers = vi.fn().mockResolvedValue(undefined);
+    let capturedCallback: (() => Promise<void>) | null = null;
+    const doAction = vi.fn().mockImplementation((_action: string, cb: () => Promise<void>) => {
+      capturedCallback = cb;
+      return Promise.resolve();
+    });
+    mockUseStackActions.mockReturnValue({ acting: false, actionError: null, doAction });
+    mockUseStackContainers.mockReturnValue({ containers: [], loading: false, load: loadContainers, clear: clearContainers });
+    render(<StackRow {...defaultProps} expanded={false} />);
+    loadContainers.mockClear();
+    // Stop now opens a confirm modal — click Stop then confirm
+    fireEvent.click(screen.getByRole("button", { name: /^Stop$/i }));
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: /^Stop$/i }));
+    await act(async () => { await capturedCallback?.(); });
+    expect(clearContainers).toHaveBeenCalled();
+    expect(loadContainers).not.toHaveBeenCalled();
+  });
+
+  it("afterAction clears and reloads containers when expanded", async () => {
+    const clearContainers = vi.fn();
+    const loadContainers = vi.fn().mockResolvedValue(undefined);
+    let capturedCallback: (() => Promise<void>) | null = null;
+    const doAction = vi.fn().mockImplementation((_action: string, cb: () => Promise<void>) => {
+      capturedCallback = cb;
+      return Promise.resolve();
+    });
+    mockUseStackActions.mockReturnValue({ acting: false, actionError: null, doAction });
+    mockUseStackContainers.mockReturnValue({ containers: [], loading: false, load: loadContainers, clear: clearContainers });
+    render(<StackRow {...defaultProps} expanded />);
+    fireEvent.click(screen.getByRole("button", { name: /^Stop$/i }));
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: /^Stop$/i }));
+    await act(async () => { await capturedCallback?.(); });
+    expect(clearContainers).toHaveBeenCalled();
+    expect(loadContainers).toHaveBeenCalled();
+  });
+
+  describe("selection", () => {
+    it("does not render a checkbox when onToggleSelect is not provided", () => {
+      render(<StackRow {...defaultProps} />);
+      expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    });
+
+    it("renders a checkbox reflecting isSelected when onToggleSelect is provided", () => {
+      render(<StackRow {...defaultProps} onToggleSelect={vi.fn()} isSelected />);
+      expect((screen.getByRole("checkbox") as HTMLInputElement).checked).toBe(true);
+    });
+
+    it("calls onToggleSelect when the checkbox is clicked, without also toggling row expansion", () => {
+      const onToggleSelect = vi.fn();
+      const onToggle = vi.fn();
+      render(<StackRow {...defaultProps} onToggle={onToggle} onToggleSelect={onToggleSelect} />);
+      fireEvent.click(screen.getByRole("checkbox"));
+      expect(onToggleSelect).toHaveBeenCalledOnce();
+      expect(onToggle).not.toHaveBeenCalled();
+    });
+
+    it("adds the visible modifier class once any row is selected", () => {
+      const { container } = render(<StackRow {...defaultProps} onToggleSelect={vi.fn()} anySelected />);
+      expect(container.querySelector(".sr-check--visible")).toBeInTheDocument();
+    });
+
+    it("omits the visible modifier class when nothing is selected", () => {
+      const { container } = render(<StackRow {...defaultProps} onToggleSelect={vi.fn()} anySelected={false} />);
+      expect(container.querySelector(".sr-check--visible")).not.toBeInTheDocument();
+    });
+  });
+
+  describe("container polling pause (#289)", () => {
+    it("does not pause polling by default (no other action in flight)", () => {
+      render(<StackRow {...defaultProps} />);
+      expect(mockUseAutoRefresh).toHaveBeenLastCalledWith(expect.any(Function), 3000, false);
+    });
+
+    it("pauses polling while another action is in flight elsewhere on the page", () => {
+      render(<StackRow {...defaultProps} globalActing />);
+      expect(mockUseAutoRefresh).toHaveBeenLastCalledWith(expect.any(Function), 3000, true);
+    });
+
+    it("does not pause polling for this row's own stack action, even while globalActing", () => {
+      mockUseStackActions.mockReturnValue({ acting: true, actionError: null, doAction: vi.fn() });
+      render(<StackRow {...defaultProps} globalActing />);
+      expect(mockUseAutoRefresh).toHaveBeenLastCalledWith(expect.any(Function), 500, false);
+    });
+
+    it("does not pause polling for this row's own service action, even while globalActing", () => {
+      mockUseServiceActions.mockReturnValue({ actingService: "web", doServiceAction: vi.fn() });
+      render(<StackRow {...defaultProps} globalActing />);
+      expect(mockUseAutoRefresh).toHaveBeenLastCalledWith(expect.any(Function), 3000, false);
+    });
+  });
+
+  // #334: right-click opens this layout's own kebab menu at the cursor.
+  describe("context menu", () => {
+    const root = (c: HTMLElement) => c.querySelector('[data-stack-name="myapp"]') as HTMLElement;
+
+    it("opens this layout's kebab items on right-click", async () => {
+      const { container } = render(<StackRow {...defaultProps} />);
+      await act(async () => { fireEvent.contextMenu(root(container), { clientX: 120, clientY: 80 }); });
+      expect(await screen.findByRole("menuitem", { name: /^Scale$/i })).toBeInTheDocument();
+    // Restart is an inline button in this layout, not a menu item.
+    expect(screen.queryByRole("menuitem", { name: /^Restart$/i })).not.toBeInTheDocument();
+    });
+
+    it("anchors the menu at the cursor, not the page corner", async () => {
+      const { container } = render(<StackRow {...defaultProps} />);
+      await act(async () => { fireEvent.contextMenu(root(container), { clientX: 321, clientY: 123 }); });
+      await screen.findByRole("menuitem", { name: /^Events$/i });
+      const anchorEl = document.body.querySelector('button[aria-hidden="true"][tabindex="-1"]') as HTMLElement;
+      expect(anchorEl.style.left).toBe("321px");
+      expect(anchorEl.style.top).toBe("123px");
+    });
+
+    it("runs the chosen action and closes", async () => {
+      const onEvents = vi.fn();
+      const { container } = render(<StackRow {...defaultProps} onEvents={onEvents} />);
+      await act(async () => { fireEvent.contextMenu(root(container), { clientX: 120, clientY: 80 }); });
+      await act(async () => { fireEvent.click(await screen.findByRole("menuitem", { name: /^Events$/i })); });
+      expect(onEvents).toHaveBeenCalledOnce();
+      await waitFor(() => expect(screen.queryByRole("menuitem", { name: /^Events$/i })).not.toBeInTheDocument());
+    });
+
+    it("closes on Escape even though focus stayed on the row", async () => {
+      const { container } = render(<StackRow {...defaultProps} />);
+      await act(async () => { fireEvent.contextMenu(root(container), { clientX: 120, clientY: 80 }); });
+      await screen.findByRole("menuitem", { name: /^Events$/i });
+      await act(async () => { fireEvent.keyDown(document.body, { key: "Escape" }); });
+      await waitFor(() => expect(screen.queryByRole("menuitem", { name: /^Events$/i })).not.toBeInTheDocument());
+    });
+
+    it("closes when the page scrolls", async () => {
+      const { container } = render(<StackRow {...defaultProps} />);
+      await act(async () => { fireEvent.contextMenu(root(container), { clientX: 120, clientY: 80 }); });
+      await screen.findByRole("menuitem", { name: /^Events$/i });
+      await act(async () => { fireEvent.scroll(window); });
+      await waitFor(() => expect(screen.queryByRole("menuitem", { name: /^Events$/i })).not.toBeInTheDocument());
+    });
+
+    it("leaves Shift+right-click to the browser", async () => {
+      const { container } = render(<StackRow {...defaultProps} />);
+      const event = new MouseEvent("contextmenu", { bubbles: true, cancelable: true, shiftKey: true });
+      await act(async () => { root(container).dispatchEvent(event); });
+      expect(event.defaultPrevented).toBe(false);
+      await waitFor(() => expect(screen.queryByRole("menuitem", { name: /^Events$/i })).not.toBeInTheDocument());
+    });
+
+    it("opens from the keyboard with Shift+F10", async () => {
+      const { container } = render(<StackRow {...defaultProps} />);
+      await act(async () => { fireEvent.keyDown(root(container), { key: "F10", shiftKey: true }); });
+      expect(await screen.findByRole("menuitem", { name: /^Events$/i })).toBeInTheDocument();
+    });
+  });
+});

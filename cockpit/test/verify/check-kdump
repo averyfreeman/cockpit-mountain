@@ -1,0 +1,731 @@
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
+
+#
+# Copyright (C) 2016 Red Hat, Inc.
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
+
+import time
+
+import testlib
+from lib.constants import TEST_OS_DEFAULT
+from machine import testvm
+
+
+class KdumpHelpers(testlib.MachineCase):
+    def setUp(self):
+        super().setUp()
+        self.allow_restart_journal_messages()
+
+    def enableLocalSsh(self, machine: testvm.Machine | None = None) -> None:
+        machine = machine or self.machine
+        machine.execute("[ -f /root/.ssh/id_rsa ] || ssh-keygen -t rsa -N '' -f /root/.ssh/id_rsa")
+        machine.execute("cat /root/.ssh/id_rsa.pub >> /root/.ssh/authorized_keys")
+        machine.execute("ssh-keyscan -H localhost >> /root/.ssh/known_hosts")
+        machine.execute("cat /root/.ssh/id_rsa.pub >> /home/admin/.ssh/authorized_keys; chown admin: /home/admin/.ssh/authorized_keys")
+
+    def assertActive(self, active: bool, browser: testlib.Browser | None = None) -> None:
+        browser = browser or self.browser
+        browser.wait_visible(".pf-v6-c-switch__input" + (":checked" if active else ":not(:checked)"))
+
+    def enableKdump(self):
+        if self.machine.image.startswith("fedora"):
+            self.machine.execute("systemctl enable kdump; kdumpctl reset-crashkernel")
+            self.machine.reboot()
+
+    def crashKernel(self, message: str, cancel: bool = False, machine: testvm.Machine | None = None,
+                    browser: testlib.Browser | None = None) -> None:
+        browser = browser or self.browser
+        machine = machine or self.machine
+
+        browser.click("button:contains('Test configuration')")
+        browser.wait_in_text(".pf-v6-c-modal-box__body", message)
+        if cancel:
+            browser.click(".pf-v6-c-modal-box button:contains('Cancel')")
+        else:
+            # we should get a warning dialog, confirm
+            browser.click(f".pf-v6-c-modal-box button{self.danger_btn_class}")
+            # wait until we've actually triggered a crash
+            browser.wait_visible("button.pf-m-in-progress")
+
+            # wait for disconnect and then try connecting again
+            browser.switch_to_top()
+            with browser.wait_timeout(120):
+                browser.wait_in_text("div.curtains-ct h1", "Disconnected")
+            machine.disconnect()
+            machine.wait_boot(timeout_sec=300)
+
+    def enableNFSServer(self, machine: testvm.Machine | None = None) -> None:
+        machine = machine or self.machine
+        # set up NFS server
+        self.machines["nfs"].write("/etc/exports", "/srv/kdump 10.111.113.0/24(rw,no_root_squash)\n")
+        self.machines["nfs"].execute("mkdir -p /srv/kdump/var/crash; firewall-cmd --add-service nfs; systemctl restart nfs-server")
+
+        # there shouldn't be any crash reports in the target directory
+        self.assertEqual(machine.execute("find /var/crash -maxdepth 1 -mindepth 1 -type d"), "")
+
+    def run_ansible_playbook(self, browser: testlib.Browser, machine: testvm.Machine,
+                             allow_failure: bool = False) -> None:
+        browser.click("#kdump-automation-script")
+        ansible_script_sel = ".automation-script-modal .pf-v6-c-modal-box__body section:nth-child(2) textarea"
+        machine.execute("mkdir -p roles/kdump/tasks")
+        ansible_script = browser.text(ansible_script_sel)
+        # show role for debugging
+        print("---- generated Ansible role -----")
+        print(ansible_script)
+        print("---------------------------------")
+        machine.write("roles/kdump/tasks/main.yml", ansible_script)
+        # Show stdout as this can fail, if so we want logs
+        machine.execute("ansible -vv -m include_role -a name=kdump localhost", check=not allow_failure, stdout=None)
+        browser.click(".pf-v6-c-modal-box__footer button:contains('Close')")
+        browser.wait_not_present(".automation-script-modal")
+
+
+@testlib.skipOstree("kexec-tools not installed")
+# Kdump page is hidden on Arch as it lacks the necessary kdump packages and grub infra
+@testlib.skipImage("kexec-tools not installed", "debian-*", "ubuntu-*", "arch")
+@testlib.skipImage("kdump not compatible with separate /var btrfs subvolume https://bugzilla.redhat.com/show_bug.cgi?id=2270423", "fedora-*")
+@testlib.timeout(900)
+class TestKdump(KdumpHelpers):
+    provision = {
+        "0": {"memory_mb": 2048},
+    }
+
+    def testBasic(self):
+        b = self.browser
+        m = self.machine
+
+        self.login_and_go("/kdump")
+
+        b.wait_visible("#app")
+
+        if m.image.startswith("fedora"):
+            # crashkernel command line not set, needs to be explicitly enabled in Fedora
+            b.wait_in_text(".pf-v6-c-alert__title", "Kernel did not boot with the crashkernel setting")
+            # no service on/off button
+            b.wait_not_present(".pf-v6-c-switch__input")
+
+            # disabled "Test configuration" button should have a tooltip
+            b.wait_visible("button:contains('Test configuration')[aria-disabled=true]")
+            b.mouse("button:contains('Test configuration')", "mouseenter")
+            b.wait_in_text(".pf-v6-c-tooltip", "kdump service")
+            b.mouse("button:contains('Test configuration')", "mouseleave")
+
+            # enable it
+            self.enableKdump()
+            self.login_and_go("/kdump")
+        else:
+            # enabled by default in RHEL
+            m.execute("until systemctl is-active kdump; do sleep 1; done")
+            self.assertActive(active=True)
+
+        # no alert about configuration
+        b.wait_not_present(".pf-v6-c-alert__title")
+
+        # there shouldn't be any crash reports in the target directory
+        self.assertEqual(m.execute("find /var/crash -maxdepth 1 -mindepth 1 -type d"), "")
+
+        b.wait_visible("#app")
+        self.enableLocalSsh()
+
+        # minimal nfs validation
+        b.wait_text("#kdump-target-info", "Local, /var/crash")
+
+        b.click("#kdump-change-target")
+        b.wait_visible("#kdump-settings-dialog")
+        b.set_val("#kdump-settings-location", "nfs")
+        serverInput = "#kdump-settings-nfs-server"
+        b.set_input_text(serverInput, "")
+        b.wait_visible(f"#kdump-settings-dialog button{self.primary_btn_class}:disabled")
+        b.set_input_text(serverInput, "localhost")
+        b.wait_visible(f"#kdump-settings-dialog button{self.primary_btn_class}:disabled")
+        b.click("#kdump-settings-dialog button.cancel")
+        b.wait_not_present("#kdump-settings-dialog")
+
+        # test compression
+        b.click("#kdump-change-target")
+        b.click("#kdump-settings-compression")
+        pathInput = "#kdump-settings-local-directory"
+        b.click(f"#kdump-settings-dialog button{self.primary_btn_class}")
+        with b.wait_timeout(120):  # needs to rebuild initrd
+            b.wait_not_present(pathInput)
+        m.execute("cat /etc/kdump.conf | grep -qE 'makedumpfile.*-c.*'")
+
+        # generate a valid kdump config with ssh target
+        b.click("#kdump-change-target")
+        b.set_val("#kdump-settings-location", "ssh")
+        sshInput = "#kdump-settings-ssh-server"
+        b.set_input_text(sshInput, "root@localhost")
+        sshKeyInput = "#kdump-settings-ssh-key"
+        pathInput = "#kdump-settings-ssh-directory"
+        b.set_input_text(sshKeyInput, "/root/.ssh/id_rsa")
+        b.set_input_text(pathInput, "/var/crash")
+        b.click(f"#kdump-settings-dialog button{self.primary_btn_class}")
+        # rebuilding initrd might take a while on busy CI machines
+        with b.wait_timeout(120):
+            b.wait_not_present(pathInput)
+        self.crashKernel("copied through SSH to root@localhost:/var/crash as vmcore", cancel=True)
+
+        # we should have the amount of memory reserved that crashkernel=auto defaults to for our VM RAM size on RHEL-8-10.
+        # On RHEL-9 and upper there are fixed memory limits based fixed limits from crashkernel, ie. 2G-64G:256M
+        if m.image == "rhel-8-10":
+            b.wait_in_text("#app", "192 MiB")
+        else:
+            b.wait_in_text("#app", "256 MiB")
+        # service should start up properly and the button should be on
+        self.assertActive(active=True)
+        b.wait_text("#kdump-target-info", "Remote over SSH, root@localhost:/var/crash")
+
+        # try to change the path to a directory that doesn't exist
+        customPath = "/crash2"
+        b.click("#kdump-change-target")
+        b.set_val("#kdump-settings-location", "local")
+        pathInput = "#kdump-settings-local-directory"
+        b.set_input_text(pathInput, customPath)
+        b.click(f"#kdump-settings-dialog button{self.primary_btn_class}")
+        # we should get an error
+        b.wait_in_text("#kdump-settings-dialog h4.pf-v6-c-alert__title",
+                       f"Unable to save settings: Directory {customPath} isn't writable or doesn't exist")
+        # also allow the journal message about failed touch
+        self.allow_journal_messages(".*mktemp: failed to create file via template.*")
+        # create the directory and try again
+        m.execute(f"mkdir -p {customPath}")
+        b.click(f"#kdump-settings-dialog button{self.primary_btn_class}")
+        with b.wait_timeout(120):
+            b.wait_not_present(pathInput)
+        b.wait_text("#kdump-target-info", f"Local, {customPath}")
+
+        # service has to restart after changing the config, wait for it to be running
+        # otherwise the button to test will be disabled
+        self.assertActive(active=True)
+
+        # crash the kernel and make sure it wrote a report into the right directory
+        self.crashKernel(f"stored in {customPath} as vmcore")
+        m.execute(f"until test -e {customPath}/127.0.0.1*/vmcore; do sleep 1; done", timeout=180)
+        self.assertIn("Kdump compressed dump", m.execute(f"file {customPath}/127.0.0.1*/vmcore"))
+
+        self.login_and_go("/kdump")
+        b.wait_visible("#app")
+
+        m.execute("cp /etc/kdump.conf /etc/kdump.conf.orig")
+        b.click("#kdump-automation-script")
+        b.click("button:contains('Shell script')")
+        shell_script_sel = ".automation-script-modal .pf-v6-c-modal-box__body section:nth-child(3) textarea"
+        # Change the kdump.conf while the dialog is open as changing it before does not allow us to open the dialog
+        m.write("/etc/kdump.conf", "invalid")
+        m.execute(b.text(shell_script_sel))
+        b.click(".pf-v6-c-modal-box__footer button:contains('Close')")
+        b.wait_not_present(".automation-script-modal")
+        m.execute("diff /etc/kdump.conf /etc/kdump.conf.orig", stdout=None)
+
+        # service errors
+
+        m.execute("systemctl disable --now kdump.service")
+        self.assertActive(active=False)
+        b.wait_not_present(".pf-v6-c-alert__title")
+
+        # service is absent (not installed)
+        m.execute("mv /usr/lib/systemd/system/kdump.service /usr/lib/systemd/system/kdump.service.disabled")
+        m.execute("systemctl daemon-reload")
+        b.wait_in_text(".pf-v6-c-alert__title", "Kdump service is not installed")
+
+        # put it back, but cause error on startup
+        m.execute("mv /usr/lib/systemd/system/kdump.service.disabled /usr/lib/systemd/system/kdump.service")
+        m.write("/etc/systemd/system/kdump.service.d/break.conf",
+                "[Service]\nExecStart=\nExecStart=/bin/false\n")
+        m.execute("systemctl daemon-reload")
+        b.wait_not_present(".pf-v6-c-alert__title")
+        b.click(".pf-v6-c-switch__input")
+        b.wait_in_text(".pf-v6-c-alert__title", "Service has an error")
+        self.assertActive(active=False)
+        # "more details" leads to services page
+        b.click(".pf-v6-c-alert__title button")
+        b.switch_to_top()
+        b.wait_js_cond('window.location.pathname === "/system/services"')
+        b.wait_js_cond('window.location.hash === "#/kdump.service"')
+        # revert breakage and start kdump again
+        m.execute("rm /etc/systemd/system/kdump.service.d/break.conf")
+        m.execute("systemctl daemon-reload; systemctl start kdump")
+
+        # lack of kexec_crash_size does not crash the kdump page
+        tmp_sys_kernel = "/tmp/kernel_sys/"
+        m.execute(f"mkdir {tmp_sys_kernel}")
+        m.execute(f"mount -o bind {tmp_sys_kernel} /sys/kernel")
+        b.go("/kdump")
+        b.reload()
+        b.enter_page("/kdump")
+        b.wait_visible("#app")
+        b.wait_in_text(".pf-v6-c-alert__title", "Kernel did not boot with the crashkernel setting")
+        # no memory detected and no page crash
+        b.wait_in_text(".pf-v6-c-card__body .pf-v6-c-description-list div.pf-v6-c-description-list__group:first-child",
+                       "None")
+        m.execute("umount /sys/kernel")
+
+
+@testlib.skipOstree("kexec-tools not installed")
+@testlib.skipImage("kexec-tools not installed", "debian-*", "ubuntu-*", "arch")
+@testlib.nondestructive
+class TestKdumpConfiguration(KdumpHelpers):
+    def testBasic(self):
+        b = self.browser
+        m = self.machine
+
+        self.restore_file("/etc/kdump.conf")
+
+        m.execute("systemctl disable --now kdump")
+
+        self.login_and_go("/kdump")
+        b.wait_visible("#app")
+
+        # Check defaults
+        current = m.execute("grep '^core_collector' /etc/kdump.conf").strip()
+        m.execute("sed -i /^core_collector/d /etc/kdump.conf")
+        # Drop the custom path so we can make sure our changes are synced to JavaScript
+        m.execute("sed -i 's#^path /var/crash#path /var/tmp#' /etc/kdump.conf")
+        last_modified = m.execute("stat /etc/kdump.conf")
+        b.wait_text("#kdump-target-info", "Local, /var/tmp")
+        b.click("#kdump-change-target")
+        b.wait_visible("#kdump-settings-dialog")
+        b.set_input_text("#kdump-settings-local-directory", "/var/crash")
+        b.click("button:contains('Save')")
+        b.wait_not_present("#kdump-settings-dialog")
+        new = m.execute("grep '^core_collector' /etc/kdump.conf").strip()
+        self.assertEqual(current, new)
+        self.assertNotEqual(last_modified, m.execute("stat /etc/kdump.conf"))
+
+        # Check remote ssh location
+        b.click("#kdump-change-target")
+        b.wait_visible("#kdump-settings-dialog")
+        b.set_val("#kdump-settings-location", "ssh")
+        b.set_input_text("#kdump-settings-ssh-server", "admin@localhost")
+        b.set_input_text("#kdump-settings-ssh-key", "/home/admin/.ssh/id_rsa")
+        b.set_input_text("#kdump-settings-ssh-directory", "/var/tmp/crash")
+        b.click("button:contains('Save')")
+        b.wait_not_present("#kdump-settings-dialog")
+        conf = m.execute("cat /etc/kdump.conf")
+        self.assertIn("path /var/tmp/crash", conf)
+        self.assertIn("ssh admin@localhost", conf)
+        self.assertIn("sshkey /home/admin/.ssh/id_rsa", conf)
+
+        # Check remote NFS location
+        b.click("#kdump-change-target")
+        b.wait_visible("#kdump-settings-dialog")
+        b.set_val("#kdump-settings-location", "nfs")
+        b.set_input_text("#kdump-settings-nfs-server", "someserver")
+        b.set_input_text("#kdump-settings-nfs-export", "/srv")
+        b.click("button:contains('Save')")
+        b.wait_not_present("#kdump-settings-dialog")
+        conf = m.execute("cat /etc/kdump.conf")
+        self.assertIn("nfs someserver:/srv", conf)
+        # directory unspecified, using default path
+        self.assertNotIn("\npath ", conf)
+        self.assertNotIn("\nssh ", conf)
+
+        # NFS with custom path
+        b.click("#kdump-change-target")
+        b.wait_visible("#kdump-settings-dialog")
+        b.set_input_text("#kdump-settings-nfs-directory", "dumps")
+        b.click("button:contains('Save')")
+        b.wait_not_present("#kdump-settings-dialog")
+        conf = m.execute("cat /etc/kdump.conf")
+        self.assertIn("nfs someserver:/srv", conf)
+        self.assertIn("\npath dumps", conf)
+
+        # Check local location
+        b.click("#kdump-change-target")
+        b.wait_visible("#kdump-settings-dialog")
+        b.set_val("#kdump-settings-location", "local")
+        b.set_input_text("#kdump-settings-local-directory", "/var/tmp")
+        b.click("button:contains('Save')")
+        b.wait_not_present("#kdump-settings-dialog")
+        conf = m.execute("cat /etc/kdump.conf")
+        self.assertIn("path /var/tmp", conf)
+        self.assertNotIn("\nnfs ", conf)
+
+        # Check compression
+        current = m.execute("grep '^core_collector' /etc/kdump.conf").strip()
+        b.click("#kdump-change-target")
+        b.wait_visible("#kdump-settings-dialog")
+        b.set_checked("#kdump-settings-compression", val=True)
+        b.click("button:contains('Save')")
+        b.wait_not_present("#kdump-settings-dialog")
+        conf = m.execute("cat /etc/kdump.conf")
+        self.assertIn(current + " -c", conf)
+
+    def testConfigurationSUSE(self):
+        b = self.browser
+        m = self.machine
+
+        testConfig = [
+            "# some comment",
+            "KDUMP_DUMPFORMAT=compressed # suffix",
+            "KDUMP_SSH_IDENTITY=\"\"",
+            "skip this line",
+            "BAD_QUOTES=unquoted value # suffix",
+            "BAD_SPACES = 42 # comment",
+            "MORE_BAD_SPACES = 4 2 # long comment",
+            "KDUMP_SAVEDIR=ssh//missing/colon",
+        ]
+
+        # clean default config to trigger SUSE config mode
+        self.write_file("/etc/kdump.conf", "")
+        # write initial SUSE config (append to keep original contents as well)
+        self.write_file("/etc/sysconfig/kdump", "\n".join(testConfig), append=True)
+
+        m.execute("systemctl disable --now kdump")
+
+        self.login_and_go("/kdump")
+        b.wait_visible("#app")
+
+        # Check malformed lines
+        b.wait_text("#kdump-target-info", "No configuration found")
+        b.wait(lambda: "Malformed kdump config line: skip this line in /etc/sysconfig/kdump" in
+               '/'.join(self.browser.get_js_log()))
+        b.wait(lambda: "Malformed KDUMP_SAVEDIR entry: ssh//missing/colon in /etc/sysconfig/kdump" in
+               '/'.join(self.browser.get_js_log()))
+
+        # Remove malformed KDUMP_SAVEDIR to check default if nothing specified
+        m.execute("sed -i '/KDUMP_SAVEDIR=.*/d' /etc/sysconfig/kdump")
+        b.wait_text("#kdump-target-info", "Local, /var/crash")
+
+        # Check fixing of (some) malformed lines and local target without file://
+        m.execute("echo KDUMP_SAVEDIR=/tmp >> /etc/sysconfig/kdump")
+        b.wait_text("#kdump-target-info", "Local, /tmp")
+        b.click("#kdump-change-target")
+        b.wait_visible("#kdump-settings-dialog")
+        b.click("button:contains('Save')")
+        b.wait_not_present("#kdump-settings-dialog")
+        conf = m.execute("cat /etc/sysconfig/kdump")
+        self.assertIn('KDUMP_SAVEDIR=file:///tmp', conf)
+        self.assertIn('BAD_QUOTES="unquoted value" # suffix', conf)
+        self.assertIn('BAD_SPACES=42 # comment', conf)
+        self.assertIn('MORE_BAD_SPACES="4 2" # long comment', conf)
+
+        # Check remote ssh location
+        b.click("#kdump-change-target")
+        b.wait_visible("#kdump-settings-dialog")
+        b.set_val("#kdump-settings-location", "ssh")
+        b.set_input_text("#kdump-settings-ssh-server", "admin@localhost")
+        b.set_input_text("#kdump-settings-ssh-key", "/home/admin/.ssh/id_rsa")
+        b.set_input_text("#kdump-settings-ssh-directory", "/var/tmp/crash")
+        b.click("button:contains('Save')")
+        b.wait_not_present("#kdump-settings-dialog")
+        b.wait_text("#kdump-target-info", "Remote over SSH, admin@localhost:/var/tmp/crash")
+        conf = m.execute("cat /etc/sysconfig/kdump")
+        self.assertIn('KDUMP_SAVEDIR=ssh://admin@localhost/var/tmp/crash', conf)
+        self.assertIn('KDUMP_SSH_IDENTITY="/home/admin/.ssh/id_rsa"', conf)
+
+        # Check remote NFS location
+        b.click("#kdump-change-target")
+        b.wait_visible("#kdump-settings-dialog")
+        b.set_val("#kdump-settings-location", "nfs")
+        b.set_input_text("#kdump-settings-nfs-server", "someserver")
+        b.set_input_text("#kdump-settings-nfs-export", "/srv")
+        b.click("button:contains('Save')")
+        b.wait_not_present("#kdump-settings-dialog")
+        b.wait_text("#kdump-target-info", "Remote over NFS, someserver:/srv/")
+        conf = m.execute("cat /etc/sysconfig/kdump")
+        self.assertIn('KDUMP_SAVEDIR=nfs://someserver/srv', conf)
+        self.assertNotIn("ssh://", conf)
+
+        # Check local location
+        b.click("#kdump-change-target")
+        b.wait_visible("#kdump-settings-dialog")
+        b.set_val("#kdump-settings-location", "local")
+        b.set_input_text("#kdump-settings-local-directory", "/var/tmp")
+        b.click("button:contains('Save')")
+        b.wait_not_present("#kdump-settings-dialog")
+        b.wait_text("#kdump-target-info", "Local, /var/tmp")
+        conf = m.execute("cat /etc/sysconfig/kdump")
+        self.assertIn('KDUMP_SAVEDIR=file:///var/tmp', conf)
+        self.assertNotIn("nfs://", conf)
+
+        # Check compression
+        conf = m.execute("cat /etc/sysconfig/kdump")
+        self.assertIn('KDUMP_DUMPFORMAT=compressed', conf)
+        b.click("#kdump-change-target")
+        b.wait_visible("#kdump-settings-dialog")
+        b.set_checked("#kdump-settings-compression", val=False)
+        b.click("button:contains('Save')")
+        b.wait_not_present("#kdump-settings-dialog")
+        conf = m.execute("cat /etc/sysconfig/kdump")
+        self.assertIn('KDUMP_DUMPFORMAT=ELF', conf)
+        b.click("#kdump-change-target")
+        b.wait_visible("#kdump-settings-dialog")
+        b.set_checked("#kdump-settings-compression", val=True)
+        b.click("button:contains('Save')")
+        b.wait_not_present("#kdump-settings-dialog")
+        conf = m.execute("cat /etc/sysconfig/kdump")
+        self.assertIn('KDUMP_DUMPFORMAT=compressed', conf)
+
+        # Check remote FTP location (no config dialog)
+        m.execute("sed -i 's/KDUMP_SAVEDIR=.*/KDUMP_SAVEDIR=ftp:\\/\\/user@ftpserver\\/dumps1/g' /etc/sysconfig/kdump")
+        b.wait_text("#kdump-target-info", "Remote over FTP")
+
+        # Check remote SFTP location (no config dialog)
+        m.execute("sed -i 's/KDUMP_SAVEDIR=.*/KDUMP_SAVEDIR=sftp:\\/\\/sftpserver\\/dumps2/g' /etc/sysconfig/kdump")
+        b.wait_text("#kdump-target-info", "Remote over SFTP")
+
+        # Check remote CIFS location (no config dialog)
+        m.execute("sed -i 's/KDUMP_SAVEDIR=.*/KDUMP_SAVEDIR=cifs:\\/\\/user:pass@smbserver\\/dumps3/g' /etc/sysconfig/kdump")
+        b.wait_text("#kdump-target-info", "Remote over CIFS/SMB")
+
+
+@testlib.skipOstree("kexec-tools not installed")
+@testlib.skipImage("kexec-tools not installed", "debian-*", "ubuntu-*", "arch")
+@testlib.skipImage("kdump not compatible with separate /var btrfs subvolume https://bugzilla.redhat.com/show_bug.cgi?id=2270423", "fedora-*")
+@testlib.timeout(900)
+class TestKdumpNFS(KdumpHelpers):
+    provision = {
+        "0": {"address": "10.111.113.1/24", "memory_mb": 2048, "capture_console": True},
+        "nfs": {"image": TEST_OS_DEFAULT, "address": "10.111.113.2/24"}
+    }
+
+    def testBasic(self):
+        m = self.machine
+        b = self.browser
+
+        self.enableNFSServer()
+
+        # set up client machine
+        self.enableKdump()
+        self.login_and_go("/kdump")
+        with b.wait_timeout(120):  # needs to rebuild initrd
+            b.wait_visible(".pf-v6-c-switch__input:checked")
+
+        # Wait a few seconds so that the newly written kdump.conf is
+        # guaranteed to look older to kdump.service than the just
+        # created initrd.
+        #
+        time.sleep(5)
+
+        # switch to NFS
+        b.click("#kdump-change-target")
+        b.wait_visible("#kdump-settings-dialog")
+        b.set_val("#kdump-settings-location", "nfs")
+        b.set_input_text("#kdump-settings-nfs-server", "10.111.113.2")
+        b.set_input_text("#kdump-settings-nfs-export", "/srv/kdump")
+        b.click(f"#kdump-settings-dialog button{self.primary_btn_class}")
+        # rebuilding initrd might take a while on busy CI machines
+        with b.wait_timeout(300):
+            b.wait_not_present("#kdump-settings-dialog")
+
+        # explicit nfs option, unset path
+        conf = m.execute("cat /etc/kdump.conf")
+        self.assertIn("\nnfs 10.111.113.2:/srv/kdump\n", conf)
+        self.assertNotIn("\npath", conf)
+
+        try:
+            self.crashKernel("copied through NFS to 10.111.113.2:/srv/kdump/var/crash")
+
+            # dump is done during boot, so should exist now
+            self.assertIn("Kdump compressed dump",
+                          self.machines["nfs"].execute("file /srv/kdump/var/crash/10.111.113.1*/vmcore"))
+        except (testlib.Error, AssertionError):
+            self.machine.print_console_log()
+            raise
+
+        # set custom path
+        self.login_and_go("/kdump")
+        b.wait_visible(".pf-v6-c-switch__input:checked")
+        b.click("#kdump-change-target")
+        b.wait_visible("#kdump-settings-dialog")
+        b.set_input_text("#kdump-settings-nfs-directory", "dumps")
+        b.click(f"#kdump-settings-dialog button{self.primary_btn_class}")
+        # dumps directory does not exist, error
+        b.wait_in_text("#kdump-settings-dialog h4.pf-v6-c-alert__title", "Unable to save settings")
+        # also shows error details
+        b.click("#kdump-settings-dialog div.pf-v6-c-alert__toggle button")
+        b.wait_in_text("#kdump-settings-dialog .pf-v6-c-code-block__code", 'does not exist in dump target "10.111.113.2:/srv/kdump"')
+        # create the directory on the NFS server
+        self.machines["nfs"].execute("mkdir /srv/kdump/dumps")
+        b.click(f"#kdump-settings-dialog button{self.primary_btn_class}")
+        with b.wait_timeout(300):
+            b.wait_not_present("#kdump-settings-dialog")
+        conf = m.execute("cat /etc/kdump.conf")
+        self.assertIn("\nnfs 10.111.113.2:/srv/kdump\n", conf)
+        self.assertIn("\npath dumps\n", conf)
+
+        b.wait_visible(".pf-v6-c-switch__input:checked")
+
+        try:
+            self.crashKernel("copied through NFS to 10.111.113.2:/srv/kdump/dumps")
+            self.assertIn("Kdump compressed dump",
+                          self.machines["nfs"].execute("file /srv/kdump/dumps/10.111.113.1*/vmcore"))
+        except (testlib.Error, AssertionError):
+            self.machine.print_console_log()
+            raise
+
+
+@testlib.skipOstree("kexec-tools not installed")
+@testlib.onlyImage("Only Fedora/RHEL has ansible on the image", "fedora-*", "rhel-9-*")
+@testlib.skipImage("kdump not compatible with separate /var btrfs subvolume https://bugzilla.redhat.com/show_bug.cgi?id=2270423", "fedora-*")
+@testlib.timeout(900)
+class TestKdumpNFSAnsible(KdumpHelpers):
+    provision = {
+        "cockpit": {},
+        "kdump_ansible_machine": {"address": "10.111.113.1/24", "memory_mb": 2048, "capture_console": True},
+        "nfs": {"image": TEST_OS_DEFAULT, "address": "10.111.113.2/24"},
+    }
+
+    def testBasic(self):
+        b = self.browser
+        kdump_machine = self.machines["kdump_ansible_machine"]
+
+        # Drop rpm repos as otherwise dnf will hang when we run the ansible role
+        kdump_machine.execute("rm -rf /etc/yum.repos.d/* /var/cache/yum/* /var/cache/dnf/*")
+
+        self.enableNFSServer(kdump_machine)
+        self.machine.execute("systemctl disable --now kdump")
+
+        # switch to NFS
+        self.login_and_go("/kdump")
+        b.click("#kdump-change-target")
+        b.wait_visible("#kdump-settings-dialog")
+        b.set_val("#kdump-settings-location", "nfs")
+        b.set_input_text("#kdump-settings-nfs-server", "10.111.113.2")
+        b.set_input_text("#kdump-settings-nfs-export", "/srv/kdump")
+        b.click(f"#kdump-settings-dialog button{self.primary_btn_class}")
+        b.wait_not_present("#kdump-settings-dialog")
+
+        # This requires a reboot
+        self.run_ansible_playbook(browser=b, machine=kdump_machine, allow_failure=True)
+        conf = kdump_machine.execute("cat /etc/kdump.conf")
+        self.assertIn("\n# Ansible managed\n", conf)
+        self.assertIn("\nnfs 10.111.113.2:/srv/kdump\n", conf)
+
+        kdump_machine.reboot()
+        kdump_machine.start_cockpit()
+        kdump_browser = self.new_browser(kdump_machine)
+
+        # Verify that kdump runs and crashkernel is configured
+        kdump_machine.execute("until systemctl is-active kdump; do sleep 1; done")
+        kdump_browser.login_and_go("/kdump")
+        kdump_browser.wait_visible(".pf-v6-c-switch__input:checked")
+        kdump_browser.wait_in_text("#app", "256 MiB")
+        self.assertActive(active=True, browser=kdump_browser)
+
+        try:
+            self.crashKernel("copied through NFS to 10.111.113.2:/srv/kdump/var/crash", machine=kdump_machine, browser=kdump_browser)
+
+            # dump is done during boot, so should exist now
+            self.assertIn("Kdump compressed dump",
+                          self.machines["nfs"].execute("file /srv/kdump/var/crash/10.111.113.1*/vmcore"))
+        except (testlib.Error, AssertionError):
+            kdump_machine.print_console_log()
+            raise
+
+
+@testlib.skipOstree("kexec-tools not installed")
+@testlib.onlyImage("Only Fedora/RHEL has ansible on the image", "fedora-*", "rhel-9-*")
+@testlib.skipImage("kdump not compatible with separate /var btrfs subvolume https://bugzilla.redhat.com/show_bug.cgi?id=2270423", "fedora-*")
+@testlib.timeout(900)
+class TestKdumpAnsible(KdumpHelpers):
+    provision = {
+        "cockpit": {},
+        "kdump_ansible_machine": {"memory_mb": 2048},
+    }
+
+    def testBasic(self):
+        m = self.machine
+        b = self.browser
+
+        kdump_machine = self.machines['kdump_ansible_machine']
+
+        # Drop rpm repos as otherwise dnf will hang when we run the ansible role
+        kdump_machine.execute("rm -rf /etc/yum.repos.d/* /var/cache/yum/* /var/cache/dnf/*")
+
+        m.execute("systemctl disable --now kdump")
+
+        self.login_and_go("/kdump")
+        customPath = "/crash2"
+
+        m.execute(f"mkdir -p {customPath}")
+        b.click("#kdump-change-target")
+        b.set_val("#kdump-settings-location", "local")
+        pathInput = "#kdump-settings-local-directory"
+        b.set_input_text(pathInput, customPath)
+        b.click(f"#kdump-settings-dialog button{self.primary_btn_class}")
+        b.wait_text("#kdump-target-info", f"Local, {customPath}")
+
+        # HACK: workaround ansible role not creating /var/crash2 https://github.com/linux-system-roles/kdump/issues/8
+        kdump_machine.execute(f"mkdir -p {customPath}")
+
+        # This requires a reboot
+        self.run_ansible_playbook(browser=b, machine=kdump_machine, allow_failure=True)
+        kdump_machine.reboot()
+
+        kdump_machine.start_cockpit()
+        kdump_browser = self.new_browser(kdump_machine)
+
+        kdump_machine.execute("until systemctl is-active kdump; do sleep 1; done")
+        kdump_browser.login_and_go("/kdump")
+
+        # Verify that kdump runs and crashkernel is configured
+        kdump_browser.wait_in_text("#app", "256 MiB")
+        self.assertActive(active=True, browser=kdump_browser)
+
+        # Second run should be succeed as crashkernel is now set in the kernel cmdline
+        self.run_ansible_playbook(browser=b, machine=kdump_machine)
+
+        conf = kdump_machine.execute("cat /etc/kdump.conf")
+        self.assertIn("\n# Ansible managed\n", conf)
+        self.assertIn(f"\npath {customPath}\n", conf)
+
+        self.crashKernel(f"stored in {customPath} as vmcore", machine=kdump_machine, browser=kdump_browser)
+        kdump_machine.execute(f"until test -e {customPath}/127.0.0.1*/vmcore; do sleep 1; done", timeout=180)
+        self.assertIn("Kdump compressed dump", kdump_machine.execute(f"file {customPath}/127.0.0.1*/vmcore"))
+
+        # Test SSH without a username, for this we first need to first change
+        # to local not run into a race to detect that the generated kdump.conf
+        # was changed. As the #kdump-change-target does not show the remote ssh user/server.
+        b.click("#kdump-change-target")
+        b.set_val("#kdump-settings-location", "local")
+        b.click(f"#kdump-settings-dialog button{self.primary_btn_class}")
+        b.wait_not_present("#kdump-settings-dialog")
+        b.wait_text("#kdump-target-info", "Local, /var/crash")
+
+        b.click("#kdump-change-target")
+        b.set_val("#kdump-settings-location", "ssh")
+        sshInput = "#kdump-settings-ssh-server"
+        b.set_input_text(sshInput, "admin@localhost")
+        sshKeyInput = "#kdump-settings-ssh-key"
+        pathInput = "#kdump-settings-ssh-directory"
+        b.set_input_text(sshKeyInput, "/root/.ssh/id_rsa")
+        b.set_input_text(pathInput, "/var/crash")
+        b.click(f"#kdump-settings-dialog button{self.primary_btn_class}")
+        b.wait_not_present(pathInput)
+        b.wait_text("#kdump-target-info", "Remote over SSH, admin@localhost:/var/crash")
+
+        self.enableLocalSsh()
+        # running the role starts kdump.service which verifies if /var/crash is readable for the admin
+        kdump_machine.start_cockpit()
+        kdump_machine.execute("chown admin: /var/crash")
+        self.run_ansible_playbook(browser=b, machine=kdump_machine)
+        conf = kdump_machine.execute("cat /etc/kdump.conf")
+        self.assertIn("\n# Ansible managed\n", conf)
+        self.assertIn("\nssh admin@localhost\n", conf)
+        self.assertIn("\nsshkey /root/.ssh/id_rsa\n", conf)
+        self.assertIn("\npath /var/crash\n", conf)
+
+        kdump_browser.login_and_go("/kdump")
+        kdump_browser.wait_text("#kdump-target-info", "Remote over SSH, admin@localhost:/var/crash")
+        self.crashKernel("copied through SSH to admin@localhost:/var/crash as vmcore", cancel=True,
+                         browser=kdump_browser, machine=kdump_machine)
+
+        b.click("#kdump-change-target")
+        sshInput = "#kdump-settings-ssh-server"
+        b.set_input_text(sshInput, "localhost")
+        b.set_input_text(pathInput, "/var/crash2")
+        b.click(f"#kdump-settings-dialog button{self.primary_btn_class}")
+        b.wait_not_present(sshInput)
+        b.wait_text("#kdump-target-info", "Remote over SSH, localhost:/var/crash2")
+
+        self.run_ansible_playbook(browser=b, machine=kdump_machine)
+        conf = kdump_machine.execute("cat /etc/kdump.conf")
+        self.assertIn("\nssh root@localhost\n", conf)
+        self.assertIn("\npath /var/crash2\n", conf)
+
+
+if __name__ == '__main__':
+    testlib.test_main()

@@ -1,0 +1,51 @@
+{
+  "name": "sensors",
+  "description": "Module that displays all data reported by lm-sensors",
+  "type": "module",
+  "main": "index.js",
+  "repository": "git@github.com:ocristopfer/cockpit-sensors.git",
+  "author": "ocristopfer <ocristopfer@gmail.com> (https://github.com/ocristopfer)",
+  "contributors": [
+    "RampantDespair (https://github.com/RampantDespair)"
+  ],
+  "license": "LGPL-2.1",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "watch": "ESBUILD_WATCH='true' ./build.js",
+    "build": "./build.js",
+    "stylelint": "stylelint src/*.{css,scss}",
+    "stylelint:fix": "stylelint --fix src/*.{css,scss}",
+    "test:unit": "node test/unit/run.mjs",
+    "lint": "oxlint src/",
+    "lint:fix": "oxlint --fix src/"
+  },
+  "devDependencies": {
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "esbuild-wasm": "0.28.2",
+    "qunit": "3.0.0",
+    "stylelint": "17.16.0",
+    "stylelint-config-recommended-scss": "17.0.1",
+    "stylelint-config-standard": "40.0.0",
+    "stylelint-config-standard-scss": "17.0.0",
+    "stylelint-formatter-pretty": "4.0.1",
+    "typescript": "catalog:",
+    "oxlint": "catalog:"
+  },
+  "dependencies": {
+    "@patternfly/patternfly": "catalog:",
+    "@patternfly/react-core": "catalog:",
+    "@patternfly/react-icons": "catalog:",
+    "@patternfly/react-styles": "catalog:",
+    "@patternfly/react-table": "catalog:",
+    "argparse": "3.0.2",
+    "dequal": "2.0.3",
+    "esbuild": "catalog:",
+    "esbuild-sass-plugin": "3.7.0",
+    "gettext-parser": "9.1.1",
+    "react": "catalog:",
+    "react-dom": "catalog:"
+  }
+}

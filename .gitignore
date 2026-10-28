@@ -1,0 +1,33 @@
+# Package manager output
+**/node_modules/
+/.pnpm-store/
+
+# Generated bundles, build products, and test output
+**/dist/
+**/build/
+**/coverage/
+**/metafile.json
+**/output/
+**/rpmbuild/
+**/runtime-npm-modules.txt
+**/.pytest_cache/
+**/__pycache__/
+**/.cache/
+**/lcov/
+**/*.deb
+**/*.rpm
+**/*.tar.xz
+**/cockpit-starter-kit.spec
+
+# Local checkouts and source archives used to assemble this repository
+/forks/*
+!/forks/guidance-focused/
+/must-change-remote-origin/
+/transfer-finished-code-to-newly-forked-folders/
+/PLAN.md
+/PR_DRAFT.md
+
+# Editor and OS files
+.DS_Store
+.idea/
+.vscode/

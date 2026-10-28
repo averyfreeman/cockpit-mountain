@@ -1,0 +1,1068 @@
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/common/pywrap", sys.argv)
+# SPDX-License-Identifier: LGPL-2.1-or-later
+#
+# Copyright (C) 2021 Red Hat, Inc.
+import json
+import xml.etree.ElementTree as ET
+
+import machineslib
+import testlib
+from dialoglib import DialogHelpers
+from machinesxmls import (
+    TEST_NETWORK2_CLASH_XML,
+    TEST_NETWORK2_XML,
+    TEST_NETWORK3_XML,
+    TEST_NETWORK4_XML,
+    TEST_NETWORK_IPV6_XML,
+    TEST_NETWORK_XML,
+)
+
+
+def getNetworkDevice(m):
+    # To replicate `virsh iface-list` behavior, filter active interfaces
+    # from ip command and get the first active one.
+    routes = json.loads(m.execute("ip --json a"))
+    active = list(filter(lambda r: r['operstate'] == "UP", routes))
+
+    return active[0]["ifname"]
+
+
+@testlib.nondestructive
+class TestMachinesNetworks(machineslib.VirtualMachinesCase):
+
+    def testNetworks(self):
+        b = self.browser
+        m = self.machine
+
+        connectionName = m.execute("virsh uri | head -1 | cut -d/ -f4").strip()
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+
+        b.wait_in_text("#card-pf-networks", "1 Network")
+
+        # Create dummy network
+        m.execute(f"echo \"{TEST_NETWORK2_XML}\" > /tmp/xml; virsh net-define /tmp/xml")
+        b.wait_in_text("#card-pf-networks", "2 Networks")
+        m.execute(f"echo \"{TEST_NETWORK3_XML}\" > /tmp/xml; virsh net-define /tmp/xml")
+        m.execute(f"echo \"{TEST_NETWORK4_XML}\" > /tmp/xml; virsh net-create /tmp/xml")
+
+        # Click on Networks card
+        b.click(".pf-v6-c-card .pf-v6-c-card__header button:contains(Networks)")
+
+        # Check that all networks are there
+        b.wait_in_text("body", "Networks")
+        self.waitNetworkRow("test_network2", connectionName)
+        self.waitNetworkRow("test_network3", connectionName)
+
+        # Check headers of networks
+        b.wait_in_text(f"#network-test_network2-{connectionName}-name", "test_network2")
+        b.wait_in_text(f"#network-test_network2-{connectionName}-device", "virbr1")
+        b.wait_in_text(f"#network-test_network2-{connectionName}-forwarding", "None (isolated network)")
+        b.wait_in_text(f"#network-test_network3-{connectionName}-name", "test_network3")
+        b.wait_in_text(f"#network-test_network3-{connectionName}-device", "br0")
+        b.wait_in_text(f"#network-test_network3-{connectionName}-forwarding", "Bridge")
+
+        # Expand row for first network
+        self.toggleNetworkRow("test_network2", connectionName)
+
+        # Check overview network properties are present
+        b.wait_in_text(f"#network-test_network2-{connectionName}-persistent", "yes")
+        b.wait_visible(f"#network-test_network2-{connectionName}-autostart:not(:checked)")
+        b.wait_in_text(f"#network-test_network2-{connectionName}-ipv4-address", "192.168.100.1")
+        b.wait_in_text(f"#network-test_network2-{connectionName}-ipv4-netmask", "255.255.255.0")
+        b.wait_in_text(f"#network-test_network2-{connectionName}-ipv4-dhcp-range",
+                       "192.168.100.128 - 192.168.100.170")
+        b.wait_in_text(f"#network-test_network2-{connectionName}-ipv4-dhcp-host-0",
+                       "Name: paul, MAC: 00:16:3E:5D:C7:9E, IP: 192.168.122.254")
+        b.wait_in_text(f"#network-test_network2-{connectionName}-ipv6-address", "fd00:e81d:a6d7:55::1")
+        b.wait_in_text(f"#network-test_network2-{connectionName}-ipv6-prefix", "64")
+        b.wait_in_text(f"#network-test_network2-{connectionName}-ipv6-dhcp-range",
+                       "fd00:e81d:a6d7:55::100 - fd00:e81d:a6d7:55::1ff")
+        b.wait_in_text(f"#network-test_network2-{connectionName}-ipv6-dhcp-host-0",
+                       "Name: simon, IP: 2001:db8:ca2:2:3::1")
+        b.wait_in_text(f"#network-test_network2-{connectionName}-ipv6-dhcp-host-1",
+                       "ID: 0:1:0:1:18:aa:62:fe:0:16:3e:44:55:66, IP: 2001:db8:ca2:2:3::2")
+
+        # Close expanded row for this pool
+        self.toggleNetworkRow("test_network2", connectionName)
+
+        # Expand row for second network
+        self.toggleNetworkRow("test_network3", connectionName)
+
+        # Check overview network properties are present
+        b.wait_in_text(f"#network-test_network3-{connectionName}-persistent", "yes")
+        b.wait_visible(f"#network-test_network3-{connectionName}-autostart:not(:checked)")
+
+        # Check overview network properties are not present
+        for el in ["ipv4-address", "ipv4-netmask", "ipv4-dhcp-range", "ipv4-dhcp-host-0",
+                   "ipv6-address", "ipv6-prefix", "ipv6-dhcp-range", "ipv6-dhcp-host-0"]:
+            b.wait_not_present(f"#network-test_network3-{connectionName}-{el}")
+
+        # Transient network
+        self.toggleNetworkRow("test_network4", connectionName)
+        b.wait_in_text(f"#network-test_network4-{connectionName}-persistent", "no")
+        # Transient network shouldn't have autostart option
+        b.wait_not_present(f"#network-test_network4-{connectionName}-autostart")
+        b.click(f"#network-test_network4-{connectionName}-action-kebab")
+        # Transient network cannot be deleted
+        b.wait_visible(f'li.pf-m-aria-disabled > #delete-network-test_network4-{connectionName}')
+        b.click(f'#deactivate-network-test_network4-{connectionName}')  # Deactivate transient network
+        self.waitNetworkRow("test_network4", connectionName,
+                            present=False)  # Check it's not present after deactivation
+
+    def testNetworksCreate(self):
+        b = self.browser
+        m = self.machine
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+
+        # Click on Networks card
+        b.wait_in_text("#card-pf-networks .pf-v6-c-card__header button", "Network")
+        b.click(".pf-v6-c-card .pf-v6-c-card__header button:contains(Network)")
+
+        # HACK: Firefox 112 on RHEL 8 does not have `:has` yet, so for now use
+        # JavaScript to obtain the elements parent sibling.
+        b.eval_js("""
+       ph_input_form_helper_text = function(id) {
+          const selector = ".pf-v6-c-helper-text__item.pf-m-error";
+          return document.getElementById(id).parentElement.parentElement.querySelector(selector).textContent;
+        }""")
+
+        class NetworkCreateDialog:
+            def __init__(
+                self, test_obj, name, forward_mode=None, ip_conf=None, ipv4_address=None, ipv4_netmask=None,
+                ipv6_address=None, ipv6_prefix=None, device=None, ipv4_dhcp_start=None, ipv4_dhcp_end=None,
+                ipv6_dhcp_start=None, ipv6_dhcp_end=None, xfail=False, xfail_error=None, xfail_objects=None,
+                remove=True, activate=False
+            ):
+                self.test_obj = test_obj
+                self.name = name
+                self.forward_mode = forward_mode
+                self.device = device
+                self.ip_conf = ip_conf
+                self.ipv4_address = ipv4_address
+                self.ipv4_netmask = ipv4_netmask
+                self.ipv6_address = ipv6_address
+                self.ipv6_prefix = ipv6_prefix
+                self.ipv4_dhcp_start = ipv4_dhcp_start
+                self.ipv4_dhcp_end = ipv4_dhcp_end
+                self.ipv6_dhcp_start = ipv6_dhcp_start
+                self.ipv6_dhcp_end = ipv6_dhcp_end
+                self.xfail = xfail
+                self.xfail_objects = xfail_objects
+                self.xfail_error = xfail_error
+                self.remove = remove
+                self.activate = activate
+
+            def execute(self):
+                self.open()
+                self.fill()
+                self.create()
+                if not self.xfail:
+                    self.verify_dialog()
+                    self.verify_overview()
+                    if self.remove:
+                        self.cleanup()
+
+            def open(self):
+                b.click("#create-network")
+                b.wait_visible("#create-network-dialog")
+                b.wait_in_text(".pf-v6-c-modal-box .pf-v6-c-modal-box__header .pf-v6-c-modal-box__title",
+                               "Create virtual network")
+
+            def fill(self):
+                b.set_input_text("#create-network-name", self.name)
+
+                if self.forward_mode:
+                    b.set_val("#create-network-forward-mode", self.forward_mode)
+
+                if self.device:
+                    b.select_from_dropdown("#create-network-device", self.device)
+
+                if self.ip_conf:
+                    b.select_from_dropdown("#create-network-ip-configuration", self.ip_conf)
+
+                    if "4" in self.ip_conf:
+                        b.set_input_text("#create-network-ipv4-address", self.ipv4_address)
+                        b.set_input_text("#create-network-ipv4-netmask", self.ipv4_netmask)
+                        if self.ipv4_dhcp_start is not None and self.ipv4_dhcp_end is not None:
+                            b.set_checked("#create-network-ipv4-dhcp", True)
+                            b.set_input_text("#create-network-ipv4-dhcp-range-start", self.ipv4_dhcp_start)
+                            b.set_input_text("#create-network-ipv4-dhcp-range-end", self.ipv4_dhcp_end)
+
+                    if "6" in self.ip_conf:
+                        b.set_input_text("#create-network-ipv6-address", self.ipv6_address)
+                        b.set_input_text("#create-network-ipv6-prefix", self.ipv6_prefix)
+                        if self.ipv6_dhcp_start is not None and self.ipv6_dhcp_end is not None:
+                            b.set_checked("#create-network-ipv6-dhcp", True)
+                            b.set_input_text("#create-network-ipv6-dhcp-range-start", self.ipv6_dhcp_start)
+                            b.set_input_text("#create-network-ipv6-dhcp-range-end", self.ipv6_dhcp_end)
+
+            def cancel(self):
+                b.click(".pf-v6-c-modal-box__footer button:contains(Cancel)")
+                b.wait_not_present("#create-network-dialog")
+
+            def create(self):
+                b.click(".pf-v6-c-modal-box__footer button:contains(Create)")
+
+                def get_helper_text(xfo):
+                    pf_error_sel = ".pf-v6-c-form__helper-text .pf-v6-c-helper-text__item.pf-m-error"
+                    return f"#create-network-dialog .create-network-{xfo} {pf_error_sel}"
+
+                if (self.xfail):
+                    # Check incomplete dialog
+                    if "body" in self.xfail_objects:
+                        error_location = "#create-network-dialog .pf-v6-c-modal-box__body .pf-m-danger"
+                        b.wait_visible(error_location)
+                        error_message = b.text(error_location)
+                        self.test_obj.assertIn(self.xfail_error, error_message)
+                    else:
+                        for xfo in self.xfail_objects:
+                            if "range" in xfo:
+                                b.wait_in_text(get_helper_text(xfo), self.xfail_error)
+                            else:
+                                self.test_obj.assertIn(self.xfail_error,
+                                                       b.eval_js(f"ph_input_form_helper_text(\"create-network-{xfo}\")"))
+
+                    self.cancel()
+                else:
+                    b.wait_not_present("#create-network-dialog")
+
+            def verify_expected_error_on_head(self, error_message):
+                b.click('.pf-m-toast .pf-v6-c-alert button:contains("show more")')
+                b.wait_in_text(".pf-m-toast .pf-v6-c-alert", error_message)
+                b.click(".pf-m-toast .pf-v6-c-alert .pf-v6-c-alert__action button")
+                b.wait_not_present(".pf-m-toast")
+
+            def verify_dialog(self):
+                # Check that the defined network is now visible
+                b.wait_in_text("body", "Networks")
+
+                # Verify libvirt XML
+                net_xml = f"virsh -c qemu:///system net-dumpxml {self.name}"
+                xmllint_element = f"{net_xml} | xmllint --xpath 'string(//network/{{prop}})' -"
+
+                self.test_obj.assertEqual(self.name, m.execute(xmllint_element.format(prop='name')).strip())
+                if (self.forward_mode == "none"):
+                    self.test_obj.assertEqual("", m.execute(xmllint_element.format(prop='forward/@mode')).strip())
+                else:
+                    self.test_obj.assertEqual(self.forward_mode,
+                                              m.execute(xmllint_element.format(prop='forward/@mode')).strip())
+
+                if self.device:
+                    self.test_obj.assertEqual(self.device,
+                                              m.execute(xmllint_element.format(prop='forward/interface/@dev')).strip())
+
+                if (self.ip_conf != "None"):
+                    if "4" in self.ip_conf:
+                        self.test_obj.assertEqual(self.ipv4_address,
+                                                  m.execute(xmllint_element.format(prop='ip/@address')).strip())
+                        self.test_obj.assertEqual(self.ipv4_netmask,
+                                                  m.execute(xmllint_element.format(prop='ip/@netmask')).strip())
+                        if self.ipv4_dhcp_start and self.ipv4_dhcp_start:
+                            self.test_obj.assertEqual(self.ipv4_dhcp_start,
+                                                      m.execute(xmllint_element.format(prop='ip/dhcp/range/@start')).strip())
+                            self.test_obj.assertEqual(self.ipv4_dhcp_end,
+                                                      m.execute(xmllint_element.format(prop='ip/dhcp/range/@end')).strip())
+                    if "6" in self.ip_conf:
+                        self.test_obj.assertEqual(self.ipv6_address,
+                                                  m.execute(xmllint_element.format(prop='ip[starts-with(@family,"ipv6")]/@address')).strip())
+                        self.test_obj.assertEqual(self.ipv6_prefix,
+                                                  m.execute(xmllint_element.format(prop='ip[starts-with(@family,"ipv6")]/@prefix')).strip())
+                        if self.ipv6_dhcp_start and self.ipv6_dhcp_start:
+                            self.test_obj.assertEqual(self.ipv6_dhcp_start,
+                                                      m.execute(xmllint_element.format(prop='ip[starts-with(@family,"ipv6")]/dhcp/range/@start')).strip())
+                            self.test_obj.assertEqual(self.ipv6_dhcp_end,
+                                                      m.execute(xmllint_element.format(prop='ip[starts-with(@family,"ipv6")]/dhcp/range/@end')).strip())
+                else:
+                    self.test_obj.assertEqual("", m.execute(xmllint_element.format(prop='ip')).strip())
+
+            def verify_overview(self):
+                # Check basic network properties
+                modes = {"nat": "NAT", "none": "None (isolated network)", "open": "Open", "route": "Routed",
+                         "bridge": "Bridge", "private": "Private", "vepa": "VEPA",
+                         "passthrough": "Passthrough", "hostdev": "Hostdev"}
+                connectionName = m.execute("virsh uri | head -1 | cut -d/ -f4").strip()
+
+                b.wait_in_text(f"#network-{self.name}-{connectionName}-forwarding", modes[self.forward_mode])
+                self.test_obj.toggleNetworkRow(self.name, connectionName)
+
+                if self.activate:
+                    b.click(f"#activate-network-{self.name}-{connectionName}")
+                    # For checking danger alter, only set xfail_objects, and don't set xfail
+                    if self.xfail_objects and 'danger_alert' in self.xfail_objects:
+                        self.verify_expected_error_on_head(self.xfail_error)
+
+                if self.ip_conf != "None":
+                    if "4" in self.ip_conf:
+                        b.wait_in_text(f"#network-{self.name}-{connectionName}-ipv4-address", self.ipv4_address)
+                        b.wait_in_text(f"#network-{self.name}-{connectionName}-ipv4-netmask", self.ipv4_netmask)
+                        if self.ipv4_dhcp_start and self.ipv4_dhcp_start:
+                            b.wait_in_text(f"#network-{self.name}-{connectionName}-ipv4-dhcp-range",
+                                           self.ipv4_dhcp_start + " - " + self.ipv4_dhcp_end)
+                    if "6" in self.ip_conf:
+                        b.wait_in_text(f"#network-{self.name}-{connectionName}-ipv6-address", self.ipv6_address)
+                        b.wait_in_text(f"#network-{self.name}-{connectionName}-ipv6-prefix", self.ipv6_prefix)
+                        if self.ipv6_dhcp_start and self.ipv6_dhcp_start:
+                            b.wait_in_text(f"#network-{self.name}-{connectionName}-ipv6-dhcp-range",
+                                           self.ipv6_dhcp_start + " - " + self.ipv6_dhcp_end)
+
+                    if "4" not in self.ip_conf:
+                        b.wait_not_present(f"#network-{self.name}-{connectionName}-ipv4-address")
+                    if "6" not in self.ip_conf:
+                        b.wait_not_present(f"#network-{self.name}-{connectionName}-ipv6-address")
+                else:
+                    b.wait_not_present(f"#network-{self.name}-{connectionName}-ipv4-address")
+                    b.wait_not_present(f"#network-{self.name}-{connectionName}-ipv6-address")
+
+            def cleanup(self):
+                if self.activate and not self.xfail_objects:
+                    m.execute(f"virsh net-destroy {self.name}")
+                m.execute(f"virsh net-undefine {self.name}")
+
+        # Test various forward Modes
+        duplicated_net = NetworkCreateDialog(
+            self,
+            name="test_network",
+            forward_mode="nat",
+            ip_conf="IPv4 only",
+            ipv4_address="192.168.110.1",
+            ipv4_netmask="255.255.255.0",
+            remove=False,
+            activate=True,
+        )
+        duplicated_net.execute()
+
+        # XFail: Activate a network which has a same ipv4 address with last one
+        NetworkCreateDialog(
+            self,
+            name="test_network_duplication",
+            forward_mode="nat",
+            ip_conf="IPv4 only",
+            ipv4_address="192.168.110.1",
+            ipv4_netmask="255.255.255.0",
+            activate=True,
+            xfail_objects='danger_alert',
+            xfail_error="Network is already in use",
+        ).execute()
+        duplicated_net.cleanup()
+
+        NetworkCreateDialog(
+            self,
+            name="test_network",
+            forward_mode="open",
+            ip_conf="IPv6 only",
+            ipv6_address="fd00:e81d:a6d7:55::100",
+            ipv6_prefix="64",
+        ).execute()
+
+        # Compressed IPv6 addresses should work as well
+        NetworkCreateDialog(
+            self,
+            name="test_network",
+            forward_mode="open",
+            ip_conf="IPv6 only",
+            ipv6_address="fec0::1",
+            ipv6_prefix="48",
+            ipv6_dhcp_start="fec0::1",
+            ipv6_dhcp_end="fec0::10",
+        ).execute()
+
+        tmp = NetworkCreateDialog(
+            self,
+            name="test_network",
+            forward_mode="none",
+            ip_conf="None",
+            remove=False,
+        )
+        tmp.execute()
+
+        # Try body error
+        NetworkCreateDialog(
+            self,
+            name="test_network",
+            xfail=True,
+            xfail_objects=["body"],
+            xfail_error="network 'test_network' already exists",
+        ).execute()
+
+        tmp.cleanup()
+
+        # Test full configuration
+        NetworkCreateDialog(
+            self,
+            name="test_network",
+            forward_mode="nat",
+            ip_conf="IPv4 and IPv6",
+            ipv4_address="192.168.110.1",
+            ipv4_netmask="255.255.255.0",
+            ipv4_dhcp_start="192.168.110.130",
+            ipv4_dhcp_end="192.168.110.170",
+            ipv6_address="fd00:e81d:a6d7:55::100",
+            ipv6_prefix="64",
+            ipv6_dhcp_start="fd00:e81d:a6d7:55::105",
+            ipv6_dhcp_end="fd00:e81d:a6d7:55::108",
+        ).execute()
+
+        # Check "... should not be empty" warnings
+        NetworkCreateDialog(
+            self,
+            name="",
+            forward_mode="open",
+            ip_conf="IPv4 and IPv6",
+            ipv4_address="",
+            ipv4_netmask="",
+            ipv4_dhcp_start="",
+            ipv4_dhcp_end="",
+            ipv6_address="",
+            ipv6_prefix="",
+            ipv6_dhcp_start="",
+            ipv6_dhcp_end="",
+            xfail=True,
+            xfail_objects=["name", "ipv4-address", "ipv4-netmask", "ipv4-dhcp-range-start", "ipv4-dhcp-range-end",
+                            "ipv6-address", "ipv6-prefix", "ipv6-dhcp-range-start", "ipv6-dhcp-range-end"],
+            xfail_error="should not be empty",
+        ).execute()
+
+        # Check "Invalid..." (invalid IP format or prefix length)
+        NetworkCreateDialog(
+            self,
+            name="test_network",
+            forward_mode="open",
+            ip_conf="IPv4 and IPv6",
+            ipv4_address="ABC.168.22.10",
+            ipv4_netmask="99",
+            ipv4_dhcp_start="300.2.1",
+            ipv4_dhcp_end="168..1.1.1",
+            ipv6_address="xz00:e81d:a6d7:55::100",
+            ipv6_prefix="-1",
+            ipv6_dhcp_start="fd00:e81d.a6d7:55:::100",
+            ipv6_dhcp_end="fd00:e81d:a6d7:55::1:1:1:1:1:1:1:1",
+            xfail=True,
+            xfail_objects=["ipv4-address", "ipv4-netmask", "ipv4-dhcp-range-start", "ipv4-dhcp-range-end",
+                            "ipv6-address", "ipv6-prefix", "ipv6-dhcp-range-start", "ipv6-dhcp-range-end"],
+            xfail_error="Invalid",
+        ).execute()
+
+        # Check "prefix must be multiple of 8"
+        NetworkCreateDialog(
+            self,
+            name="test_network",
+            forward_mode="open",
+            ip_conf="IPv4 only",
+            ipv4_address="192.168.100.1",
+            ipv4_netmask="26",
+            ipv4_dhcp_start="",
+            ipv4_dhcp_end="",
+            xfail=True,
+            xfail_objects=["ipv4-netmask"],
+            xfail_error="IPv4 prefix length must be a multiple of 8",
+        ).execute()
+
+        # Check "prefix must be 24 or less"
+        NetworkCreateDialog(
+            self,
+            name="test_network",
+            forward_mode="open",
+            ip_conf="IPv4 only",
+            ipv4_address="192.168.100.1",
+            ipv4_netmask="32",
+            ipv4_dhcp_start="",
+            ipv4_dhcp_end="",
+            xfail=True,
+            xfail_objects=["ipv4-netmask"],
+            xfail_error="IPv4 prefix length must be 24 or less",
+        ).execute()
+
+        # Check "Address not within subnet"
+        NetworkCreateDialog(
+            self,
+            name="test_network",
+            forward_mode="open",
+            ip_conf="IPv4 and IPv6",
+            ipv4_address="192.168.100.1",
+            ipv4_netmask="24",
+            ipv4_dhcp_start="192.168.101.1",
+            ipv4_dhcp_end="191.168.100.1",
+            ipv6_address="fd00:e81d:a6d7:55::100",
+            ipv6_prefix="64",
+            ipv6_dhcp_start="fd00:e81d:a6d7:54::100",
+            ipv6_dhcp_end="ad00:e81d:a6d7:55::100",
+            xfail=True,
+            xfail_objects=["ipv4-dhcp-range-start", "ipv4-dhcp-range-end",
+                           "ipv6-dhcp-range-start", "ipv6-dhcp-range-end"],
+            xfail_error="Address not within subnet",
+        ).execute()
+
+        # Check giving the network identifier instead of a valid bridge address.
+        NetworkCreateDialog(
+            self,
+            name="test_network",
+            ip_conf="IPv4 only",
+            ipv4_address="192.168.100.0",
+            ipv4_netmask="24",
+            xfail=True,
+            xfail_objects=["ipv4-address"],
+            xfail_error="Must be an address instead of the network identifier, such as 192.168.100.1",
+        ).execute()
+
+        # Check "IPv4 address cannot be same as the network's broadcast address"
+        NetworkCreateDialog(
+            self,
+            name="test_network",
+            ip_conf="IPv4 only",
+            ipv4_address="192.168.100.255",
+            ipv4_netmask="24",
+            xfail=True,
+            xfail_objects=["ipv4-address"],
+            xfail_error="IPv4 address cannot be same as the network's broadcast address",
+        ).execute()
+
+        # Test network devices
+        device = getNetworkDevice(m)
+        NetworkCreateDialog(
+            self,
+            name="test_network",
+            forward_mode="nat",
+            device=device,
+            ip_conf="IPv4 only",
+            ipv4_address="192.168.110.1",
+            ipv4_netmask="255.255.255.0",
+        ).execute()
+
+    def testNetworkSettings(self):
+        b = self.browser
+        m = self.machine
+
+        self.createVm("subVmTest1")
+
+        # Create dummy network
+        m.write("/tmp/xml", TEST_NETWORK_XML)
+        m.execute("virsh net-define /tmp/xml; virsh net-start test_network")
+
+        # Create a second bridge to LAN NIC, virbr0 does not make sense but let's use it for test purposes
+        self.login_and_go("/machines")
+        self.waitPageInit()
+        self.waitVmRow("subVmTest1")
+
+        b.wait_in_text("#vm-subVmTest1-system-state", "Running")
+
+        # Make sure that the Networks are loaded into the global state
+        b.wait_in_text("#card-pf-networks", "2 Networks")
+
+        self.goToVmPage("subVmTest1")
+
+        mac = b.text("#vm-subVmTest1-network-1-mac")
+        next_mac = self.get_next_mac(mac)
+        m.execute(f'virsh attach-interface --persistent subVmTest1 bridge virbr0 --model virtio --mac {next_mac}')
+
+        # Wait for both edit buttons, to get a stable state
+        b.wait_visible("#vm-subVmTest1-network-1-edit-dialog")
+        b.wait_visible("#vm-subVmTest1-network-2-edit-dialog")
+
+        d = DialogHelpers(b, "#vm-subVmTest1-network-1-edit-dialog-modal-window")
+
+        b.click("#vm-subVmTest1-network-1-edit-dialog")
+
+        # Make sure the dialog warning does not appear until we change something
+        b.wait_not_present("#vm-subVmTest1-network-1-edit-dialog-idle-message")
+
+        # Cancel dialog
+        b.click(d.cancel_button())
+        b.wait_not_present("#vm-subVmTest1-network-1-edit-dialog-modal-window")
+
+        # Fetch current NIC model type
+        self.expandNicRow(2)
+        current_model_type = b.text("#vm-subVmTest1-network-2-model")
+
+        d = DialogHelpers(b, "#vm-subVmTest1-network-2-edit-dialog-modal-window")
+
+        # Reopen dialog modal
+        b.click("#vm-subVmTest1-network-2-edit-dialog")
+
+        # Change network model type of a running domain
+        d.set_DropdownSelect("model", "e1000e")
+        # Wait for the dialog warning to appear
+        b.wait_visible("#vm-subVmTest1-network-2-edit-dialog-idle-message")
+        # Change network type and source of a running domain
+        d.wait_RadioSelect("type_and_source.type", "network")
+        d.wait_DropdownSelect("type_and_source.source", "default")
+        d.set_DropdownSelect("type_and_source.source", "test_network")
+        # Save the network settings
+        b.click(d.apply_button())
+        b.wait_not_present("#vm-subVmTest1-network-2-edit-dialog-modal-window")
+        # Wait for the tooltips to appear next to the elements we changed
+        b.wait_in_text("#vm-subVmTest1-network-2-model", current_model_type)
+        b.wait_visible("#vm-subVmTest1-network-2-model-tooltip")
+        b.wait_in_text("#vm-subVmTest1-network-2-type", 'network')
+        b.wait_in_text("#vm-subVmTest1-network-2-source", 'default')
+        b.wait_visible("#vm-subVmTest1-network-2-source-tooltip")
+
+        # Shut off domain and check changes are applied
+        self.performAction("subVmTest1", "forceOff")
+        b.wait_in_text("#vm-subVmTest1-network-2-model", "e1000e")
+        b.wait_not_present("#vm-subVmTest1-network-2-model-tooltip")
+        b.wait_in_text("#vm-subVmTest1-network-2-type", "network")
+        b.wait_not_present("#vm-subVmTest1-network-2-type-tooltip")
+        b.wait_in_text("#vm-subVmTest1-network-2-source", "test_network")
+        b.wait_not_present("#vm-subVmTest1-network-2-source-tooltip")
+        b.wait_not_present("#vm-subVmTest1-needs-shutdown")
+
+        # Remove the network interface
+        m.execute("virsh detach-interface --persistent --type network --domain subVmTest1")
+
+        # We don't get events for shut off VMs so reload the page
+        b.reload()
+        b.enter_page('/machines')
+        self.waitPageInit()
+
+        self.goToMainPage()
+
+        b.wait_in_text("#card-pf-networks", "2 Networks")
+        self.waitVmRow("subVmTest1")
+        self.goToVmPage("subVmTest1")
+
+        # Change network type and source from the bridge NIC
+        self.expandNicRow(1)
+        b.wait_in_text("#vm-subVmTest1-network-1-type", "bridge")
+        b.wait_in_text("#vm-subVmTest1-network-1-source", "virbr0")
+
+        # Change interface type to direct
+        # Open the modal dialog
+        b.click("#vm-subVmTest1-network-1-edit-dialog")
+        d = DialogHelpers(b, "#vm-subVmTest1-network-1-edit-dialog-modal-window")
+
+        d.wait_RadioSelect("type_and_source.type", "bridge")
+        d.set_RadioSelect("type_and_source.type", "direct")
+        source = d.get_DropdownSelect("type_and_source.source")
+
+        # Save the network settings
+        b.click(d.apply_button())
+        b.wait_not_present("#vm-subVmTest1-network-1-edit-dialog-modal-window")
+
+        b.wait_in_text("#vm-subVmTest1-network-1-type", "direct")
+        b.wait_in_text("#vm-subVmTest1-network-1-source", source)
+
+        # Change interface type to bridge
+        # Open the modal dialog
+        b.click("#vm-subVmTest1-network-1-edit-dialog")
+
+        d.wait_RadioSelect("type_and_source.type", "direct")
+        d.set_RadioSelect("type_and_source.type", "bridge")
+        d.set_DropdownSelect("type_and_source.source", "virbr0")
+
+        # Save the network settings
+        b.click(d.apply_button())
+        b.wait_not_present("#vm-subVmTest1-network-1-edit-dialog-modal-window")
+
+        b.wait_in_text("#vm-subVmTest1-network-1-type", "bridge")
+        b.wait_in_text("#vm-subVmTest1-network-1-source", "virbr0")
+
+        b.click("#vm-subVmTest1-network-1-edit-dialog")
+        d.wait_DropdownSelect("type_and_source.source", "virbr0")
+        b.click(d.apply_button())
+        b.wait_not_present("#vm-subVmTest1-network-1-edit-dialog-modal-window")
+        b.wait_in_text("#vm-subVmTest1-network-1-source", "virbr0")
+
+        # Change interface type to network
+        # Open the modal dialog
+        b.click("#vm-subVmTest1-network-1-edit-dialog")
+
+        d.wait_RadioSelect("type_and_source.type", "bridge")
+        d.set_RadioSelect("type_and_source.type", "network")
+        d.set_DropdownSelect("type_and_source.source", "test_network")
+
+        # Save the network settings
+        b.click(d.apply_button())
+        b.wait_not_present("#vm-subVmTest1-network-1-edit-dialog-modal-window")
+
+        b.wait_in_text("#vm-subVmTest1-network-1-type", "network")
+        b.wait_in_text("#vm-subVmTest1-network-1-source", "test_network")
+
+        # Remove test_network from the VM again
+        self.deleteIface(1)
+
+        # Remove all Virtual Networks
+        m.execute("virsh net-dumpxml default > /tmp/net-default.xml")
+        m.execute("virsh net-dumpxml test_network > /tmp/net-test-network.xml")
+        m.execute("virsh net-destroy test_network; virsh net-destroy default")
+        self.addCleanup(m.execute, "virsh net-define /tmp/net-default.xml; virsh net-autostart default")
+
+        self.goToMainPage()
+
+        b.wait_in_text("#card-pf-networks .active-resources:nth-of-type(1)", "0")
+        m.execute("virsh net-undefine test_network; virsh net-undefine default")
+        b.wait_in_text("#card-pf-networks .active-resources:nth-of-type(2)", "0")
+        b.wait_in_text("#card-pf-networks", "0 Networks")
+
+        self.goToVmPage("subVmTest1")
+
+        # Create a second bridge to LAN NIC
+        next_mac = self.get_next_mac(next_mac)
+        m.execute(f"""
+                  ip link add name br1 type bridge
+                  virsh attach-interface --current subVmTest1 bridge br1 --mac {next_mac}
+                  """)
+        self.addCleanup(m.execute, "ip link delete br1")
+
+        m.execute("virsh start subVmTest1")
+        b.wait_in_text("#vm-subVmTest1-system-state", "Running")
+
+        # Open the modal dialog
+        b.click("#vm-subVmTest1-network-1-edit-dialog")
+
+        # And ensure that the network type is disabled
+        d.wait_RadioSelect("type_and_source.type", "bridge")
+        b.wait_visible(d.id("type_and_source.type", "network") + ":disabled")
+        b.click(d.cancel_button())
+
+        # Ensure that when the source of a NIC was removed, it is
+        # still shown in the Edit dialog, and we can still change it
+
+        # Redefine deleted networks and attach an interface with source a deleted network
+        next_mac = self.get_next_mac(next_mac)
+        m.execute(f"""
+            virsh net-define /tmp/net-default.xml
+            virsh net-start default
+            virsh attach-interface --persistent --type network --source default --mac {next_mac} --domain subVmTest1
+            virsh net-destroy default; virsh net-undefine default
+            virsh net-define /tmp/net-test-network.xml; virsh net-start test_network""")
+
+        # First shut of the VM otherwise the interface will not be the same in the live and config XML
+        # https://www.redhat.com/archives/libvir-list/2019-August/msg01034.html
+        self.performAction("subVmTest1", "forceOff")
+
+        # Try to edit the interface changing the source to a non deleted network
+        b.click("#vm-subVmTest1-network-2-edit-dialog")
+        d = DialogHelpers(b, "#vm-subVmTest1-network-2-edit-dialog-modal-window")
+
+        b.wait_visible("#vm-subVmTest1-network-2-edit-dialog-modal-window")
+        d.wait_RadioSelect("type_and_source.type", "network")
+        d.wait_DropdownSelect("type_and_source.source", "default")
+        d.set_DropdownSelect("type_and_source.source", "test_network")
+        b.click(d.apply_button())
+        b.wait_not_present("#vm-subVmTest1-network-2-edit-dialog-modal-window")
+        self.expandNicRow(2)
+        b.wait_in_text("#vm-subVmTest1-network-2-source", "test_network")
+
+    def testNetworkAutostart(self):
+        b = self.browser
+        m = self.machine
+
+        # Create dummy network
+        m.write("/tmp/xml", TEST_NETWORK2_XML)
+        m.execute("virsh net-define /tmp/xml")
+
+        connectionName = m.execute("virsh uri | head -1 | cut -d/ -f4").strip()
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+
+        # Click on Networks card
+        b.wait_in_text("#card-pf-networks .pf-v6-c-card__header button", "Network")
+        b.click(".pf-v6-c-card .pf-v6-c-card__header button:contains(Network)")
+
+        # Check that all networks are there
+        b.wait_in_text("body", "Networks")
+        self.waitNetworkRow("test_network2", connectionName)
+
+        # Expand row for first network
+        self.toggleNetworkRow("test_network2", connectionName)
+
+        b.wait_visible(f"#network-test_network2-{connectionName}-autostart")
+
+        # set checkbox state and check state of checkbox
+        # don't know the initial state of checkbox, so set it to checked
+        b.set_checked(f"#network-test_network2-{connectionName}-autostart", True)
+        b.wait_visible(f"#network-test_network2-{connectionName}-autostart:checked")
+        # check virsh state
+        autostartState = m.execute("virsh net-info test_network2 | grep 'Autostart:' | awk '{print $2}'").strip()
+        self.assertEqual(autostartState, "yes")
+
+        # change checkbox state and check state of checkbox
+        b.click(f"#network-test_network2-{connectionName}-autostart")
+        b.wait_visible(f"#network-test_network2-{connectionName}-autostart:not(:checked)")
+        # check virsh state
+        autostartState = m.execute("virsh net-info test_network2 | grep 'Autostart:' | awk '{print $2}'").strip()
+        self.assertEqual(autostartState, "no")
+
+        # change checkbox state and check state of checkbox
+        b.click(f"#network-test_network2-{connectionName}-autostart")
+        b.wait_visible(f"#network-test_network2-{connectionName}-autostart:checked")
+        # check virsh state
+        autostartState = m.execute("virsh net-info test_network2 | grep 'Autostart:' | awk '{print $2}'").strip()
+        self.assertEqual(autostartState, "yes")
+
+    def testNetworkState(self):
+        b = self.browser
+        m = self.machine
+
+        # Create dummy network
+        m.write("/tmp/xml", TEST_NETWORK2_XML)
+        m.execute("virsh net-define /tmp/xml")
+
+        connectionName = m.execute("virsh uri | head -1 | cut -d/ -f4").strip()
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+
+        # Click on Networks card
+        b.click(".pf-v6-c-card .pf-v6-c-card__header button:contains(Network)")
+
+        # Check that all networks are there
+        b.wait_in_text("body", "Networks")
+        self.waitNetworkRow("test_network2", connectionName)
+
+        # Expand row for first network
+        self.toggleNetworkRow("test_network2", connectionName)
+        # wait until the expanded content is visible
+        b.wait_visible("#network-test_network2-system-autostart:not(:checked)")
+        b.wait_in_text("#network-test_network2-system-ipv6-dhcp-host-0", "simon")
+
+        b.assert_pixels("#app", "networks-page", skip_layouts=["rtl"])
+
+        # activate network
+        b.click(f"#activate-network-test_network2-{connectionName}")
+        b.wait_in_text(f"#network-test_network2-{connectionName}-state", "active")
+        # check virsh state
+        virsh_state_cmd = "virsh net-info test_network2 | grep 'Active:' | awk '{print $2}'"
+        testlib.wait(lambda: "yes" == m.execute(virsh_state_cmd).strip(),
+                     tries=5)
+        # deactivate network
+        b.wait_visible(f"#deactivate-network-test_network2-{connectionName}")
+        b.click(f"#deactivate-network-test_network2-{connectionName}")
+        b.wait_in_text(f"#network-test_network2-{connectionName}-state", "inactive")
+        b.wait_visible(f"#activate-network-test_network2-{connectionName}")
+        # check virsh state
+        testlib.wait(lambda: "no" == m.execute(virsh_state_cmd).strip(),
+                     tries=5)
+
+        # trigger error on clashing network
+        m.write("/tmp/xml", TEST_NETWORK2_CLASH_XML)
+        m.execute("virsh net-define /tmp/xml")
+        self.waitNetworkRow("test_network2_clash", connectionName)
+        m.execute("virsh net-start test_network2")
+        b.click(f"#activate-network-test_network2_clash-{connectionName}")
+        b.wait_in_text(".pf-m-toast .pf-v6-c-alert", "Network test_network2_clash failed to get activated")
+        b.click(".pf-m-toast .pf-v6-c-alert .pf-v6-c-alert__action button")
+        b.wait_not_present(".pf-m-toast")
+
+        # error should disappear if resolved
+        b.wait_visible(f"#deactivate-network-test_network2-{connectionName}")
+        b.click(f"#deactivate-network-test_network2-{connectionName}")
+        b.wait_in_text(f"#network-test_network2-{connectionName}-state", "inactive")
+        b.wait_visible(f"#activate-network-test_network2-{connectionName}")
+        b.click(f"#activate-network-test_network2_clash-{connectionName}")
+        b.wait_in_text(f"#network-test_network2_clash-{connectionName}-state", "active")
+
+        # check "X" button of the deletion dialog
+        self.dropdownAction(f"#network-test_network2-{connectionName}-action-kebab",
+                            f'#delete-network-test_network2-{connectionName}')
+        b.wait_visible("#delete-resource-modal")
+        b.click("#delete-resource-modal button[aria-label=Close]")
+        b.wait_not_present("#delete-resource-modal")
+
+        # Delete an inactive network
+        self.dropdownAction(f"#network-test_network2-{connectionName}-action-kebab",
+                            f'#delete-network-test_network2-{connectionName}')
+        b.wait_in_text(".pf-v6-c-modal-box__body .pf-v6-c-description-list", "test_network2")
+        b.click(".pf-v6-c-modal-box__footer button:contains(Delete)")
+        self.waitNetworkRow("test_network2", connectionName, present=False)
+
+        # Delete an active network
+        b.wait_in_text(f"#network-test_network2_clash-{connectionName}-state", "active")
+        self.toggleNetworkRow("test_network2_clash", connectionName)
+        self.dropdownAction(f"#network-test_network2_clash-{connectionName}-action-kebab",
+                            f'#delete-network-test_network2_clash-{connectionName}')
+        b.wait_in_text(".pf-v6-c-modal-box__body .pf-v6-c-description-list", "test_network2_clash")
+        b.click(".pf-v6-c-modal-box__footer button:contains(Delete)")
+        self.waitNetworkRow("test_network2_clash", connectionName, present=False)
+
+    def testNetworkAddStaticDCHPHosts(self):
+        class NetworkAddStaticDCHPHostsDialog:
+            def __init__(
+                self, test_obj=None, network_name="default", connection_name="system", mac=None, ip=None, entry_id=0,
+                xfail=None, close_dialog=True, remove=True
+            ):
+                self.test_obj = test_obj
+                self.network_name = network_name
+                self.connection_name = connection_name
+                self.mac = mac
+                self.ip = ip
+                self.entry_id = entry_id
+                self.xfail = xfail
+                self.remove = remove
+                self.close_dialog = close_dialog
+
+            def execute(self):
+                self.open()
+                self.fill()
+                self.add()
+                if not self.xfail:
+                    self.verify_dialog()
+                    self.verify_overview()
+                    if self.remove:
+                        self.cleanup()
+
+            def open(self):
+                b.click(f"#network-{self.network_name}-{self.connection_name}-static-host-entries-add")
+                b.wait_visible("#add-new-static-entry-mac-address")
+                b.wait_in_text(".pf-v6-c-modal-box .pf-v6-c-modal-box__header .pf-v6-c-modal-box__title",
+                               "Add a DHCP static host entry")
+                b.wait_in_text("div.pf-v6-c-modal-box__body label[for=add-new-static-entry-mac-address]",
+                               "MAC address")
+                b.wait_in_text("div.pf-v6-c-modal-box__body label[for=add-new-static-entry-ip-address]",
+                               "IP address")
+
+            def fill(self):
+                b.set_input_text("#add-new-static-entry-mac-address", self.mac)
+                b.set_input_text("#add-new-static-entry-ip-address", self.ip)
+
+            def cancel(self):
+                b.click(".pf-v6-c-modal-box__footer button:contains(Cancel)")
+                b.wait_not_present("#add-new-static-entry")
+
+            def add(self):
+                b.click(".pf-v6-c-modal-box__footer button:contains(Add)")
+
+                if self.xfail:
+                    # Check incomplete dialog
+                    for k, v in self.xfail.items():
+                        if k == "header":
+                            b.wait_in_text(".pf-v6-c-modal-box .pf-v6-c-alert.pf-m-danger", v)
+                            break
+                        else:
+                            b.wait_in_text(k, v)
+
+                    if self.close_dialog:
+                        self.cancel()
+                else:
+                    b.wait_not_present("#add-new-static-entry")
+
+            def verify_dialog(self):
+                # Check that the defined network is now visible
+                b.wait_in_text("body", "Networks")
+
+                # Verify libvirt XML
+                net_xml = m.execute(f"virsh -c qemu:///system net-dumpxml {self.network_name}")
+                network_node = ET.fromstring(net_xml)
+                host_by_mac = network_node.find(f'./ip/dhcp/host[@mac="{self.mac}"]')
+                if host_by_mac is None:
+                    raise Exception(f'No DHCP host with MAC address {self.mac} found in network XML:\n{net_xml}')
+                host_by_ip = network_node.find(f'./ip/dhcp/host[@ip="{self.ip}"]')
+                if host_by_ip is None:
+                    raise Exception(f'No DHCP host with IP address {self.ip} found in network XML:\n{net_xml}')
+
+            def verify_overview(self):
+                b.wait_in_text(f"#network-{self.network_name}-{self.connection_name}-ipv4-dhcp-host-{self.entry_id}",
+                               f"MAC: {self.mac}, IP: {self.ip}")
+
+            def cleanup(self):
+                b.click(f"#delete-network-{self.network_name}-{self.connection_name}-ipv4-dhcp-host-{self.entry_id}-button")
+                b.wait_in_text(".pf-v6-c-modal-box__body .pf-v6-c-description-list", self.ip)
+                b.wait_in_text("#delete-resource-modal-ip", self.ip)
+                b.wait_in_text("#delete-resource-modal-mac", self.mac)
+                b.click(".pf-v6-c-modal-box__footer button:contains(Remove)")
+                b.wait_not_present(f"#network-{self.network_name}-{self.connection_name}-ipv4-dhcp-host-{self.entry_id}")
+
+        b = self.browser
+        m = self.machine
+
+        # Create an IPv6 network
+        m.write("/tmp/xml", TEST_NETWORK_IPV6_XML)
+        m.execute("virsh net-define /tmp/xml; virsh net-start test_network_ipv6")
+
+        self.createVm("subVmTest1", running=False)
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+
+        # Click on Networks card
+        b.click(".pf-v6-c-card .pf-v6-c-card__header button:contains(Network)")
+
+        # Check that all networks are there
+        b.wait_in_text("body", "Networks")
+        self.waitNetworkRow("default")
+        self.waitNetworkRow("test_network_ipv6")
+
+        # Expand row for first network
+        self.toggleNetworkRow("default")
+        # Expand the network created above
+        self.toggleNetworkRow("test_network_ipv6")
+
+        # "Add entry" is not supported for IPv6 network
+        b.wait_not_present("#network-test_network_ipv6-system-static-host-entries-add")
+        b.wait_in_text("#network-test_network_ipv6-system-ipv6-dhcp-static", "none")
+
+        # Check "X" button of the dialog, "Cancel" is checked when xfail set
+        b.click("#network-default-system-static-host-entries-add")
+        b.wait_visible("#add-new-static-entry")
+
+        b.click("#add-new-static-entry button[aria-label=Close]")
+        b.wait_not_present("#add-new-static-entry")
+
+        # Check the errors when the all inputs are empty
+        d = NetworkAddStaticDCHPHostsDialog(
+            self,
+            xfail={"#add-new-static-entry-mac-address-helper": "MAC address must not be empty",
+                   "#add-new-static-entry-ip-address-helper": "IP address must not be empty"},
+            close_dialog=False)
+        d.open()
+        d.add()
+
+        # Keep "IP address" empty, fill in "MAC address"
+        b.set_input_text("#add-new-static-entry-mac-address", "test")
+        b.wait_not_present("#add-new-static-entry-mac-address-helper")
+        b.wait_visible("#add-new-static-entry-ip-address-helper")
+
+        # Keep "MAC address" empty, fill in "IP address"
+        b.set_input_text("#add-new-static-entry-mac-address", "")
+        b.set_input_text("#add-new-static-entry-ip-address", "test")
+        b.wait_visible("#add-new-static-entry-mac-address-helper")
+        b.wait_not_present("#add-new-static-entry-ip-address-helper")
+
+        # Fill in "MAC address" and "IP address"
+        b.set_input_text("#add-new-static-entry-mac-address", "test")
+        b.set_input_text("#add-new-static-entry-ip-address", "test")
+        b.wait_not_present("#add-new-static-entry-mac-address-helper")
+        b.wait_not_present("#add-new-static-entry-ip-address-helper")
+
+        # An error should be raised if "MAC address" and "IP address" is invaild
+        b.click("#add-new-static-entry-save")
+        b.wait_in_text(
+            ".pf-m-danger .pf-v6-c-alert__description",
+            "XML error: Cannot parse MAC address")
+
+        # Attach basic static DHCP host and try to remove it
+        NetworkAddStaticDCHPHostsDialog(
+            self,
+            mac=self.getDomainMacAddress("subVmTest1"),
+            ip="192.168.122.222",
+        ).execute()
+
+        # Attach basic static and keep it persistent
+        NetworkAddStaticDCHPHostsDialog(
+            self,
+            mac=self.getDomainMacAddress("subVmTest1"),
+            ip="192.168.122.222",
+            remove=False,
+        ).execute()
+
+        # Check "IPv4 address cannot be same as the network identifier"
+        NetworkAddStaticDCHPHostsDialog(
+            self,
+            mac=self.getDomainMacAddress("subVmTest1"),
+            ip="192.168.122.222",
+            xfail={"header": "there is an existing dhcp host entry"},
+        ).execute()
+
+        # Check that the static IP is correctly assigned to the VM
+        m.execute("virsh start subVmTest1")
+        testlib.wait(lambda: "1" in self.machine.execute("virsh domifaddr subVmTest1 | grep 192.168.122.222 | wc -l"),
+                     delay=3)
+
+
+if __name__ == '__main__':
+    testlib.test_main()

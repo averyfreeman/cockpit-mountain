@@ -1,0 +1,32 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
+@use "ct-card.scss";
+
+/* Style the list cards as ct-cards */
+.pf-v6-c-page__main-section .pf-v6-c-card {
+    @extend .ct-card;
+}
+
+// Expand the link to the container, for easier clickability
+#virtual-machines-listing th a {
+    display: block;
+    text-align: start;
+}
+
+// Add spacing between buttons in the toolbar
+.pf-v6-c-toolbar__item {
+    gap: 0 var(--pf-t--global--spacer--xs);
+}
+
+// The progressbars in the VMs list should not show icons and should
+// have a fixed width measure text to make them look nice and
+// uncluttered.
+
+.pf-v6-c-progress.ct-simple-percentage-progress {
+    .pf-v6-c-progress__status-icon {
+        display: none;
+    }
+
+    .pf-v6-c-progress__measure {
+        inline-size: 3em;
+    }
+}

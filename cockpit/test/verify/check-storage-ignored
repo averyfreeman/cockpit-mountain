@@ -1,0 +1,40 @@
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
+
+#
+# Copyright (C) 2015 Red Hat, Inc.
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
+
+import storagelib
+import testlib
+
+
+@testlib.nondestructive
+class TestStorageIgnored(storagelib.StorageCase):
+
+    def testIgnored(self):
+        m = self.machine
+        b = self.browser
+
+        self.login_and_go("/storage")
+        disk = self.add_loopback_disk()
+        self.click_card_row("Storage", name=disk)
+        b.wait_visible(self.card("Block device"))
+        m.execute(f"yes | mke2fs -q -L TESTLABEL {disk}")
+        with b.wait_timeout(30):
+            b.wait_text(self.card_desc("ext2 filesystem", "Name"), "TESTLABEL")
+
+        # Hide it via a udev rule.
+        m.write("/run/udev/rules.d/99-ignore.rules",
+                'SUBSYSTEM=="block", ENV{ID_FS_LABEL}=="TESTLABEL", ENV{UDISKS_IGNORE}="1"\n')
+        self.addCleanup(m.execute, "rm /run/udev/rules.d/99-ignore.rules; udevadm control --reload; udevadm trigger")
+        m.execute("udevadm control --reload; udevadm trigger")
+
+        b.wait_in_text(".pf-v6-c-breadcrumb", "Not found")
+        b.go("#/")
+        b.wait_visible(self.card("Storage"))
+        b.wait_not_present(self.card_row("Storage", name=disk))
+
+
+if __name__ == '__main__':
+    testlib.test_main()

@@ -1,0 +1,13 @@
+# IDE
+.vscode
+
+# deb packaging
+packaging/focal/cockpit-navigator
+packaging/focal/cockpit-navigator.substvars
+packaging/focal/cockpit-navigator.postrm.debhelper
+packaging/focal/debhelper-build-stamp
+packaging/focal/files
+packaging/focal/.debhelper
+
+# build output
+dist

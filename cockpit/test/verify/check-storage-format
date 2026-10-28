@@ -1,0 +1,182 @@
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
+
+#
+# Copyright (C) 2015 Red Hat, Inc.
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
+
+import storagelib
+import testlib
+
+
+@testlib.nondestructive
+class TestStorageFormat(storagelib.StorageCase):
+
+    def testFormatTooSmall(self):
+        b = self.browser
+
+        self.login_and_go("/storage")
+
+        # Try to format a disk that is too small for XFS.
+
+        disk = self.add_ram_disk(size=5)
+        self.click_card_row("Storage", name=disk)
+
+        self.click_card_dropdown("Unformatted data", "Format")
+        self.dialog_wait_open()
+        self.dialog_set_val("type", "xfs")
+        self.dialog_set_val("mount_point", f"{self.mnt_dir}/foo")
+        self.dialog_apply_secondary()
+
+        b.wait_in_text("#dialog", "Error creating")
+        b.wait_in_text("#dialog", "too small")
+
+    def testFormatTypes(self):
+        m = self.machine
+        b = self.browser
+
+        self.login_and_go("/storage")
+
+        disk = self.add_loopback_disk(size=320)  # xfs minimum size is ~300MB
+        self.click_card_row("Storage", name=disk)
+
+        def check_type(fstype, label_limit):
+            self.click_card_dropdown("Unformatted data", "Format")
+            self.dialog_wait_open()
+            self.dialog_set_val("type", fstype)
+            self.dialog_set_val("mount_point", f"{self.mnt_dir}/foo")
+            self.dialog_set_val("name", "X" * (label_limit + 1))
+            self.dialog_apply_secondary()
+            self.dialog_wait_error("name", "Name cannot be longer than %d characters" % label_limit)
+            self.dialog_set_val("name", "X" * label_limit)
+            self.dialog_apply_secondary()
+            self.dialog_wait_close()
+            b.wait_visible(self.card(fstype + " filesystem"))
+            self.click_card_dropdown(fstype + " filesystem", "Format")
+            self.dialog({"type": "empty"})
+            b.wait_visible(self.card("Unformatted data"))
+
+        def check_unsupported_type(fstype):
+            self.click_card_dropdown("Unformatted data", "Format")
+            self.dialog_wait_open()
+            b.wait_not_present(f'#dialog li[value={fstype}]')
+            self.dialog_cancel()
+            self.dialog_wait_close()
+
+        check_type("xfs", 12)
+        check_type("ext4", 16)
+        check_type("vfat", 11)
+
+        if m.image.startswith("rhel") or m.image.startswith("centos"):
+            check_unsupported_type("ntfs")
+        else:
+            check_type("ntfs", 128)
+
+        # Format without mount point
+        self.click_card_dropdown("Unformatted data", "Format")
+        self.dialog_wait_open()
+        self.dialog_set_val("type", "xfs")
+        self.dialog_apply_secondary()
+        self.dialog_wait_close()
+
+        # Verify button text is 'Format' when no filesystem is selected
+        self.click_card_dropdown("xfs filesystem", "Format")
+        self.dialog_wait_open()
+        self.dialog_set_val("type", "empty")
+        b.wait_text("#dialog .apply", "Format")
+
+    def testFormatCancel(self):
+        m = self.machine
+        b = self.browser
+
+        self.login_and_go("/storage")
+
+        # Make a super slow block device so that we have enough
+        # chances to cancel the operation
+
+        disk = self.add_ram_disk()
+        blocks = int(m.execute(f"blockdev --getsz {disk}"))
+
+        m.execute(f"echo '0 {blocks} delay {disk} 0 500' | dmsetup create superslow")
+        self.click_card_row("Storage", name="/dev/mapper/superslow")
+
+        # Put a signature near the end
+        sigoff = (blocks - 1) * 512
+        m.execute(f"echo hello | dd if=/dev/stdin of=/dev/mapper/superslow bs=1 count=5 seek={sigoff}")
+
+        self.click_card_dropdown("Unformatted data", "Format")
+        self.dialog_wait_open()
+        self.dialog_set_val("erase.on", val=True)
+        self.dialog_set_val("mount_point", f"{self.mnt_dir}/foo")
+        self.dialog_apply()
+        with b.wait_timeout(60):
+            b.wait_in_text("footer", "Erasing /dev/mapper/superslow")
+        self.dialog_cancel()
+        self.dialog_wait_close()
+
+        # The signature should still be there
+        sig = m.execute(f"dd if=/dev/mapper/superslow of=/dev/stdout bs=1 count=5 skip={sigoff}")
+        self.assertEqual(sig, 'hello')
+
+    def testAtBoot(self):
+        m = self.machine
+        b = self.browser
+
+        self.login_and_go("/storage")
+
+        disk = self.add_ram_disk()
+        self.click_card_row("Storage", name=disk)
+
+        def format_partition(expected_at_boot, at_boot, keep, first=False):
+            self.click_card_dropdown("Unformatted data" if first else "ext4 filesystem", "Format")
+            self.dialog_wait_open()
+            self.dialog_wait_val("at_boot", expected_at_boot)
+            self.dialog_set_val("type", "ext4")
+            self.dialog_set_val("mount_point", f"{self.mnt_dir}/foo")
+            self.dialog_set_val("at_boot", at_boot)
+            if keep:
+                self.dialog_set_val("crypto", " keep")
+            else:
+                self.dialog_set_val("crypto", "luks1")
+                self.dialog_set_val("passphrase", "foobarfoo")
+                self.dialog_set_val("passphrase2", "foobarfoo")
+            self.dialog_apply()
+            self.dialog_wait_close()
+
+        format_partition("nofail", "local", keep=False, first=True)
+        b.wait_in_text(self.card_desc("ext4 filesystem", "Mount point"), "stop boot on failure")
+        self.assertNotIn("noauto", m.execute(f"findmnt --fstab -n -o OPTIONS {self.mnt_dir}/foo"))
+
+        format_partition("local", "nofail", keep=True)
+        b.wait_in_text(self.card_desc("ext4 filesystem", "Mount point"), "ignore failure")
+        self.assertIn("nofail", m.execute(f"findmnt --fstab -n -o OPTIONS {self.mnt_dir}/foo"))
+        self.assert_in_configuration(disk, "crypttab", "options", "nofail")
+
+        format_partition("nofail", "netdev", keep=True)
+        b.wait_in_text(self.card_desc("ext4 filesystem", "Mount point"), "after network")
+        self.assertIn("_netdev", m.execute(f"findmnt --fstab -n -o OPTIONS {self.mnt_dir}/foo"))
+        self.assert_in_configuration(disk, "crypttab", "options", "_netdev")
+
+        format_partition("netdev", "never", keep=True)
+        b.wait_in_text(self.card_desc("ext4 filesystem", "Mount point"), "never mount")
+        self.assertIn("x-cockpit-never-auto", m.execute(f"findmnt --fstab -n -o OPTIONS {self.mnt_dir}/foo"))
+        self.assert_in_configuration(disk, "crypttab", "options", "noauto")
+
+        format_partition("never", "nofail", keep=False)
+        b.wait_in_text(self.card_desc("ext4 filesystem", "Mount point"), "ignore failure")
+        self.assertIn("nofail", m.execute(f"findmnt --fstab -n -o OPTIONS {self.mnt_dir}/foo"))
+        self.assert_in_configuration(disk, "crypttab", "options", "nofail")
+
+        format_partition("nofail", "netdev", keep=False)
+        b.wait_in_text(self.card_desc("ext4 filesystem", "Mount point"), "after network")
+        self.assertIn("_netdev", m.execute(f"findmnt --fstab -n -o OPTIONS {self.mnt_dir}/foo"))
+        self.assert_in_configuration(disk, "crypttab", "options", "_netdev")
+
+        format_partition("netdev", "never", keep=False)
+        b.wait_in_text(self.card_desc("ext4 filesystem", "Mount point"), "never mount")
+        self.assertIn("x-cockpit-never-auto", m.execute(f"findmnt --fstab -n -o OPTIONS {self.mnt_dir}/foo"))
+        self.assert_in_configuration(disk, "crypttab", "options", "noauto")
+
+
+if __name__ == '__main__':
+    testlib.test_main()

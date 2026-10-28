@@ -1,0 +1,663 @@
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/common/pywrap", sys.argv)
+# SPDX-License-Identifier: LGPL-2.1-or-later
+#
+# Copyright (C) 2021 Red Hat, Inc.
+import time
+
+import machineslib
+import testlib
+from dialoglib import DialogHelpers
+
+
+@testlib.nondestructive
+class TestMachinesLifecycle(machineslib.VirtualMachinesCase):
+
+    def testBasic(self):
+        self._testBasic(run_pixel_tests=True)
+
+    def testBasicNonrootUserUnprivileged(self):
+        user = self.createUser(user_group=None)
+        self._testBasic(user, superuser=False, expect_empty_list=True)
+
+    def testBasicLibvirtUserUnprivileged(self):
+        user = self.createUser(user_group='libvirt')
+        self._testBasic(user, superuser=False, libvirt_group_member=True)
+
+    @testlib.skipImage("No SELinux", "debian-*", "ubuntu-*", "arch")
+    @testlib.skipImage("crashes C bridge", "rhel-8*")
+    def testBasicSysadmU(self):
+        user = self.createUser(user_group='libvirt')
+        self.machine.execute(f"semanage login -a -s sysadm_u {user}")
+        self.addCleanup(self.machine.execute, f"semanage login -d -s sysadm_u {user}")
+        self._testBasic(user, superuser=False, libvirt_group_member=True)
+
+    def testBasicAdminUser(self):
+        # The group in debian based distro should be sudo
+        if "ubuntu" in self.machine.image or "debian" in self.machine.image:
+            user_group = "sudo"
+        else:
+            user_group = "wheel"
+        user = self.createUser(user_group=user_group)
+
+        # Check NON-PRIVILEGED user won't see any VMs even though they are in wheel group
+        self._testBasic(user, superuser=False, expect_empty_list=True)
+        self.machine.execute("virsh destroy subVmTest1; virsh undefine subVmTest1")
+        # Check wheel group PRIVILEGED user will see VMs and can do operations on them
+        self._testBasic(user)
+
+    def _testBasic(self, user=None, *, superuser=True, expect_empty_list=False, run_pixel_tests=False,
+                   libvirt_group_member=False):
+        b = self.browser
+        m = self.machine
+
+        # We want no initial watchdog
+        args = self.createVm("subVmTest1", os="linux2016")
+
+        self.login_and_go("/machines", user=user, superuser=superuser)
+
+        if expect_empty_list:
+            with b.wait_timeout(20):
+                b.wait_in_text("#virtual-machines-listing .pf-v6-c-empty-state", "No VM is running")
+                return
+        self.waitPageInit()
+        self.waitVmRow("subVmTest1")
+
+        def checkConnectionDescription(button: str, text: str):
+            popover_id = "popover-machines-connection-selector-popover-body"
+            b.click(button)
+            b.wait_visible("#create-vm-dialog")
+            b.click('#create-vm-dialog span[aria-label="more info"]')
+            b.wait_in_text(f"#{popover_id}", text)
+
+            # Close the connection description dialog
+            b.click(f"div[aria-describedby={popover_id}] button[aria-label=Close]")
+            b.wait_not_present("#popover-machines-connection-selector-popover-body")
+            # Close the VM creation dialog
+            b.click('#create-vm-dialog button:contains("Cancel")')
+            b.wait_not_present("#create-vm-dialog")
+
+        def checkNeedsShutdownLabel(message):
+            b.wait_not_present("#vm-subVmTest1-needs-shutdown")
+            m.execute("virt-xml subVmTest1 --add-device --watchdog action=reset --update")
+            m.execute("virt-xml subVmTest1 --edit --watchdog action=pause")
+            b.click("#vm-subVmTest1-needs-shutdown")
+            b.wait_in_text(".pf-v6-c-popover__body", message)
+            m.execute("virt-xml subVmTest1 --remove-device --watchdog 1 --update")
+
+        if superuser or libvirt_group_member:
+            checkConnectionDescription("#import-existing-vm", "Ideal for server VMs")
+            checkConnectionDescription("#create-new-vm", "Good choice for desktop virtualization")
+        else:
+            b.click("#create-new-vm")
+            b.wait_visible("#create-vm-dialog")
+            b.wait_visible("#connection")
+            b.wait_not_present("#connectionName-system")
+            b.wait_not_present("#connectionName-session")
+            b.click('#create-vm-dialog button:contains("Cancel")')
+            b.wait_not_present("#create-vm-dialog")
+
+        checkNeedsShutdownLabel("Watchdog")
+
+        b.wait_in_text("#vm-subVmTest1-system-state", "Running")
+        self.goToVmPage("subVmTest1")
+        if run_pixel_tests:
+            b.wait_visible("#vm-subVmTest1-add-iface-button:not(:disabled)")
+            b.assert_pixels("#vm-details", "vm-details", ignore=[
+                ".memory-usage-chart",
+                ".vcpu-usage-chart",
+                "#vm-subVmTest1-disks .ct-table",
+                "#vm-subVmTest1-networks .ct-table",
+                "#vm-subVmTest1-hostdevs",
+                "#vm-subVmTest1-emulated-machine",
+                ])
+        b.wait_in_text("#vm-subVmTest1-cpu", "1 vCPU")
+
+        b.wait_in_text("#vm-subVmTest1-boot-order", "disk,network")
+        emulated_machine = b.text("#vm-subVmTest1-emulated-machine")
+        self.assertGreater(len(emulated_machine), 0)  # emulated machine varies across test machines
+
+        # switch to and check Usage
+        b.click("#vm-subVmTest1-usage")
+        b.wait_in_text(".memory-usage-chart .pf-v6-c-progress__status > .pf-v6-c-progress__measure", "128 MiB")
+
+        def get_mem_usage():
+            usage = b.text(".memory-usage-chart .pf-v6-c-progress__status > .pf-v6-c-progress__measure")
+            return float(usage.split("/ 128 MiB")[0])
+
+        testlib.wait(lambda: get_mem_usage() > 0.0, delay=3)
+
+        b.wait_in_text(".vcpu-usage-chart .pf-v6-c-progress__status > .pf-v6-c-progress__measure", "1 vCPU")
+
+        def get_cpu_usage():
+            usage = b.text(".vcpu-usage-chart .pf-v6-c-progress__status > .pf-v6-c-progress__measure")
+            return float(usage.split("% of 1 vCPU")[0])
+
+        # CPU usage cannot be nonzero with blank image, so just ensure it's a percentage
+        testlib.wait(lambda: get_cpu_usage() <= 100.0, delay=3)
+
+        # check usage on overview
+        b.go("/machines#/")
+        b.wait_visible("[data-row-id=vm-subVmTest1-system] [data-label=Memory] .pf-v6-c-progress")
+        b.wait_visible("[data-row-id=vm-subVmTest1-system] [data-label=CPU] .pf-v6-c-progress")
+        self.goToVmPage("subVmTest1")
+
+        # suspend/resume
+        m.execute("virsh suspend subVmTest1")
+        b.wait_in_text("#vm-subVmTest1-system-state", "Paused")
+        # resume sometimes fails with "unable to execute QEMU command 'cont':
+        # Resetting the Virtual Machine is required"
+        m.execute('virsh resume subVmTest1 || { virsh destroy subVmTest1; virsh start subVmTest1; }')
+        b.wait_in_text("#vm-subVmTest1-system-state", "Running")
+
+        # Wait for the system to completely start
+        self.waitGuestBooted(args['logfile'])
+
+        # Send Non-Maskable Interrupt (no change in VM state is expected)
+        self.performAction("subVmTest1", "sendNMI")
+
+        self.waitLogFile(args['logfile'], "NMI received")
+
+        # pause
+        self.performAction("subVmTest1", "pause")
+        # check removing button of disk and network interface when the VM is paused
+        b.click("#vm-subVmTest1-disks-vda-action-kebab")
+        b.wait_visible(".pf-m-disabled #delete-vm-subVmTest1-disks-vda")
+        b.click("#vm-subVmTest1-iface-1-action-kebab")
+        b.wait_visible(".pf-m-disabled #delete-vm-subVmTest1-iface-1")
+
+        # resume
+        self.performAction("subVmTest1", "resume")
+
+        # reboot
+        self.performAction("subVmTest1", "reboot", logPath=args['logfile'])
+        self.waitLogFile(args['logfile'], "reboot: Power down")
+        b.wait_in_text("#vm-subVmTest1-system-state", "Running")
+
+        # force reboot
+        self.performAction("subVmTest1", "forceReboot", logPath=args['logfile'])
+        self.waitGuestBooted(args['logfile'])
+        b.wait_in_text("#vm-subVmTest1-system-state", "Running")
+
+        # the shut off button beside the VM name
+        self.waitGuestBooted(args['logfile'])
+        b.click("#vm-subVmTest1-system-shutdown-button")
+        b.wait_visible("#vm-subVmTest1-system-confirm-action-modal")
+        b.click(".pf-v6-c-modal-box__footer #vm-subVmTest1-system-off")
+        with b.wait_timeout(60):
+            b.wait_in_text("#vm-subVmTest1-system-state", "Shut off")
+        b.wait_visible("#vm-subVmTest1-system-run")
+
+        # the shut off button in the extended operation list
+        self.machine.execute(f"echo '' > {args['logfile']}")
+        b.click("#vm-subVmTest1-system-run")
+        b.wait_in_text("#vm-subVmTest1-system-state", "Running")
+        self.waitGuestBooted(args['logfile'])
+        with b.wait_timeout(30):
+            self.performAction("subVmTest1", "off")
+
+        # force shut off
+        b.click("#vm-subVmTest1-system-run")
+        b.wait_in_text("#vm-subVmTest1-system-state", "Running")
+        self.performAction("subVmTest1", "forceOff")
+
+        # continue shut off validation - usage should drop to zero
+        b.wait_in_text(".memory-usage-chart .pf-v6-c-progress__status > .pf-v6-c-progress__measure", "0 /")
+        b.wait_in_text(".vcpu-usage-chart .pf-v6-c-progress__status > .pf-v6-c-progress__measure", "0%")
+
+        # shut off of a transient VM will redirect us to the main page
+        m.execute("virsh dumpxml subVmTest1 > /tmp/subVmTest1.xml")
+        m.execute("virsh start {0}; virsh undefine {0}".format("subVmTest1"))
+        b.wait_visible("div[data-vm-transient=\"true\"]")
+        self.performAction("subVmTest1", "forceOff", checkExpectedState=False)
+        b.wait_in_text("#virtual-machines-listing .pf-v6-c-empty-state", "No VM is running")
+        m.execute("virsh define --file /tmp/subVmTest1.xml")
+
+        # start another one, should appear automatically
+        args2 = self.createVm("subVmTest2")
+        b.wait_in_text("#vm-subVmTest2-system-state", "Running")
+        self.goToVmPage("subVmTest2")
+        b.wait_in_text("#vm-subVmTest2-cpu", "1 vCPU")
+        b.wait_in_text("#vm-subVmTest2-boot-order", "disk,network")
+
+        self.goToMainPage()
+        self.waitVmRow("subVmTest1")
+        self.waitVmRow("subVmTest2")
+
+        if run_pixel_tests:
+            b.wait_visible("#import-existing-vm:not([aria-disabled=false])")
+            b.wait_visible("#create-new-vm:not([aria-disabled=true]")
+            with b.wait_timeout(30):
+                b.wait_visible("[data-row-id=vm-subVmTest2-system] [data-label=Memory] .pf-v6-c-progress")
+            b.assert_pixels("#virtual-machines-page", "main-page",
+                            ignore=["[data-label=CPU]", "[data-label=Memory]"])
+
+        # stop second VM, event handling should still work
+        self.performAction("subVmTest2", "forceOff")
+
+        b.click("#vm-subVmTest2-system-run")
+
+        # reboot through shutdown dialog
+        self.machine.execute(f"echo '' > {args2['logfile']}")
+        b.click("#vm-subVmTest2-system-shutdown-button")
+        b.wait_visible("#vm-subVmTest2-system-confirm-action-modal")
+        b.click(".pf-v6-c-modal-box__footer button:contains(Reboot)")
+        b.wait_not_present("#vm-subVmTest2-system-confirm-action-modal")
+        b.wait_in_text("#vm-subVmTest2-system-state", "Running")
+
+        # Check uptime
+        b.click("#vm-subVmTest2-system-shutdown-button")
+        b.wait_visible("#vm-subVmTest2-system-confirm-action-modal")
+        # it starts with "less than a minute", so this should be reasonably race free
+        b.wait_in_text("#uptime", "minute")
+        if run_pixel_tests:
+            b.assert_pixels("#vm-subVmTest2-system-confirm-action-modal", "shutdown-confirm-dialog")
+        b.click(".pf-v6-c-modal-box__footer button:contains(Cancel)")
+        b.wait_not_present("#vm-subVmTest2-system-confirm-action-modal")
+
+        b.set_input_text("#text-search", "subVmTest2")
+        self.waitVmRow("subVmTest2")
+        self.waitVmRow("subVmTest1", "system", present=False)
+
+        # Check VM search is case insensitive
+        b.set_input_text("#text-search", "SuBvMtEsT2")
+        self.waitVmRow("subVmTest2")
+        self.waitVmRow("subVmTest1", "system", present=False)
+
+        b.select_PF("#vm-state-select-toggle", "Running")
+        self.waitVmRow("subVmTest1", "system", present=False)
+        self.waitVmRow("subVmTest2")
+
+        b.set_input_text("#text-search", "")
+        self.waitVmRow("subVmTest1", "system", present=False)
+        self.waitVmRow("subVmTest2")
+
+        b.select_PF("#vm-state-select-toggle", "Shut off")
+        self.waitVmRow("subVmTest1")
+        self.waitVmRow("subVmTest2", "system", present=False)
+
+        b.select_PF("#vm-state-select-toggle", "All")
+        self.waitVmRow("subVmTest1")
+        self.waitVmRow("subVmTest2")
+
+        # Check correctness of the toast notifications list
+        # We 'll create errors by starting to start domains when the default network in inactive
+        self.createVm("subVmTest3")
+        m.execute("virsh destroy subVmTest2; virsh destroy subVmTest3; virsh net-destroy default")
+
+        def tryRunDomain(name, connection):
+            self.waitVmRow(name)
+
+            b.click(f"#vm-{name}-{connection}-run")
+
+        # Try to run subVmTest1 - it will fail because of inactive default network
+        tryRunDomain('subVmTest1', 'system')
+        b.wait_in_text(".pf-m-toast .pf-v6-c-alert", "VM subVmTest1 failed to start")
+        b.click('.pf-m-toast .pf-v6-c-alert button:contains("show more")')
+        b.wait_in_text(".pf-m-toast .pf-v6-c-alert", "network 'default' is not active")
+        b.click(".pf-m-toast .pf-v6-c-alert .pf-v6-c-alert__action button")
+        b.wait_not_present(".pf-m-toast")
+
+        # Try to run subVmTest2
+        tryRunDomain('subVmTest2', 'system')
+        b.wait_in_text(".pf-m-toast .pf-v6-c-alert", "VM subVmTest2 failed to start")
+        b.click(".pf-m-toast .pf-v6-c-alert .pf-v6-c-alert__action button")
+        b.wait_not_present(".pf-m-toast")
+
+    def testCloneSessionConnection(self):
+        self.testClone(connectionName='session')
+
+    def testClone(self, connectionName='system'):
+        b = self.browser
+
+        self.run_admin("mkdir /tmp/vmdir", connectionName)
+        self.addCleanup(self.run_admin, "rm -rf /tmp/vmdir/", connectionName)
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+
+        self.createVm("subVmTest1", running=False, connection=connectionName)
+
+        self.waitVmRow("subVmTest1", connectionName=connectionName)
+
+        self.performAction("subVmTest1", "clone", connectionName=connectionName)
+
+        b.wait_text(".pf-v6-c-modal-box__title-text", "Create a clone VM based on subVmTest1")
+        b.click("footer button.pf-m-primary")
+        b.wait_not_present(".pf-v6-c-modal-box")
+        self.waitVmRow("subVmTest1-clone", connectionName=connectionName)
+
+    def testRename(self):
+        b = self.browser
+
+        self.createVm("old", running=False)
+
+        self.login_and_go("/machines")
+
+        self.waitPageInit()
+
+        self.performAction("old", "rename")
+
+        b.set_input_text("#rename-dialog-new-name", "new")
+        b.click("#rename-dialog-confirm")
+        self.waitVmRow("new")
+        self.waitVmRow("old", "system", present=False)
+
+        # Rename to itself and expect error
+        self.performAction("new", "rename")
+
+        b.set_input_text("#rename-dialog-new-name", "new")
+        b.click("#rename-dialog-confirm")
+        b.wait_in_text(".pf-v6-c-modal-box__body .pf-v6-c-alert.pf-m-danger", "Can't rename domain to itself")
+        b.click(".pf-v6-c-modal-box button:contains('Cancel')")
+        b.wait_not_present(".pf-v6-c-modal-box")
+
+        self.goToVmPage("new")
+        self.performAction("new", "rename")
+
+        b.set_input_text("#rename-dialog-new-name", "test%")
+        b.click("#rename-dialog-confirm")
+        b.wait(lambda: "vm?connection=system&name=test%25" in b.eval_js("window.location.href"))
+        b.wait_text("h2.vm-name", "test%")
+        b.wait_not_present("#navbar-oops")
+
+    def testEditDescription(self):
+        b = self.browser
+
+        self.createVm("mac", running=False)
+        self.login_and_go("/machines")
+        self.waitPageInit()
+        self.goToVmPage("mac")
+
+        self.performAction("mac", "edit-description")
+
+        # Non-ascii chars, unbalanced quotes, backslash, multiple lines
+        desc = '"Döscrü\\ptiän \'\'\' كرة القدم\nSecond <b>line</b>'
+
+        b.set_input_text("#edit-description-dialog-description", desc)
+        b.click("#edit-description-dialog-confirm")
+        b.wait_not_present("#edit-description-dialog-confirm")
+
+        b.wait_text(".vm-description", desc)
+
+    def testDelete(self):
+        b = self.browser
+        m = self.machine
+
+        name = "subVmTest1"
+        img2 = f"/var/lib/libvirt/images/{name}-2.img"
+
+        args = self.createVm(name, graphics='vnc')
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+        self.waitVmRow(name)
+
+        m.execute(f"test -f {img2}")
+
+        self.goToVmPage("subVmTest1")
+
+        def addDisk(volName, poolName, vmName='subVmTest1'):
+            # Virsh does not offer some option to create disks of type volume
+            # We have to do this from cockpit UI
+            b.click(f"#vm-{vmName}-disks-adddisk")  # button
+            b.wait_visible(f"#vm-{vmName}-disks-adddisk-dialog-modal-window")
+            b.wait_visible("label:contains(Create new)")  # radio button label in the modal dialog
+
+            d = DialogHelpers(b, f"#vm-{vmName}-disks-adddisk-dialog-modal-window")
+
+            d.set_DropdownSelect("create_new.pool", poolName)
+            d.set_TextInput("create_new.volume.name", volName)
+            d.set_TextInput("create_new.volume.newSize.size", "10")
+            d.set_DropdownSelect("create_new.volume.newSize.unit", "MiB")
+            b.click(d.field("permanent"))
+
+            b.click(d.apply_button())
+            with b.wait_timeout(30):
+                b.wait_not_present(f"#vm-{vmName}-disks-adddisk-dialog-modal-window")
+
+            self.expandDiskRow("vdb")
+            b.wait_visible(f"#vm-{vmName}-disks-vdb-source-file")
+
+        secondDiskVolName = "mydisk"
+        poolName = "images"
+        secondDiskPoolPath = "/var/lib/libvirt/images/"
+
+        addDisk(secondDiskVolName, poolName)
+
+        self.performAction(name, "delete")
+
+        b.wait_in_text(f"#vm-{name}-delete-modal-dialog .pf-v6-c-modal-box__body", f"The VM {name} is running")
+        b.wait_in_text(f"#vm-{name}-delete-modal-dialog ul li:first-child .disk-source-file", img2)
+        b.wait_in_text(f"#vm-{name}-delete-modal-dialog ul li:nth-child(2) .disk-source-file",
+                       secondDiskPoolPath + secondDiskVolName)
+        b.assert_pixels(f"#vm-{name}-delete-modal-dialog", "vm-delete-dialog", skip_layouts=["rtl"])
+        b.click(f"#vm-{name}-delete-modal-dialog button:contains(Delete)")
+        b.wait_not_present(f"#vm-{name}-delete-modal-dialog")
+
+        self.waitVmRow(name, "system", present=False)
+
+        m.execute(f"while test -f {img2}; do sleep 1; done")
+        m.execute(f"while test -f {secondDiskPoolPath + secondDiskVolName}; do sleep 1; done")
+
+        self.assertNotIn(name, m.execute("virsh list --all --name"))
+
+        # Try to delete a paused VM
+        name = "paused-test-vm"
+        args = self.createVm(name)
+
+        self.goToVmPage(name)
+
+        # Make sure that the VM booted normally before attempting to suspend it
+        self.waitGuestBooted(args['logfile'])
+
+        self.machine.execute(f"virsh -c qemu:///system suspend {name}")
+        b.wait_in_text(f"#vm-{name}-system-state", "Paused")
+        self.performAction(name, "delete")
+        b.click(f"#vm-{name}-delete-modal-dialog button:contains(Delete)")
+        self.waitVmRow(name, 'system', present=False)
+
+        if not m.image.startswith("rhel-8-"):
+            # Delete a VM with snapshots and ensure the qcow2 image overlays get also cleaned up
+            name = "vm-with-snapshots"
+            self.createVm(name, running=False)
+
+            desc = "Description of snapshotA"
+            m.execute(f"virsh snapshot-create-as --domain {name} --name snapshotA --description '{desc}'")
+
+            qemu_img_info = m.execute(f"qemu-img info /var/lib/libvirt/images/{name}-2.img")
+            self.assertIn("snapshotA", qemu_img_info)
+
+            # snapshots events not available yet: https://gitlab.com/libvirt/libvirt/-/issues/44
+            b.reload()
+            b.enter_page('/machines')
+            self.goToVmPage(name)
+            b.wait_in_text(f"#vm-{name}-snapshot-0-name", "snapshotA")
+
+            self.performAction(name, "delete")
+
+            # Unselect the disks - we don't want to delete them
+            b.click("#vm-vm-with-snapshots-delete-modal-dialog ul li:first-child input")
+            b.click("#vm-vm-with-snapshots-delete-modal-dialog button:contains(Delete)")
+            b.wait_not_present(f"#vm-{name}-delete-modal-dialog")
+
+            qemu_img_info = m.execute(f"qemu-img info /var/lib/libvirt/images/{name}-2.img")
+            self.assertNotIn("snapshotA", qemu_img_info)
+
+            # Check deleting VM fails if deleting snapshot is not possible and error message is shown
+            name = "vm-with-failed-snapshots"
+            self.createVm(name, running=False)
+
+            m.execute("virsh vol-create-as --pool images --name tmpdisk --capacity 1 --format qcow2")
+            m.execute(f"virt-xml {name} --add-device --disk source.pool=images,source.volume=tmpdisk,target.dev=sdb,driver.type=qcow2")  # ruff: ignore[line-too-long]
+            m.execute(f"virsh snapshot-create-as --domain {name} --name snapshotFails")
+            b.reload()
+            b.enter_page('/machines')
+            self.goToVmPage(name)
+            b.wait_text(f"#vm-{name}-snapshot-0-name", "snapshotFails")
+            self.goToMainPage()
+            self.performAction(name, "delete")
+            b.wait_visible(f"#vm-{name}-delete-modal-dialog")
+            m.execute(f"virsh snapshot-delete --domain {name} --snapshotname snapshotFails")
+            b.click(f"#vm-{name}-delete-modal-dialog button:contains(Delete)")
+            b.wait_in_text(f"#vm-{name}-delete-modal-dialog .pf-v6-c-alert__description", "Domain snapshot not found")
+            b.click(f"#vm-{name}-delete-modal-dialog button:contains(Cancel)")
+            m.execute(f"virsh undefine {name}")
+
+        # Try to delete a VM and keep its volume
+        name = "vm-keep-vol"
+        args = self.createVm(name)
+        self.waitVmRow(name)
+        testlib.wait(lambda: name in m.execute("virsh list --all --name"))
+
+        self.performAction(name, "delete")
+        b.set_checked(f"#vm-{name}-delete-modal-dialog input[type=checkbox]", False)
+        b.click(f"#vm-{name}-delete-modal-dialog button:contains(Delete)")
+
+        self.waitVmRow(name, present=False)
+        testlib.wait(lambda: name not in m.execute("virsh list --all --name"))
+        m.execute(f"test -f {args['image']}")
+
+        # Try to delete a transient VM
+        name = "transient-VM"
+        args = self.createVm(name)
+        m.execute(f"virsh undefine {name}")
+        b.wait_visible(f"tr[data-row-id=vm-{name}-system][data-vm-transient=true]")
+        b.click(f"#vm-{name}-system-action-kebab")
+        b.wait_visible(f".pf-m-aria-disabled #vm-{name}-system-delete")  # delete buton should be disabled
+        b.click(f"#vm-{name}-system-forceOff")
+        b.wait_visible(f"#vm-{name}-system-confirm-action-modal")
+        b.click(f".pf-v6-c-modal-box__footer #vm-{name}-system-forceOff")
+        self.waitVmRow(name, 'system', present=False)
+        b.wait_not_present(f'#vm-{name}-system-state-error button:contains("view more")')
+
+        # Try to delete a VM where storage deletion will fail
+        name = "vm-fail-storage-deletion"
+        args = self.createVm(name)
+        self.waitVmRow(name)
+        self.goToVmPage(name)
+        testlib.wait(lambda: name in m.execute("virsh list --all --name"))
+        addDisk(secondDiskVolName, poolName, name)
+        # Remove VM's disk from command line
+        m.execute(f"rm {(secondDiskPoolPath + secondDiskVolName)}")
+        # Prevent file from being deleting to test handling of unsuccessful storage deletion
+        m.execute(f"chattr +i {args['image']}")
+        self.addCleanup(m.execute, f"chattr -i {args['image']}")
+
+        self.performAction(name, "delete")
+        b.set_checked(f"#vm-{name}-delete-modal-dialog li:nth-child(1) input[type=checkbox]", True)
+        b.set_checked(f"#vm-{name}-delete-modal-dialog li:nth-child(2) input[type=checkbox]", True)
+        b.click(f"#vm-{name}-delete-modal-dialog button:contains(Delete)")
+
+        # Check VM got deleted, but there is a warning about unsuccessful storage deletion
+        self.waitVmRow(name, present=False)
+        testlib.wait(lambda: name not in m.execute("virsh list --all --name"))
+        b.wait_visible(".pf-v6-c-alert-group li .pf-v6-c-alert")
+        b.wait_in_text(".pf-v6-c-alert-group li .pf-v6-c-alert .pf-v6-c-alert__title",
+                       f"Could not delete all storage for {name}")
+        b.click("button.alert-link.more-button")
+        b.wait_in_text(".pf-v6-c-alert-group li .pf-v6-c-alert .pf-v6-c-alert__description", args['image'])
+        # Close the notification
+        b.click(".pf-v6-c-alert-group li .pf-v6-c-alert button.pf-m-plain")
+
+        # Delete a shut-off guest and verify the storage was removed
+        name = "vm-shutoff"
+        img2 = f"/var/lib/libvirt/images/{name}-2.img"
+        self.createVm(name, running=False)
+        # Guest disk image exists
+        m.execute(f"while ! test -f {img2}; do sleep 1; done")
+
+        self.performAction(name, "delete")
+
+        b.wait_in_text(f"#vm-{name}-delete-modal-dialog .disk-source-file", img2)
+        b.wait_visible(f"#vm-{name}-delete-modal-dialog input[name='check-action-vda']:checked")
+        b.click(f"#vm-{name}-delete-modal-dialog button:contains(Delete)")
+        b.wait_not_present(f"#vm-{name}-delete-modal-dialog")
+
+        self.waitVmRow(name, "system", present=False)
+
+        # Guest disk image has been deleted
+        m.execute(f"while test -f {img2}; do sleep 1; done")
+
+        self.assertNotIn(name, m.execute("virsh list --all --name"))
+
+        # Deleting a running guest will disconnect the serial console
+        self.allow_browser_errors("Disconnection timed out.")
+        self.allow_journal_messages(".* couldn't shutdown fd: Transport endpoint is not connected")
+
+    def create_many_vms(self, machine, names):
+        machine.execute("touch /tmp/disk")
+        machine.execute("virt-install --connect qemu:///system"
+                        " --name NAME"
+                        " --os-variant linux2016"
+                        " --check path_in_use=off"
+                        " --disk /tmp/disk"
+                        " --memory 1"
+                        " --wait -1 --print-xml >/tmp/xml")
+        for n in names:
+            machine.execute(f"sed -e 's/NAME/{n}/' </tmp/xml | grep -v uuid >/tmp/xml2; virsh define /tmp/xml2")
+
+    def testOverviewUsage(self):
+        b = self.browser
+        m = self.machine
+
+        # Create one running machine
+
+        name = "subVmTest1"
+        self.createVm(name)
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+        self.waitVmRow(name)
+
+        # It should have usage bars, after a while
+        with b.wait_timeout(30):
+            b.wait_visible("[data-row-id=vm-subVmTest1-system] [data-label=Memory] .pf-v6-c-progress")
+            b.wait_visible("[data-row-id=vm-subVmTest1-system] [data-label=CPU] .pf-v6-c-progress")
+
+        # Quickly create 19 more non-running VMs
+        self.create_many_vms(m, ["extraVm" + str(n) for n in range(1, 20)])
+        self.waitVmRow("extraVm19")
+
+        # Usage bars for first machine should still be there
+        b.wait_visible("[data-row-id=vm-subVmTest1-system] [data-label=Memory] .pf-v6-c-progress")
+        b.wait_visible("[data-row-id=vm-subVmTest1-system] [data-label=CPU] .pf-v6-c-progress")
+
+        # Create one more
+        self.create_many_vms(m, ["extraVm20"])
+
+        # Usage columns should have disappeared completely
+        b.wait_not_present("[data-row-id=vm-subVmTest1-system] [data-label=Memory]")
+        b.wait_not_present("[data-row-id=vm-subVmTest1-system] [data-label=CPU]")
+
+    def testShutdownAndRestart(self):
+        b = self.browser
+        m = self.machine
+
+        # Create running machine
+
+        name = "subVmTest1"
+        args = self.createVm(name)
+        logfile = args['logfile']
+
+        self.login_and_go("/machines")
+        self.waitPageInit()
+        self.waitVmRow(name)
+        self.goToVmPage(name)
+        self.waitGuestBooted(logfile)
+
+        # Change network interface model
+        m.execute(f"virt-xml {name} --edit 1 --network model=e1000e")
+
+        # Shutdown and restart from "Pending Changes"
+        b.click("#vm-subVmTest1-needs-shutdown")
+        b.click(".pf-v6-c-popover button:contains('Shutdown and restart')")
+        m.execute(f"> {logfile}")  # clear logfile so that we can catch the next boot
+        b.wait_visible("#vm-restart-dialog-confirm-action-modal")
+        b.wait_visible("#uptime")
+        time.sleep(1)  # there is some animation and resizing going on that makes us miss the button sometimes
+        b.click("#vm-restart-dialog-restart")
+        self.waitGuestBooted(logfile)
+
+
+if __name__ == '__main__':
+    testlib.test_main()

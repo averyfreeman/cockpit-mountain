@@ -1,0 +1,9 @@
+node_modules/
+dist/
+pkg/
+starter-kit/
+*.LEGAL.txt
+.claude/
+PULL-BACKUP-INTEGRATION.md
+PULL-BACKUP-SCRIPT-PACKAGING.md
+BÖRÅTGÄRDAS.md

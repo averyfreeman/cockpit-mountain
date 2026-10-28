@@ -1,0 +1,81 @@
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
+
+#
+# Copyright (C) 2015 Red Hat, Inc.
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
+
+import storagelib
+import testlib
+
+
+@testlib.nondestructive
+class TestStorageBasic(storagelib.StorageCase):
+
+    def testBasic(self):
+        m = self.machine
+        b = self.browser
+
+        self.login_and_go("/storage", superuser=False)
+        self.allow_browser_errors("error: findmnt.*")
+
+        create_dropdown = self.dropdown_toggle(self.card_header("Storage"))
+
+        b.wait_visible(self.card("Storage"))
+        b.wait_not_present(create_dropdown)
+
+        b.relogin('/storage', superuser=True)
+
+        b.wait_visible(create_dropdown)
+
+        # Add a disk, partition it, format it, and finally remove it.
+        disk = self.add_ram_disk()
+
+        self.click_card_row("Storage", name=disk)
+        b.wait_visible(self.card("Solid State Drive"))
+
+        b.wait_text(self.card_desc("Solid State Drive", "Vendor"), "Linux")
+        b.wait_in_text(self.card_desc("Solid State Drive", "Capacity"), "50 MiB")
+
+        self.assertEqual(self.inode(b.text(self.card_desc("Solid State Drive", "Device file"))), self.inode(disk))
+
+        m.execute(f'parted -s {disk} mktable gpt')
+        m.execute(f'parted -s {disk} mkpart primary ext2 1M 8M')
+        b.wait_text(self.card_row_col("GPT partitions", 1, 2), "Unformatted data")
+
+        # create filesystem on the first partition
+        # HACK - the block device might disappear briefly when udevd does its BLKRRPART.
+        testlib.wait(lambda: m.execute(f'mke2fs {disk}1'), delay=1, tries=5)
+        b.wait_text(self.card_row_col("GPT partitions", 1, 2), "ext2 filesystem")
+
+        self.click_card_row("GPT partitions", 1)
+        b.wait_text(self.card_desc("Partition", "Name"), "primary")
+        b.assert_pixels(self.card("Partition"), "partition",
+                        mock={"[data-test-desc-title='UUID'] [data-test-value='true']": "a12978a1-5d6e-f24f-93de-11789977acde"})
+        b.assert_pixels(self.card("ext2 filesystem"), "filesystem")
+
+        b.go("#/")
+        b.wait_visible(self.card("Storage"))
+        b.wait_visible(self.card_row("Storage", name=disk))
+
+        # Create a subvolume with a really long name to show
+        # truncation in the pixel test.
+
+        if b.pixels_label:
+            long = "really-" * 15 + "long-name-that-will-be-truncated"
+            m.execute(f"btrfs subvol create /{long}")
+            self.addCleanup(m.execute, f"btrfs subvol delete /{long}")
+            b.wait_visible(self.card_row("Storage", name=long))
+        b.assert_pixels(self.card("Storage"), "overview",
+                        # Usage numbers are not stable and also cause
+                        # the table columns to shift. The usage bars
+                        # are not stable but are always the same size,
+                        # so it is good enough to ignore them.
+                        mock={".usage-text": "---"},
+                        ignore=[".usage-bar"])
+        self.force_remove_disk(disk)
+        b.wait_not_present(self.card_row("Storage", name=disk))
+
+
+if __name__ == '__main__':
+    testlib.test_main()

@@ -1,0 +1,138 @@
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
+
+#
+# Copyright (C) 2013 Red Hat, Inc.
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
+
+import netlib
+import testlib
+
+
+@testlib.nondestructive
+class TestBridge(netlib.NetworkCase):
+    def testBasic(self):
+        b = self.browser
+
+        self.login_and_go("/network")
+        b.wait_visible("#networking")
+
+        # These are two independent networks. Thus there is no loop between the
+        # bridge that all VMs are connected to, and the bridge we are creating here.
+        iface1 = "cockpit1"
+        self.add_veth(iface1, dhcp_cidr="10.111.113.1/24", dhcp_range=['10.111.113.2', '10.111.113.254'])
+        self.nm_activate_eth(iface1)
+        iface2 = "cockpit2"
+        self.add_veth(iface2, dhcp_cidr="10.111.114.1/24", dhcp_range=['10.111.114.2', '10.111.114.254'])
+        self.nm_activate_eth(iface2)
+        self.wait_for_iface(iface1)
+        self.wait_for_iface(iface2)
+
+        # Bridge them
+        b.click("button:contains('Add bridge')")
+        b.wait_visible("#network-bridge-settings-dialog")
+
+        # wait until dialog initialized
+        b.wait_visible("#network-bridge-settings-dialog button[aria-label=Close]")
+        b.wait_in_text("#network-bridge-settings-body", "cockpit2")
+        b.assert_pixels("#network-bridge-settings-dialog", "networking-bridge-settings-dialog")
+
+        b.set_input_text("#network-bridge-settings-interface-name-input", "tbridge")
+        b.set_checked(f"input[data-iface='{iface1}']", val=True)
+        b.set_checked(f"input[data-iface='{iface2}']", val=True)
+        b.click("#network-bridge-settings-dialog button:contains('Add')")
+        b.wait_not_present("#network-bridge-settings-dialog")
+        self.toggle_onoff("label[for='interface-switch']")
+
+        # Check that the members are displayed and both On
+        b.wait_text("#network-interface-name", "tbridge")
+        b.wait_visible("#network-interface")
+        self.wait_onoff(f"#network-interface-members tr[data-interface='{iface1}']", val=True)
+        self.wait_onoff(f"#network-interface-members tr[data-interface='{iface2}']", val=True)
+
+        b.wait_text_not("#network-interface-mac", "")
+        self.configure_iface_setting('Bridge')
+        b.click("#network-bridge-settings-dialog button:contains('Cancel')")
+        b.wait_not_present("#network-bridge-settings-dialog")
+
+        # Delete the bridge
+        b.click("#network-interface button:contains('Delete')")
+        b.wait_visible("#networking")
+        b.wait_not_present("#networking-interfaces tr[data-interface='tbridge']")
+
+        # Check that the former members are displayed and both On
+        self.wait_for_iface(iface1)
+        self.wait_for_iface(iface2)
+
+        # Add bridge with custom STP
+        b.click("button:contains('Add bridge')")
+        b.wait_visible("#network-bridge-settings-dialog")
+
+        b.set_input_text("#network-bridge-settings-interface-name-input", "tbridge")
+        b.set_checked(f"input[data-iface='{iface1}']", val=True)
+        b.set_checked(f"input[data-iface='{iface2}']", val=True)
+        b.click("#network-bridge-settings-stp-enabled-input")
+        b.set_input_text("#network-bridge-stp-settings-priority-input", "256")
+        b.click("#network-bridge-settings-dialog button:contains('Add')")
+        b.wait_not_present("#network-bridge-settings-dialog")
+        b.wait_text("#network-interface-name", "tbridge")
+
+        b.wait_visible("#network-interface")
+        b.wait_in_text("dd[data-label='Bridge']", "Priority 256")
+
+        # Edit the bridge STP settings
+        b.click("#networking-edit-bridge")
+        b.wait_visible("#network-bridge-settings-dialog")
+        b.wait_text(".pf-v6-c-modal-box__title", "Edit bridge settings")
+        b.set_input_text("#network-bridge-stp-settings-hello-time-input", "10")
+        b.click("#network-bridge-settings-dialog button:contains('Save')")
+        b.wait_not_present("#network-bridge-settings-dialog")
+
+        b.wait_in_text("dd[data-label='Bridge']", "Hello time 10")
+
+    def testActive(self):
+        b = self.browser
+        m = self.machine
+
+        self.login_and_go("/network")
+        b.wait_visible("#networking")
+
+        iface = "cockpit1"
+        self.add_veth(iface, dhcp_cidr="10.111.112.2/20")
+        self.nm_activate_eth(iface)
+        self.wait_for_iface(iface)
+
+        # Put an active interface into a bridge. We can't select/copy the MAC, so we can't expect to
+        # get the same IP as the active interface, but it should get a valid DHCP IP.
+
+        b.click("button:contains('Add bridge')")
+        b.wait_visible("#network-bridge-settings-dialog")
+        b.set_input_text("#network-bridge-settings-interface-name-input", "tbridge")
+        b.set_checked(f"input[data-iface='{iface}']", val=True)
+        b.click("#network-bridge-settings-dialog button:contains('Add')")
+        b.wait_not_present("#network-bridge-settings-dialog")
+
+        # Check that it has the interface and the right IP address
+        b.wait_text("#network-interface-name", "tbridge")
+        b.wait_visible(f"#network-interface-members tr[data-interface='{iface}']")
+        self.toggle_onoff("label[for='interface-switch']")
+        b.wait_in_text("#network-interface .pf-v6-c-card:contains('tbridge')", "10.111")
+
+        # Check bridge port
+        b.click("#network-interface-members button:contains('cockpit1')")
+        b.click("#networking-edit-bridgeport")
+        b.wait_visible("#network-bridge-port-settings-dialog")
+        b.set_input_text("#network-bridge-port-settings-prio-input", "35")
+        b.set_input_text("#network-bridge-port-settings-path-cost-input", "90")
+        b.set_checked("#network-bridge-port-settings-hairPin-mode-input", val=True)
+        b.click("#network-bridge-port-settings-save")
+        b.wait_not_present("#network-bridge-port-settings-dialog")
+
+        # Confirm that bridge port settings are applied
+        self.assertEqual(m.execute("nmcli con show cockpit1 | grep -i bridge-port.priority | awk '{print $2}'").strip(), "35")
+        self.assertEqual(m.execute("nmcli con show cockpit1 | grep -i bridge-port.path-cost | awk '{print $2}'").strip(), "90")
+        self.assertEqual(m.execute("nmcli con show cockpit1 | grep -i bridge-port.hairpin-mode | awk '{print $2}'").strip(), "yes")
+
+
+if __name__ == '__main__':
+    testlib.test_main()

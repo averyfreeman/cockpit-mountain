@@ -1,0 +1,635 @@
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
+
+import time
+
+import dialoglib
+import testlib
+
+
+@testlib.nondestructive
+class TestDialog(testlib.MachineCase):
+
+    def test(self):
+        b = self.browser
+        d = dialoglib.DialogHelpers(b, "#dialog")
+
+        # Missing coverage:
+        #
+        # exception in async validation
+
+        def enter_online_validation_mode():
+            # put dialog into online validation mode by triggering a
+            # failed validation
+            d.set_Checkbox("flag", val=True)
+            d.set_TextInput("text", "")
+            b.click(d.apply_button())
+            b.wait_in_text(d.helper_text("text"), "Text can not be empty")
+            d.set_Checkbox("flag", val=False)
+
+        self.login_and_go("/playground/dialog", superuser=False)
+
+        # DialogTextInput with excuse, explanation, warning, and synch
+        # validation failure
+
+        b.click("#open")
+        d.wait_Checkbox("flag", val=False)
+        self.assertFalse(d.get_Checkbox("flag"))
+        b.wait_visible(d.field("text") + ":disabled")
+        b.wait_in_text(d.helper_text("text"), "Disabled")
+
+        d.set_Checkbox("flag", val=True)
+        b.wait_visible(d.field("text") + ":not(:disabled)")
+        b.wait_in_text(d.helper_text("text"), "Explanation")
+
+        # test pasting text
+        b.set_input_text(d.field("text"), "XXX", paste=True)
+        d.wait_TextInput("text", "XXX")
+        b.set_input_text(d.field("text"), "YYY", paste=True)
+        d.wait_TextInput("text", "YYY")
+        b.set_input_text(d.field("text"), "ZZZ", paste=True, append=True, value_check=False)
+        d.wait_TextInput("text", "YYYZZZ")
+
+        d.set_TextInput("text", "warn")
+        self.assertEqual(d.get_TextInput("text"), "warn")
+        b.wait_in_text(d.helper_text("text"), "Warning")
+
+        # Excuse should have priority over Warning
+        d.set_Checkbox("flag", val=False)
+        b.wait_in_text(d.helper_text("text"), "Disabled")
+
+        d.set_Checkbox("flag", val=True)
+        d.set_TextInput("text", "")
+        b.click(d.apply_button())
+        b.wait_in_text(d.helper_text("text"), "Text can not be empty")
+
+        d.set_Checkbox("flag", val=False)
+        b.wait_in_text(d.helper_text("text"), "Disabled")
+        b.click(d.apply_button())
+        b.wait_not_present("#dialog")
+
+        b.click("#open")
+        d.set_Checkbox("flag", val=True)
+        d.set_TextInput("text", "Text")
+        b.click(d.apply_button())
+        b.wait_not_present("#dialog")
+        b.wait_text("#text", "Text")
+
+        # DialogRadioSelect with explanations and excuses
+
+        b.click("#open")
+        d.wait_RadioSelect("radio", "one")
+        b.wait_in_text(d.id("radio", "one-label"), "One explanation")
+        b.wait_visible(d.id("radio", "two") + ":disabled")
+        b.wait_in_text(d.id("radio", "two-label"), "(disabled)")
+        b.wait_in_text(d.id("radio", "two-label"), "Two explanation")
+        d.set_RadioSelect("radio", "three")
+        self.assertEqual(d.get_RadioSelect("radio"), "three")
+
+        b.click(d.apply_button())
+        b.wait_not_present("#dialog")
+
+        b.wait_text("#radio", "three")
+
+        # DialogDropdownSelect
+
+        b.click("#open")
+        d.wait_DropdownSelect("dropdown", "one")
+        d.set_DropdownSelect("dropdown", "three")  # first call to set_async
+        d.set_DropdownSelect("dropdown", "two")  # second call, will cancel first
+        self.assertEqual(d.get_DropdownSelect("dropdown"), "two")
+        b.wait_in_text(d.helper_text("dropdown"), "discount")
+        b.click(d.apply_button())
+        b.wait_not_present("#dialog")
+
+        b.wait_text("#dropdown", "two")
+        b.wait_text("#text2", "two")
+
+        # Cancelling of irrelevant validations
+
+        b.click("#open")
+        d.set_DropdownSelect("dropdown", "three")
+        d.wait_TextInput("text2", "three")  # wait for async update to be done
+        b.click(d.apply_button())
+        b.wait_in_text(d.helper_text("text3"), "Can't be empty")
+        # start a debounced validation of text3 and remove it from the
+        # dialog before it has finished.
+        d.set_TextInput("text3", "x")
+        time.sleep(0.5)
+        d.set_TextInput("text3", "")
+        d.set_DropdownSelect("dropdown", "one")
+        b.click(d.apply_button())
+        b.wait_not_present("#dialog")
+
+        # DialogDropdownSelectObject, with asynchronous updates
+
+        b.click("#open")
+        d.set_Checkbox("flag", val=True)
+        d.wait_DropdownSelect("color", "red")
+        self.assertEqual(d.get_TextInput("text"), "")
+        d.set_DropdownSelect("color", "green")
+        self.assertEqual(d.get_DropdownSelect("color"), "green")
+        # Text does not react immediately.
+        self.assertEqual(d.get_TextInput("text"), "")
+        # Wait a bit and then change color again. This cancels the update.
+        time.sleep(1)
+        d.set_DropdownSelect("color", "blue")
+        self.assertEqual(d.get_DropdownSelect("color"), "blue")
+        self.assertEqual(d.get_TextInput("text"), "")
+        # Apply while the update is still running. It should finish (1 update)
+        b.click(d.apply_button())
+        b.wait_not_present("#dialog")
+
+        b.wait_text("#text", "blue")
+        b.wait_text("#color", "0/0/1")
+        b.wait_text("#asyncUps", "1")
+        b.wait_text("#asyncCancels", "1")
+
+        # Cancelling of asynchronous tasks when the dialog is
+        # cancelled
+
+        b.click("#open")
+        d.wait_DropdownSelect("color", "red")
+        self.assertEqual(d.get_TextInput("text"), "")
+        d.set_DropdownSelect("color", "green")
+        self.assertEqual(d.get_DropdownSelect("color"), "green")
+        # Text does not react immediately.
+        self.assertEqual(d.get_TextInput("text"), "")
+        b.click(d.cancel_button())
+        b.wait_not_present("#dialog")
+
+        # Wait for update to definitely be done if it wouldn't have
+        # been cancelled
+        time.sleep(3)
+        b.wait_text("#asyncUps", "0")
+        b.wait_text("#asyncCancels", "1")
+
+        # List of DialogTextInputs
+
+        b.click("#open")
+        # make sure the validation machinery is active in the
+        # background while we modify the list.
+        enter_online_validation_mode()
+        b.wait_visible(d.field("list"))
+        b.wait_not_present(d.field("list.0"))
+        b.click(d.id("list", "add"))
+        b.wait_visible(d.field("list.0"))
+        d.set_TextInput("list.0", "foo")
+        b.click(d.id("list", "add"))
+        d.set_TextInput("list.1", "baz")
+        b.click(d.id("list", "add"))
+        d.set_TextInput("list.2", "bar")
+        b.click(d.id("list.1", "remove"))
+        d.wait_TextInput("list.1", "bar")
+        b.wait_not_present(d.field("list.2"))
+        b.click(d.id("list", "add"))
+        d.set_TextInput("list.2", "magic")
+        d.wait_TextInput("text", "magic")
+        b.click(d.apply_button())
+        b.wait_not_present("#dialog")
+
+        b.wait_text("#list", "foo/bar/magic")
+
+        # Debounced and asynchronous validation
+
+        b.click("#open")
+        enter_online_validation_mode()
+        # Add a field. This immediately starts a validation. (1 validation)
+        b.click(d.id("async", "add"))
+        b.focus(d.field("async.0.name"))
+        b.input_text("1")
+        # wait for debounce timeout and validation promise to be done (2 validations)
+        b.wait_in_text(d.helper_text("async.0.name"), "Must have even number")
+        b.input_text("2")
+        # this starts a new debounce timeout but the validation error stays
+        # don't wait for the debounce timeout to be over but change again while it is still pending
+        time.sleep(0.5)
+        b.input_text("3")
+        # now wait for the timeout to be over but change while the promise is running
+        time.sleep(2)
+        b.input_text("4")
+        # the promise for validating "123" will finish soon, but it's result must be ignored (3 validations)
+        # let the validation for "1234" play out to completion (4 validations)
+        time.sleep(5)
+        # close dialog
+        b.click(d.apply_button())
+        b.wait_not_present("#dialog")
+
+        b.wait_text("#async", "1234:4")
+        b.wait_text("#asyncVals", "4")
+
+        b.click("#open")
+        enter_online_validation_mode()
+        b.click(d.id("async", "add"))  # (1 validation)
+        b.click(d.id("async", "add"))  # (2 validations)
+        b.focus(d.field("async.1.name"))
+        b.input_text("1")
+        # remove the first entry during the debounce timeout, this
+        # should not disturb anything and the validation for "1"
+        # should finish normally (3 validations)
+        b.wait_not_present(d.helper_text("async.0.name"))
+        b.click(d.id("async.0", "remove"))
+        b.wait_in_text(d.helper_text("async.0.name"), "Must have even number")
+        # remove the failure and close the dialog
+        b.click(d.id("async.0", "remove"))
+        b.click(d.apply_button())
+        b.wait_not_present("#dialog")
+
+        b.wait_text("#async", "")
+        b.wait_text("#asyncVals", "3")
+
+        # Trigger validation directly via Apply. This will skip the
+        # timeouts.
+
+        b.click("#open")
+        b.click(d.id("async", "add"))
+        d.set_TextInput("async.0.name", "1234")
+        b.click(d.apply_button())
+        b.wait_not_present("#dialog")
+
+        b.wait_text("#async", "1234:4")
+        b.wait_text("#asyncVals", "1")
+
+        # Trigger validation via Apply when there are timeouts
+        # pending. This will skip the timeouts.
+
+        b.click("#open")
+        enter_online_validation_mode()
+        b.click(d.id("async", "add"))
+        # now there is a timeout pending, clicking apply will run it
+        # immediately and it will be counted.
+        b.click(d.apply_button())
+        b.wait_not_present("#dialog")
+
+        b.wait_text("#async", ":0")
+        b.wait_text("#asyncVals", "1")
+
+        # Type narrowing with "at()"
+
+        b.click("#open")
+        b.click(d.apply_button())
+        b.wait_text("#alternative", 'false')
+
+        b.click("#open")
+        b.set_checked(d.id("alternative", "checkbox"), val=True)
+        d.set_TextInput("alternative", "1234")
+        b.set_checked(d.id("alternative", "checkbox"), val=False)
+        b.wait_not_present(d.field("alternative"))
+        b.set_checked(d.id("alternative", "checkbox"), val=True)
+        d.wait_TextInput("alternative", "")
+        d.set_TextInput("alternative", "1234")
+        b.click(d.apply_button())
+        b.wait_text("#alternative", '"1234"')
+
+        # DialogError
+
+        b.click("#open")
+
+        d.set_DropdownSelect("error", "custom")
+        b.click(d.apply_button())
+        b.wait_in_text(d.error(), "This is a failure")
+        b.wait_in_text(d.error(), "1234-567-98A")
+
+        d.set_DropdownSelect("error", "from")
+        b.click(d.apply_button())
+        b.wait_in_text(d.error(), "Tool not found")
+        b.wait_in_text(d.error(), "no such file")
+
+        d.set_DropdownSelect("error", "from-random")
+        b.click(d.apply_button())
+        b.wait_in_text(d.error(), "Too random")
+        b.wait_in_text(d.error(), "1,2,3,4")
+
+        d.set_DropdownSelect("error", "message")
+        b.click(d.apply_button())
+        b.wait_in_text(d.error(), "Failed")
+        b.wait_in_text(d.error(), "segmentation fault")
+
+        d.set_DropdownSelect("error", "spawn")
+        b.click(d.apply_button())
+        b.wait_in_text(d.error(), "--no-such-option")
+
+        d.set_DropdownSelect("error", "random")
+        b.click(d.apply_button())
+        b.wait_in_text(d.error(), "1,2,3,4")
+
+        b.mouse(d.ouia("apply-force"), "mouseenter")
+        b.wait_in_text(".pf-v6-c-tooltip", "Force not allowed")
+        b.mouse(d.ouia("apply-force"), "mouseleave")  # make tooltip disappear, it obscures the checkbox otherwise
+        b.wait_not_present(".pf-v6-c-tooltip")
+        d.set_Checkbox("allow_force", val=True)
+        b.click(d.ouia("apply-force"))
+        b.wait_not_present("#dialog")
+
+        # init func and sub-field validation
+
+        b.click("#open-with-func")
+        d.wait_TextInput("text", "foo")
+        d.wait_TextInput("text2", "bar")
+        d.set_TextInput("text2", "bart")
+        b.click(d.apply_button())
+        b.wait_in_text(d.helper_text("text"), "No foo without bar")
+        d.set_TextInput("text", "food")
+        d.set_TextInput("text2", "bar")
+        b.wait_in_text(d.helper_text("text2"), "No bar without foo")
+        b.click(d.cancel_button())
+        b.wait_not_present("#dialog")
+
+        # useDialogState_async
+
+        b.click("#open-async")
+        d.set_TextInput("text", "1234")
+        b.click(d.apply_button())
+        b.wait_text("#cancelled", "Cancelled: no")
+        b.click(d.cancel_button())
+        b.wait_text("#cancelled", "Cancelled: yes")
+        b.set_input_text(d.field("text"), "", value_check=False)
+        d.wait_TextInput("text", "1234")
+        b.wait_not_present("#dialog")
+
+        b.click("#open-error")
+        b.wait_in_text(d.error(), "Error during initialization")
+        b.wait_in_text(d.error(), "can't get the thing")
+        b.click(d.cancel_button())
+        b.wait_not_present("#dialog")
+
+        b.click("#open-dialog-error")
+        b.wait_in_text(d.error(), "Getting the thing failed")
+        b.wait_in_text(d.error(), "can't get it")
+        b.click(d.cancel_button())
+        b.wait_not_present("#dialog")
+
+    def testFileChooser(self):
+        b = self.browser
+        m = self.machine
+        d = dialoglib.DialogHelpers(b, "#dialog")
+        fc = dialoglib.FileChooserHelpers(b, ".file-chooser")
+
+        # Inject a mock xdg-user-dir utility.
+
+        self.write_file("/usr/local/bin/xdg-user-dir",
+"""#! /bin/sh
+echo $HOME/Downloads
+""", perm="a+x")
+
+        # Where our test files are. This is intended to be the same as
+        # self.vm_tmpdir, but it is also hard-coded into
+        # pkg/playground/dialog.tsx and so we hard-code it here as
+        # well.
+
+        test_files = "/var/lib/cockpittest"
+
+        self.login_and_go("/playground/dialog", superuser=False)
+
+        b.click("#open")
+
+        # Use the get_FileChooserInput method so that Vulture doesn't
+        # complain about it being unused.
+
+        self.assertEqual(d.get_FileChooserInput("file"), "")
+
+        # The first open has a empty Recent tab.
+
+        b.click(d.field("file") + " .pf-v6-c-text-input-group__utilities button")
+        b.wait_in_text(".file-chooser-listing-body", "No recent files")
+        b.click(".file-chooser .pf-v6-c-modal-box__close button")
+        b.wait_not_present(".file-chooser")
+
+        # Basic interaction with the text input
+
+        d.set_FileChooserInput("file", "/home/non-existent/foo")
+        b.wait_in_text(d.helper_text("file"), "(No such file or directory)")
+
+        b.click(d.field("file") + " .pf-v6-c-text-input-group__utilities button")
+        b.wait_in_text(".file-chooser-listing-body", "No such file or directory")
+        b.click(".file-chooser .pf-v6-c-modal-box__close button")
+        b.wait_not_present(".file-chooser")
+
+        m.upload(["verify/files/file-chooser-test/"], test_files)
+        m.execute(f"mkdir '{test_files}/file-chooser-test/empty'")
+        d.set_FileChooserInput("file", test_files)
+        b.wait_in_text(d.helper_text("file"), "directory")
+
+        # Navigate to empty directory
+
+        b.click(d.field("file") + " .pf-v6-c-text-input-group__utilities button")
+        b.wait_visible(".file-chooser")
+        fc.set_path("cockpittest/file-chooser-test/empty")
+        b.wait_in_text(".file-chooser-listing-body", "Directory is empty")
+
+        # Go up and choose tmpdir/file-chooser-test/foo
+
+        b.click(".file-chooser-listing-breadcrumbs a:contains('file-chooser-test')")
+        b.assert_pixels(".file-chooser", "basic")
+        b.mouse(fc.file("foo"), "click")
+        b.click(fc.apply_button())
+
+        d.wait_FileChooserInput("file", test_files + "/file-chooser-test/foo")
+        b.wait_in_text(d.helper_text("file"), "ASCII text")
+
+        # "foo" should now be in "Recent"
+
+        b.click(d.field("file") + " .pf-v6-c-text-input-group__utilities button")
+        b.wait_visible(".file-chooser-listing-breadcrumbs nav")
+        b.wait_visible(fc.file("foo"))
+        b.click(fc.sidebar("Recent"))
+        b.wait_not_present(".file-chooser-listing-breadcrumbs nav")
+        b.wait_visible(fc.file("foo"))
+        b.wait_in_text(fc.file("foo"), test_files + "/file-chooser-test")
+        b.mouse(fc.file("foo"), "click")
+        b.click(fc.apply_button())
+        d.wait_FileChooserInput("file", test_files + "/file-chooser-test/foo")
+        b.wait_in_text(d.helper_text("file"), "ASCII text")
+
+        # Check that "Home" has some expected files
+
+        m.execute("echo hi > ~admin/.dot-file")
+
+        b.click(d.field("file") + " .pf-v6-c-text-input-group__utilities button")
+        b.click(fc.sidebar("Home"))
+        # home can be /home/admin or /var/home/admin.
+        home = m.execute("echo -n ~admin")
+        b.wait_text(".file-chooser-listing-breadcrumbs", home.replace("/", ""))
+        b.click(".file-chooser-listing-breadcrumbs a:contains('home')")
+        b.mouse(fc.file("admin"), "dblclick")
+        b.wait_in_text(".file-chooser-listing-body", "This directory contains only hidden files")
+        b.click(".file-chooser-listing-body button:contains('Show hidden files')")
+        b.wait_visible(fc.file(".ssh"))
+        b.click(".file-chooser-listing-header button:contains('All files')")
+        b.click(fc.file(".dot-file"))
+        b.click(fc.apply_button())
+
+        d.wait_FileChooserInput("file", f"{home}/.dot-file")
+        b.wait_in_text(d.helper_text("file"), "ASCII text")
+
+        # Check the "Downloads" shortcut
+
+        b.click(d.field("file") + " .pf-v6-c-text-input-group__utilities button")
+        b.click(".file-chooser-sidebar tr:contains('Downloads')")
+        b.wait_text(".file-chooser-listing-breadcrumbs", home.replace("/", "") + "Downloads")
+        b.wait_in_text(".file-chooser-listing-body", "No such file or directory")
+
+        # Check that we can't read /root
+
+        fc.set_path("/root")
+        b.wait_in_text(".file-chooser-listing-body", "Permission denied")
+        b.assert_pixels(".file-chooser", "denied")
+        b.click(".file-chooser .pf-v6-c-modal-box__close button")
+        b.wait_not_present(".file-chooser")
+
+        # Free text filtering
+
+        d.set_FileChooserInput("file", "")
+        b.click(d.field("file") + " .pf-v6-c-text-input-group__utilities button")
+        b.click(fc.sidebar("Test files"))
+        fc.set_path("file-chooser-test")
+
+        b.wait_visible(fc.file("bar"))
+        b.wait_visible(fc.file("foo"))
+        b.wait_visible(fc.file("foobar"))
+
+        b.set_input_text(".file-chooser-listing-header input", "fo")
+        b.wait_visible(fc.file("foo"))
+        b.wait_not_present(fc.file("bar"))
+        b.wait_visible(fc.file("foobar"))
+        b.assert_pixels(".file-chooser", "filtered")
+
+        b.set_input_text(".file-chooser-listing-header input", "ba")
+        b.wait_not_present(fc.file("foo"))
+        b.wait_visible(fc.file("bar"))
+        b.wait_visible(fc.file("foobar"))
+
+        b.set_input_text(".file-chooser-listing-header input", "xxx")
+        b.wait_in_text(".file-chooser-listing-body", "No matching results")
+        b.click(".file-chooser-listing-body button:contains('Clear filters')")
+
+        b.wait_visible(fc.file("bar"))
+        b.wait_visible(fc.file("foo"))
+        b.wait_visible(fc.file("foobar"))
+
+        # Prepared filtering.
+
+        # "No dots" was already active all the time, switch it off to
+        # reveal more files.
+
+        b.click(".file-chooser-listing-header button:contains('All files')")
+
+        b.wait_visible(fc.file("bar"))
+        b.wait_visible(fc.file("foo"))
+        b.wait_visible(fc.file("foobar"))
+        b.wait_visible(fc.file("dots.txt"))
+        b.wait_visible(fc.file("only.dots"))
+
+        b.mouse(fc.file("only.dots"), "dblclick")
+        b.wait_visible(fc.file("one.dot"))
+        b.wait_visible(fc.file("two.dots"))
+
+        b.click(".file-chooser-listing-header button:contains('No dots')")
+
+        b.wait_in_text(".file-chooser-listing-body", "No matching results")
+
+        # Filter even more, this should get cleared as well
+        b.set_input_text(".file-chooser-listing-header input", "x")
+
+        b.click(".file-chooser-listing-body button:contains('Clear filters')")
+
+        b.wait_visible(fc.file("one.dot"))
+        b.wait_visible(fc.file("two.dots"))
+
+        b.click(".file-chooser .pf-v6-c-modal-box__close button")
+        b.wait_not_present(".file-chooser")
+
+        # Test the collection
+
+        b.click(d.field("file") + " .pf-v6-c-text-input-group__utilities button")
+        b.click(fc.sidebar("Some files"))
+        b.wait_visible(fc.file("foo"))
+        b.wait_not_present(fc.file("dots.txt"))
+        b.click(".file-chooser-listing-header button:contains('All files')")
+        b.wait_visible(fc.file("foo"))
+        b.wait_visible(fc.file("dots.txt"))
+        b.click(fc.file("dots.txt"))
+        b.click(fc.apply_button())
+
+        d.wait_FileChooserInput("file", "/var/lib/cockpittest/file-chooser-test/dots.txt")
+        b.wait_in_text(d.helper_text("file"), "ASCII text")
+
+        # Become superuser and access /root
+
+        m.execute("echo Hello >~root/hello")  # Not all images have ~root/.bashrc
+
+        b.become_superuser()
+
+        b.click(d.field("file") + " .pf-v6-c-text-input-group__utilities button")
+        fc.set_path("/root/hello")
+        b.click(fc.apply_button())
+        d.wait_FileChooserInput("file", "/root/hello")
+        b.wait_in_text(d.helper_text("file"), "ASCII text")
+
+        # Select a directory
+
+        d.wait_FileChooserInput("dir", "")
+        b.click(d.field("dir") + " .pf-v6-c-text-input-group__utilities button")
+
+        b.wait_in_text(".file-chooser-listing-body", "No recent directories")
+        b.click(fc.sidebar("Test files"))
+        b.click(fc.file("file-chooser-test"))
+        b.click(fc.apply_button())
+
+        d.wait_FileChooserInput("dir", test_files + "/file-chooser-test")
+
+        b.click(d.field("dir") + " .pf-v6-c-text-input-group__utilities button")
+        b.wait_visible(fc.file("only.dots"))
+        b.click(fc.sidebar("Recent"))
+        b.wait_visible(fc.file("file-chooser-test"))
+        b.wait_not_present(fc.file("foo"))
+        b.wait_in_text(fc.file("file-chooser-test"), test_files)
+
+        b.wait_visible(fc.apply_button() + ":disabled")
+        b.click(".file-chooser .pf-v6-c-modal-box__close button")
+        b.wait_not_present(".file-chooser")
+
+        # Check mobile layout
+
+        b.set_layout("mobile")
+
+        b.click(d.field("file") + " .pf-v6-c-text-input-group__utilities button")
+        b.wait_not_visible(".file-chooser-sidebar")
+        b.wait_visible(".file-chooser-kebab")
+
+        b.select_PF(".file-chooser-kebab", "Test files")
+        b.mouse(fc.file("file-chooser-test"), "dblclick")
+        b.wait_visible(fc.file("empty"))
+
+        b.click(".file-chooser .pf-v6-c-modal-box__close button")
+        b.wait_not_present(".file-chooser")
+        b.click(d.cancel_button())
+        b.set_layout("desktop")
+
+        # Stand-alone File Chooser
+
+        b.click("#open-file-chooser")
+        b.wait_visible(".file-chooser")
+        b.click(fc.sidebar("Some TXT files"))
+        b.wait_visible(fc.file("foo.txt"))
+        b.wait_not_present(fc.file("no-such-file.txt"))
+        b.click(fc.file("foo.txt"))
+        b.wait_text(fc.apply_button(), "Load")
+        b.click(fc.apply_button())
+        b.wait_not_present(".file-chooser")
+
+        b.click("#open-file-chooser")
+        b.wait_visible(".file-chooser")
+        b.click(fc.sidebar("Test files"))
+        fc.set_path("file-chooser-test/text")
+        b.wait_visible(fc.file("foo.txt"))
+        b.wait_visible(fc.file("bar.txt"))
+        b.click(fc.file("bar.txt"))
+        b.click(fc.apply_button())
+        b.wait_in_text(fc.error(), "Does not start with \"foo\"")
+        b.click(fc.file("foo.txt"))
+        b.click(fc.apply_button())
+        b.wait_not_present(".file-chooser")
+
+
+if __name__ == '__main__':
+    testlib.test_main()

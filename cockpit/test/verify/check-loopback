@@ -1,0 +1,47 @@
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
+
+#
+# Copyright (C) 2013 Red Hat, Inc.
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
+
+import testlib
+
+
+@testlib.skipWsContainer("cockpit/ws always uses loopback")
+@testlib.skipImage("TODO: fix for OpenSUSE", "opensuse-tumbleweed")
+@testlib.nondestructive
+class TestLoopback(testlib.MachineCase):
+
+    def testBasic(self):
+        b = self.browser
+        m = self.machine
+
+        # Start Cockpit with option to access SSH
+        m.stop_cockpit()
+        pid = m.spawn(f"{self.libexecdir}/cockpit-ws --local-ssh --no-tls", "cockpit-ws")
+        self.addCleanup(m.execute, "kill %i" % pid)
+        m.wait_for_cockpit_running()
+
+        b.login_and_go("/system", user="admin")
+        b.logout()
+        b.wait_visible("#login")
+
+        m.disconnect()
+        self.restore_dir("/etc/ssh", restart_unit=self.sshd_service)
+        m.execute("sed -i 's/.*PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config $(ls /etc/ssh/sshd_config.d/* 2>/dev/null || true)")
+        m.execute(self.restart_sshd)
+        m.wait_execute()
+
+        b.set_val('#login-user-input', "admin")
+        b.set_val('#login-password-input', "foobar")
+        b.click('#login-button')
+        b.wait_text("#login-error-title", "Authentication failed")
+        b.wait_text('#login-error-message', "Wrong user name or password")
+
+        self.allow_journal_messages("Cannot run program cockpit-bridge: No such file or directory",
+                                    ".*server offered unsupported authentication methods: public-key.*")
+
+
+if __name__ == '__main__':
+    testlib.test_main()

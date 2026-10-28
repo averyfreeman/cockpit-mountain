@@ -1,0 +1,183 @@
+<!-- Preview/editor window host — partial injected by js/boot.js (2.1 split). Do not add a wrapper element. -->
+<div class="modal fade" id="windowHost" tabindex="-1" x-data
+     x-init="windowHostEl = $el; $el.addEventListener('hidden.bs.modal', () => hostVisible = false)"
+     data-bs-backdrop="static" data-bs-keyboard="false">
+    <div class="modal-dialog modal-dialog-centered modal-fullscreen-sm-down" :class="hostMaximized ? 'modal-fullscreen' : 'modal-xl'">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title d-flex align-items-center" style="gap:.4rem; min-width:0;">
+                    <span class="text-truncate" x-text="activeWin() ? activeWin().title : ''"></span>
+                    <span x-show="activeWin() && activeWin().kind === 'editor' && activeWin().dirty" class="dirty-marker">●</span>
+                    <span class="badge bg-secondary small" x-show="activeWin() && activeWin().kind === 'editor' && activeWin().lang" x-text="activeWin() && activeWin().lang"></span>
+                    <span class="badge bg-secondary small" x-show="activeWin() && activeWin().readOnly">read-only</span>
+                    <!-- FIX C: moved out of the video body (was absolutely positioned over
+                         the <video> element) into the title bar, next to the other badges
+                         here. Same green "Transcoding" / gray "Remuxing" states, same
+                         terminal-state disappearance (transcodeState becomes 'done' or the
+                         badge conditions stop matching). Only for an hls video window. -->
+                    <span class="badge transcode-badge" :class="_vpHeaderPv() && _vpHeaderPv().transcodeState === 'transcoding' ? 'is-active' : 'is-idle'"
+                          x-show="_vpHeaderPv() && (_vpHeaderPv().transcodeState === 'transcoding' || _vpHeaderPv().transcodeState === 'remuxing')"
+                          x-text="_vpHeaderPv() && _vpHeaderPv().transcodeState === 'transcoding' ? '⚙ Transcoding' : 'Remuxing'"></span>
+                    <!-- FIX D: the probed real duration (ffprobe format=duration), shown
+                         immediately — hls.js's own timeline only grows as segments land,
+                         which is what made a long file briefly read as "0:07". -->
+                    <span class="small text-muted video-duration"
+                          x-show="_vpHeaderPv() && _vpFormatDuration(_vpHeaderPv().totalDuration)"
+                          x-text="_vpHeaderPv() ? _vpFormatDuration(_vpHeaderPv().totalDuration) : ''"></span>
+                </h5>
+                <div class="btn-group btn-group-sm ms-3" x-show="activeWin() && activeWin().kind === 'editor' && activeWin().canWysiwyg" role="group" aria-label="Editor mode">
+                    <button type="button" class="btn btn-outline-secondary" :class="{ active: activeWin() && activeWin().mode === 'code' }" @click="setEditorMode('code')">Source</button>
+                    <button type="button" class="btn btn-outline-secondary" :class="{ active: activeWin() && activeWin().mode === 'wysiwyg' }" @click="setEditorMode('wysiwyg')">WYSIWYG</button>
+                </div>
+                <div class="win-controls ms-auto">
+                    <button type="button" class="btn btn-sm btn-outline-secondary me-2 win-copy-btn"
+                            x-show="activeWin() && activeWin().kind === 'preview' && activeWin().pv && (activeWin().pv.kind === 'text' || (activeWin().pv.kind === 'html' && activeWin().pv.htmlMode === 'source'))"
+                            @click="copyPreviewContent()"
+                            title="Copy file contents to clipboard" aria-label="Copy file contents to clipboard"
+                            x-text="(activeWin() && copiedWinId === activeWin().id) ? 'Copied ✓' : 'Copy'"></button>
+                    <button type="button" class="btn btn-sm btn-outline-secondary me-2 preview-md-toggle"
+                            x-show="activeWin() && activeWin().kind === 'preview' && activeWin().pv.srcdoc && (activeWin().pv.kind === 'markdown' || (activeWin().pv.kind === 'text' && activeWin().pv.lang === 'markdown'))"
+                            @click="toggleMarkdownMode(activeWin().id)"
+                            x-text="activeWin() && activeWin().pv && activeWin().pv.kind === 'markdown' ? 'Source' : 'Rendered'"></button>
+                    <button type="button" class="btn btn-sm btn-outline-secondary me-2 preview-html-toggle"
+                            x-show="activeWin() && activeWin().kind === 'preview' && activeWin().pv.kind === 'html'"
+                            @click="toggleHtmlMode(activeWin().id)"
+                            x-text="activeWin() && activeWin().pv && activeWin().pv.htmlMode === 'source' ? 'Rendered' : 'Source'"></button>
+                    <button type="button" class="btn btn-sm me-2 preview-scripts-toggle"
+                            :class="activeWin() && activeWin().pv && activeWin().pv.scriptsEnabled ? 'btn-warning' : 'btn-outline-secondary'"
+                            x-show="activeWin() && activeWin().kind === 'preview' && activeWin().pv.kind === 'html' && activeWin().pv.htmlMode === 'rendered'"
+                            @click="toggleHtmlScripts(activeWin().id)"
+                            :title="activeWin() && activeWin().pv && activeWin().pv.scriptsEnabled ? 'Scripts are running in this page — click to disable' : 'This page\'s scripts are disabled — click to run them (still sandboxed away from Cockpit)'"
+                            x-text="activeWin() && activeWin().pv && activeWin().pv.scriptsEnabled ? 'Disable scripts' : 'Enable scripts'"></button>
+                    <select class="form-select form-select-sm me-2" style="width:auto"
+                            x-show="activeWin() && activeWin().kind === 'preview' && activeWin().pv.kind === 'sheet' && activeWin().pv.sheets.length > 1"
+                            @change="_selectSheet(activeWin().id, parseInt($event.target.value))">
+                        <template x-for="(s, i) in (activeWin() && activeWin().pv && activeWin().pv.sheets) || []" :key="s">
+                            <option :value="i" x-text="s" :selected="i === activeWin().pv.sheetIdx"></option>
+                        </template>
+                    </select>
+                    <button type="button" class="btn btn-sm btn-outline-secondary me-1 win-nav-btn"
+                            x-show="activeWin() && activeWin().kind === 'preview' && activeWin().nav"
+                            :disabled="!activeWin() || !previewCanStep(activeWin().id, -1)"
+                            @click="previewStep(activeWin().id, -1)" title="Previous (←)" aria-label="Previous file">◀</button>
+                    <span class="small text-muted me-1" x-show="activeWin() && activeWin().kind === 'preview' && activeWin().nav"
+                          x-text="activeWin() && activeWin().nav ? (activeWin().nav.idx + 1) + ' / ' + activeWin().nav.list.length : ''"></span>
+                    <button type="button" class="btn btn-sm btn-outline-secondary me-2 win-nav-btn"
+                            x-show="activeWin() && activeWin().kind === 'preview' && activeWin().nav"
+                            :disabled="!activeWin() || !previewCanStep(activeWin().id, 1)"
+                            @click="previewStep(activeWin().id, 1)" title="Next (→)" aria-label="Next file">▶</button>
+                    <button type="button" class="win-btn" @click="minimizeHost()" title="Minimize" x-html="winIconMinimize"></button>
+                    <button type="button" class="win-btn" @click="hostMaximized = !hostMaximized" :title="hostMaximized ? 'Restore' : 'Maximize'" x-html="hostMaximized ? winIconRestore : winIconMaximize"></button>
+                    <button type="button" class="win-btn win-btn-close" @click="closeActiveWindow()" title="Close" x-html="winIconClose"></button>
+                </div>
+            </div>
+            <div class="modal-body p-0" :class="(activeWin() && activeWin().kind === 'preview') ? 'preview-body' : 'editor-body'">
+                <!-- Editor surfaces (always in the DOM; shown for editor windows) -->
+                <div id="monacoContainer" class="editor-monaco" x-show="activeWin() && activeWin().kind === 'editor' && activeWin().mode === 'code'"></div>
+                <div class="editor-quill" x-show="activeWin() && activeWin().kind === 'editor' && activeWin().mode === 'wysiwyg'">
+                    <div id="quillContainer"></div>
+                </div>
+                <!-- Preview surfaces -->
+                <template x-if="activeWin() && activeWin().kind === 'preview' && (activeWin().pv.kind === 'text' || (activeWin().pv.kind === 'html' && activeWin().pv.htmlMode === 'source'))">
+                    <div class="preview-text-host">
+                        <div class="preview-trunc-banner" x-show="activeWin().pv.truncated">
+                            Showing the first <span x-text="Util.humanSize(activeWin().pv.content.length)"></span> of <span x-text="Util.humanSize(activeWin().pv.fullBytes)"></span> —
+                            <a href="#" @click.prevent="openEditor(activeWin()._file)">open in the editor</a> for the whole file.
+                        </div>
+                        <div class="preview-code-wrap">
+                            <pre class="preview-gutter" aria-hidden="true" x-text="pvLineNumbers(activeWin().pv.content)"></pre>
+                            <pre class="preview-code"><code :class="'language-' + (activeWin().pv.noHighlight ? 'plain' : (activeWin().pv.lang || 'plain'))" x-text="activeWin().pv.content" x-effect="activeWin() && activeWin().pv && activeWin().pv.content && !activeWin().pv.noHighlight && activeWin().pv.content.length <= 102400 && Prism.highlightElement($el)"></code></pre>
+                        </div>
+                    </div>
+                </template>
+                <!-- HTML file, rendered. Two branches so toggling scripts recreates the
+                     iframe (a live sandbox attribute change would not re-parse srcdoc).
+                     Neither branch grants allow-same-origin: the page is a null origin
+                     that can never reach Cockpit's DOM, cookies, or session. -->
+                <template x-if="activeWin() && activeWin().kind === 'preview' && activeWin().pv.kind === 'html' && activeWin().pv.htmlMode === 'rendered' && !activeWin().pv.scriptsEnabled">
+                    <iframe class="preview-doc" sandbox :srcdoc="activeWin().pv.srcdoc"></iframe>
+                </template>
+                <template x-if="activeWin() && activeWin().kind === 'preview' && activeWin().pv.kind === 'html' && activeWin().pv.htmlMode === 'rendered' && activeWin().pv.scriptsEnabled">
+                    <iframe class="preview-doc" sandbox="allow-scripts" :srcdoc="activeWin().pv.srcdoc"></iframe>
+                </template>
+                <template x-if="activeWin() && activeWin().kind === 'preview' && activeWin().pv.kind === 'image'">
+                    <img :src="activeWin().pv.url" class="preview-img" alt="">
+                </template>
+                <template x-if="activeWin() && activeWin().kind === 'preview' && activeWin().pv.kind === 'pdf'">
+                    <iframe :src="activeWin().pv.url" class="preview-iframe"></iframe>
+                </template>
+                <template x-if="activeWin() && activeWin().kind === 'preview' && activeWin().pv.kind === 'video' && activeWin().pv.mode === 'native'">
+                    <video :src="activeWin().pv.url" controls class="preview-media"></video>
+                </template>
+                <template x-if="activeWin() && activeWin().kind === 'preview' && activeWin().pv.kind === 'video' && activeWin().pv.mode === 'hls'">
+                    <div class="preview-video-wrap">
+                        <!-- activeWin() && guards throughout: a nested reactive expression here
+                             can still fire once after the enclosing x-if unmounts (e.g. right as
+                             the window closes and activeWinId goes null) — observed live, not
+                             hypothetical. -->
+                        <video id="previewVideo" controls class="preview-media" x-show="!(activeWin() && activeWin().pv.reason)"></video>
+                        <!-- Fixed-round-1: ffmpeg/hls.js failures (transcodeState:'error') are
+                             otherwise invisible — badge would hang on "Transcoding" forever with
+                             no error text. -->
+                        <div class="preview-fallback" x-show="activeWin() && activeWin().pv.reason">
+                            <p>This video could not be played.</p>
+                            <p x-text="activeWin() && activeWin().pv.reason"></p>
+                        </div>
+                    </div>
+                </template>
+                <template x-if="activeWin() && activeWin().kind === 'preview' && activeWin().pv.kind === 'video' && activeWin().pv.mode === 'ffmpeg-missing'">
+                    <div class="preview-fallback">
+                        <p><strong>ffmpeg is required</strong> to play this video format (the browser can't decode it directly).</p>
+                        <!-- activeWin() && guards: see note above the transcode badge. -->
+                        <template x-if="activeWin() && activeWin().pv.installCmd">
+                            <div>
+                                <p>Install it on this server:</p>
+                                <pre class="p-2 border rounded"><code x-text="activeWin() && activeWin().pv.installCmd"></code></pre>
+                                <button class="btn btn-sm btn-primary" @click="installFfmpeg(activeWin().id)">Install ffmpeg</button>
+                            </div>
+                        </template>
+                        <template x-if="activeWin() && !activeWin().pv.installCmd">
+                            <p class="text-muted">Couldn't detect your package manager — install <code>ffmpeg</code> using your distro's tools, then reopen.</p>
+                        </template>
+                        <div class="mt-2 small text-muted" x-show="video.installLog" x-text="video.installLog" style="white-space:pre-wrap"></div>
+                    </div>
+                </template>
+                <template x-if="activeWin() && activeWin().kind === 'preview' && activeWin().pv.kind === 'audio'">
+                    <audio :src="activeWin().pv.url" controls class="preview-media"></audio>
+                </template>
+                <template x-if="activeWin() && activeWin().kind === 'preview' && activeWin().pv.kind === 'binary'">
+                    <div class="preview-fallback">
+                        <p>This file cannot be previewed inline.</p>
+                        <p x-text="activeWin().pv.reason"></p>
+                        <button class="btn btn-sm btn-warning" x-show="activeWin().pv.permissionDenied" @click="retryPreviewAsAdmin(activeWin().id)">Retry as administrator</button>
+                    </div>
+                </template>
+                <template x-if="activeWin() && activeWin().kind === 'preview' && ['markdown','docx','sheet'].includes(activeWin().pv.kind)">
+                    <iframe class="preview-doc" sandbox :srcdoc="activeWin().pv.srcdoc"></iframe>
+                </template>
+                <div class="loading-overlay" x-show="activeWin() && activeWin().loading">Loading…</div>
+            </div>
+            <div class="modal-footer" x-show="activeWin() && activeWin().kind === 'editor' && !activeWin().readOnly">
+                <span x-show="activeWin() && activeWin().error" class="text-danger me-auto" x-text="activeWin() && activeWin().error"></span>
+                <span class="text-muted small me-auto" x-show="activeWin() && activeWin().mode === 'wysiwyg' && activeWin().isHtml">⚠ WYSIWYG may reformat complex HTML on save.</span>
+                <button class="btn btn-secondary" @click="closeActiveWindow()">Cancel</button>
+                <button class="btn" :class="(activeWin() && activeWin().needsAdmin) ? 'btn-warning' : 'btn-primary'"
+                        @click="saveEditor()" :disabled="!(activeWin() && activeWin().dirty)"
+                        x-text="(activeWin() && activeWin().needsAdmin) ? 'Save as administrator' : 'Save'"></button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Open-windows taskbar -->
+<div class="explorer-taskbar" :class="{ 'taskbar-floating': hostVisible && hostMaximized }" x-show="windows.length">
+    <template x-for="w in windows" :key="w.id">
+        <div class="taskbar-item" :class="{ active: w.id === activeWinId && hostVisible }" @click="taskbarClick(w.id)" :title="w.path || w.title">
+            <span class="taskbar-ico" x-text="winTaskIcon(w)"></span>
+            <span class="taskbar-label" x-text="w.title + ((w.kind === 'editor' && w.dirty) ? ' ●' : '')"></span>
+            <button type="button" class="taskbar-close" @click.stop="closeWindow(w.id)" title="Close">✕</button>
+        </div>
+    </template>
+</div>
+
+<!-- Permissions modal -->

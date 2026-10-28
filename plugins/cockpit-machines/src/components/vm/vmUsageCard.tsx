@@ -1,0 +1,57 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ *
+ * Copyright (C) 2016 Red Hat, Inc.
+ */
+
+import cockpit from 'cockpit';
+
+import type { VM } from '../../types';
+
+import { Flex, FlexItem } from "@patternfly/react-core/dist/esm/layouts/Flex";
+import { Progress, ProgressVariant } from "@patternfly/react-core/dist/esm/components/Progress";
+
+const _ = cockpit.gettext;
+
+export const VmUsageTab = ({ vm } : { vm: VM }) => {
+    const memTotal = vm.currentMemory ? vm.currentMemory * 1024 : 0;
+    const [memTotalFmt, memTotalUnit] = cockpit.format_bytes(memTotal, { base2: true, separate: true });
+    let usedMem: number;
+    let usedMemFmt: string;
+    if (vm.state != "running") {
+        usedMem = 0;
+        usedMemFmt = "0";
+    } else if (vm.memoryUsed === undefined) {
+        usedMem = 0;
+        usedMemFmt = _("waiting");
+    } else {
+        usedMem = vm.memoryUsed * 1024;
+        usedMemFmt = cockpit.format_bytes(usedMem, memTotalUnit, { base2: true, separate: true })[0];
+    }
+
+    const totalCpus = vm.vcpus && Number(vm.vcpus.count) > 0 ? Number(vm.vcpus.count) : 0;
+    const vmCpuUsage = vm.cpuUsage;
+    const cpuUsage = vmCpuUsage || 0;
+    const totalCpusStr = cockpit.format(cockpit.ngettext("$0 vCPU", "$0 vCPUs", totalCpus), totalCpus);
+
+    return (
+        <Flex direction={{ default: 'column' }}>
+            <FlexItem className="memory-usage-chart">
+                <Progress value={usedMem}
+                    className="pf-m-sm"
+                    min={0} max={memTotal}
+                    variant={usedMem / memTotal > 0.9 ? ProgressVariant.danger : undefined}
+                    title={_("Memory")}
+                    label={cockpit.format("$0 / $1 $2", usedMemFmt, memTotalFmt, memTotalUnit)} />
+            </FlexItem>
+            <FlexItem className="vcpu-usage-chart">
+                <Progress value={cpuUsage}
+                    className="pf-m-sm"
+                    min={0} max={100}
+                    variant={cpuUsage > 90 ? ProgressVariant.danger : undefined}
+                    title={_("CPU")}
+                    label={cockpit.format("$0% of $1", cpuUsage.toFixed(1), totalCpusStr)} />
+            </FlexItem>
+        </Flex>
+    );
+};

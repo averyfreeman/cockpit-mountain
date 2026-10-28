@@ -1,0 +1,213 @@
+<!-- detail.html — download detail as a docked, resizable panel pinned to the
+     bottom (above the minimized-details taskbar), NOT a centered modal. Drag the
+     top edge to resize. Visibility is driven by detail.open (x-show); the panel
+     shows the focused session, while the taskbar lists every open session.
+     Injected into #manifest-partials by boot.js before Alpine starts. -->
+
+<!-- Panel is visible only when it's open AND actually points at a live download,
+     so a stale/empty session can never render an empty panel. -->
+<!-- :style MUST be object syntax, not a string: a string :style overwrites the
+     whole inline style and wipes out the display:none that x-show sets, leaving
+     the panel permanently visible (the "empty panel always showing" bug). -->
+<div id="mfDetail" class="mf-detailpanel" x-cloak x-show="detail.open && detail.gid && downloads[detail.gid]" x-data
+     x-init="detailModalEl = $el" :style="{ height: detailHeight + 'vh' }">
+    <!-- resize grip: drag up/down to change the panel height -->
+    <div class="mf-detail-grip" title="Drag to resize" @mousedown="startDetailResize($event)"></div>
+    <div class="mf-detail-inner d-flex flex-column">
+        <div class="mf-detail-header d-flex align-items-center px-3 py-2">
+            <h5 class="modal-title mb-0 text-truncate me-auto" style="min-width:0;" x-text="detailName()"></h5>
+            <div class="d-flex align-items-center gap-3 ps-3">
+                <button type="button" class="btn btn-sm btn-link p-0 mf-min-btn" title="Minimize to the bar"
+                        aria-label="Minimize" @click="minimizeDetail()">
+                    <svg width="15" height="15" viewBox="0 0 15 15" aria-hidden="true"><rect x="3" y="7" width="9" height="1.6" rx="0.8" fill="currentColor"/></svg>
+                </button>
+                <button type="button" class="btn btn-sm btn-link p-0 mf-min-btn" title="Close"
+                        aria-label="Close" @click="closeDetail()">
+                    <svg width="15" height="15" viewBox="0 0 15 15" aria-hidden="true"><path d="M3 3 L12 12 M12 3 L3 12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+                </button>
+            </div>
+        </div>
+        <div class="mf-detail-body flex-grow-1 px-3 pb-3" style="overflow-y: auto;">
+            <!-- horizontal tab strip -->
+            <ul class="nav nav-tabs">
+                <li class="nav-item">
+                    <button type="button" class="nav-link" :class="detail.tab==='general' ? 'active' : ''"
+                            @click="detailSwitchTab('general')">General</button>
+                </li>
+                <li class="nav-item">
+                    <button type="button" class="nav-link" :class="detail.tab==='files' ? 'active' : ''"
+                            @click="detailSwitchTab('files')">Files</button>
+                </li>
+                <li class="nav-item">
+                    <button type="button" class="nav-link" :class="detail.tab==='peers' ? 'active' : ''"
+                            @click="detailSwitchTab('peers')">Peers</button>
+                </li>
+                <li class="nav-item">
+                    <button type="button" class="nav-link" :class="detail.tab==='trackers' ? 'active' : ''"
+                            @click="detailSwitchTab('trackers')">Trackers</button>
+                </li>
+                <li class="nav-item">
+                    <button type="button" class="nav-link" :class="detail.tab==='options' ? 'active' : ''"
+                            @click="detailSwitchTab('options')">Options</button>
+                </li>
+            </ul>
+
+            <div class="tab-content mt-3 position-relative">
+                <!-- loading overlay while a tab-switch fetch is in flight -->
+                <div class="mf-detail-loading" x-show="detail.loading" x-cloak>
+                    <span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+                    <span class="ms-2 text-body-secondary">Loading…</span>
+                </div>
+                <!-- General -->
+                <div x-show="detail.tab==='general'">
+                    <dl class="row mb-0 small">
+                        <dt class="col-sm-3">Status</dt><dd class="col-sm-9" x-text="detail.data.status"></dd>
+                        <dt class="col-sm-3">Size</dt><dd class="col-sm-9" x-text="ManifestUtil.humanSize(detail.data.totalLength)"></dd>
+                        <dt class="col-sm-3">Progress</dt>
+                        <dd class="col-sm-9">
+                            <div class="progress position-relative" style="height:1.2rem; max-width: 20rem;">
+                                <div class="progress-bar"
+                                     :class="{'bg-danger': detail.data.status==='error', 'bg-success': detail.data.status==='complete'}"
+                                     role="progressbar" :style="'width:' + detailProgress() + '%'"
+                                     :aria-valuenow="detailProgress()" aria-valuemin="0" aria-valuemax="100"></div>
+                                <span class="mf-row-pct position-absolute top-50 start-50 translate-middle small fw-medium"
+                                      x-text="detailProgress() + '%'"></span>
+                            </div>
+                        </dd>
+                        <dt class="col-sm-3">Down / Up</dt>
+                        <dd class="col-sm-9" x-text="ManifestUtil.humanSpeed(detail.data.downloadSpeed) + ' / ' + ManifestUtil.humanSpeed(detail.data.uploadSpeed)"></dd>
+                        <dt class="col-sm-3">ETA</dt><dd class="col-sm-9" x-text="detailEta()"></dd>
+                        <dt class="col-sm-3">Ratio</dt><dd class="col-sm-9" x-text="detailRatio()"></dd>
+                        <dt class="col-sm-3">Save path</dt><dd class="col-sm-9" x-text="detail.data.dir"></dd>
+                        <dt class="col-sm-3">GID</dt><dd class="col-sm-9" x-text="detail.data.gid"></dd>
+                        <template x-if="detail.data.bittorrent && detail.data.bittorrent.info">
+                            <div class="col-12 contents">
+                                <dt class="col-sm-3">Info hash</dt><dd class="col-sm-9" x-text="detail.data.infoHash"></dd>
+                            </div>
+                        </template>
+                        <template x-if="detail.data.errorMessage">
+                            <div class="col-12 contents">
+                                <dt class="col-sm-3 text-danger">Error</dt><dd class="col-sm-9 text-danger" x-text="detail.data.errorMessage"></dd>
+                            </div>
+                        </template>
+                    </dl>
+                </div>
+
+                <!-- Files: editable per-file selection as a checkbox tree -->
+                <div x-show="detail.tab==='files'">
+                    <div class="d-flex align-items-center gap-2 mb-2">
+                        <button type="button" class="btn btn-sm btn-outline-secondary" @click="detailSelectAllFiles(true)">Select all</button>
+                        <button type="button" class="btn btn-sm btn-outline-secondary" @click="detailSelectAllFiles(false)">Select none</button>
+                        <span class="text-body-secondary small ms-auto" x-text="(detail.selectedIndices.size || 0) + ' of ' + (detail.files.length || 0) + ' selected'"></span>
+                    </div>
+                    <div class="mf-filetree border rounded" style="max-height: 22rem; overflow:auto;">
+                        <template x-for="row in detailTreeRows" :key="row.key">
+                            <div class="mf-tree-row d-flex align-items-center gap-2 px-2 py-1">
+                                <template x-for="i in row.depth" :key="i"><span class="mf-tree-guide"></span></template>
+                                <template x-if="row.node.dir">
+                                    <span class="d-flex align-items-center gap-2 flex-grow-1" style="min-width:0;">
+                                        <button type="button" class="btn btn-sm btn-link p-0 mf-tree-caret text-body-secondary"
+                                                @click="detailToggleFolder(row.key)" x-text="row.collapsed ? '▸' : '▾'"></button>
+                                        <input class="form-check-input mt-0 flex-shrink-0" type="checkbox"
+                                               :checked="detailFolderState(row.node)==='all'"
+                                               x-effect="$el.indeterminate = (detailFolderState(row.node)==='some')"
+                                               @change="detailToggleTreeFolder(row.node)">
+                                        <span class="text-truncate fw-medium" :title="row.node.name">📁 <span x-text="row.node.name"></span></span>
+                                    </span>
+                                </template>
+                                <template x-if="!row.node.dir">
+                                    <span class="d-flex align-items-center gap-2 flex-grow-1" style="min-width:0;">
+                                        <span class="mf-tree-spacer"></span>
+                                        <input class="form-check-input mt-0 flex-shrink-0" type="checkbox"
+                                               :checked="detailFileChecked(row.node)" @change="detailToggleTreeFile(row.node)">
+                                        <span class="text-truncate flex-grow-1" :title="row.node.name" x-text="row.node.name"></span>
+                                        <span class="text-body-secondary small flex-shrink-0" x-text="ManifestUtil.humanSize(row.node.length)"></span>
+                                    </span>
+                                </template>
+                            </div>
+                        </template>
+                        <div x-show="!detailTreeRows.length" class="text-body-secondary text-center py-3">No file list yet (a magnet fetches it once metadata arrives).</div>
+                    </div>
+                </div>
+
+                <!-- Peers: fixed-layout (no column shake) + sortable headers -->
+                <div x-show="detail.tab==='peers'">
+                    <table class="table table-sm align-middle mb-0 mf-fixed-table">
+                        <colgroup><col style="width:30%"><col style="width:30%"><col style="width:15%"><col style="width:13%"><col style="width:12%"></colgroup>
+                        <thead><tr>
+                            <th class="mf-sortable" @click="detailSortPeers('ip')">Address<span class="mf-sort-ind" x-text="detailSortInd('peers','ip')"></span></th>
+                            <th class="mf-sortable" @click="detailSortPeers('client')">Client<span class="mf-sort-ind" x-text="detailSortInd('peers','client')"></span></th>
+                            <th class="mf-sortable" @click="detailSortPeers('down')">↓<span class="mf-sort-ind" x-text="detailSortInd('peers','down')"></span></th>
+                            <th class="mf-sortable" @click="detailSortPeers('up')">↑<span class="mf-sort-ind" x-text="detailSortInd('peers','up')"></span></th>
+                            <th class="mf-sortable" @click="detailSortPeers('progress')">Progress<span class="mf-sort-ind" x-text="detailSortInd('peers','progress')"></span></th>
+                        </tr></thead>
+                        <tbody>
+                            <template x-for="p in detailPeersSorted" :key="p.ip + ':' + p.port">
+                                <tr>
+                                    <td :title="p.ip + ':' + p.port" x-text="p.ip + ':' + p.port"></td>
+                                    <td :title="p.client" x-text="p.client + (p.seeder ? ' (seed)' : '')"></td>
+                                    <td x-text="ManifestUtil.humanSpeed(p.downloadSpeed)"></td>
+                                    <td x-text="ManifestUtil.humanSpeed(p.uploadSpeed)"></td>
+                                    <td x-text="p.progress === null ? '—' : p.progress + '%'"></td>
+                                </tr>
+                            </template>
+                            <tr x-show="!detail.peers.length"><td colspan="5" class="text-body-secondary text-center py-3">No peers connected.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Trackers (BT announce tiers + HTTP/FTP servers) -->
+                <div x-show="detail.tab==='trackers'">
+                    <table class="table table-sm align-middle mb-0 mf-fixed-table">
+                        <colgroup><col style="width:12%"><col style="width:72%"><col style="width:16%"></colgroup>
+                        <thead><tr>
+                            <th class="mf-sortable" @click="detailSortTrackers('tier')">Tier<span class="mf-sort-ind" x-text="detailSortInd('trackers','tier')"></span></th>
+                            <th class="mf-sortable" @click="detailSortTrackers('url')">URL<span class="mf-sort-ind" x-text="detailSortInd('trackers','url')"></span></th>
+                            <th class="mf-sortable" @click="detailSortTrackers('speed')">Speed<span class="mf-sort-ind" x-text="detailSortInd('trackers','speed')"></span></th>
+                        </tr></thead>
+                        <tbody>
+                            <template x-for="(t, i) in detailTrackersSorted" :key="i">
+                                <tr>
+                                    <td x-text="t.tier ?? '—'"></td>
+                                    <td :title="t.url" x-text="t.url"></td>
+                                    <td x-text="t.kind==='server' ? ManifestUtil.humanSpeed(t.downloadSpeed) : ''"></td>
+                                </tr>
+                            </template>
+                            <tr x-show="!detail.trackers.length"><td colspan="3" class="text-body-secondary text-center py-3">No trackers/servers.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Options: change THIS download's aria2 options live -->
+                <div x-show="detail.tab==='options'">
+                    <p class="text-body-secondary small mb-2">Change options for this download only (applied live). Leave a field blank to keep its current value.</p>
+                    <div class="row g-2" style="max-width: 40rem;">
+                        <div class="col-6 col-md-4">
+                            <label class="form-label mb-1 small">Connections/server</label>
+                            <input type="number" min="1" max="16" class="form-control form-control-sm" placeholder="unchanged" x-model="detail.opts.maxConn">
+                        </div>
+                        <div class="col-6 col-md-4">
+                            <label class="form-label mb-1 small">Split</label>
+                            <input type="number" min="1" class="form-control form-control-sm" placeholder="unchanged" x-model="detail.opts.split">
+                        </div>
+                        <div class="col-6 col-md-4">
+                            <label class="form-label mb-1 small">Max peers (torrent)</label>
+                            <input type="number" min="1" class="form-control form-control-sm" placeholder="unchanged" x-model="detail.opts.maxPeers">
+                        </div>
+                        <div class="col-6 col-md-4">
+                            <label class="form-label mb-1 small">Max ↓ (KiB/s)</label>
+                            <input type="number" min="0" class="form-control form-control-sm" placeholder="0 = unlimited" x-model="detail.opts.dlLimit">
+                        </div>
+                        <div class="col-6 col-md-4">
+                            <label class="form-label mb-1 small">Max ↑ (KiB/s)</label>
+                            <input type="number" min="0" class="form-control form-control-sm" placeholder="0 = unlimited" x-model="detail.opts.ulLimit">
+                        </div>
+                    </div>
+                    <button type="button" class="btn btn-sm btn-primary mt-3" @click="detailApplyOptions()">Apply to this download</button>
+                </div>
+            </div>
+
+            <div class="alert alert-danger py-1 px-2 mt-2" x-show="detail.error" x-text="detail.error"></div>
+        </div>
+    </div>
+</div>

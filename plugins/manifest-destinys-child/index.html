@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Manifest</title>
+    <link rel="stylesheet" href="css/bootstrap.min.css">
+    <link rel="stylesheet" href="css/manifest.css">
+    <link rel="stylesheet" href="css/themes.css">
+    <script src="../base1/cockpit.js"></script>
+</head>
+<body x-data="manifest" x-init="init()" @keydown.window="onKey && onKey($event)" @click.window="closeContextMenu && closeContextMenu()">
+
+<!-- TOP BAR -->
+<header class="mf-topbar d-flex align-items-center gap-2 px-3 py-2">
+    <span class="mf-title fw-bold">Manifest</span>
+    <!-- Version badge: grey "vX.Y.Z" normally; green "↑ Manifest vX.Y.Z" + clickable
+         (opens the self-update confirm/progress modal, #mfUpdateModal in
+         html/modals/update.html) once updateState.available flips true.
+         Click otherwise triggers a manual update check. updateState/
+         checkForUpdate/openUpdateModal come from features/update.js. -->
+    <button type="button" class="mf-version badge border-0"
+            :class="(updateState && updateState.available) ? 'text-bg-success' : 'text-bg-secondary'"
+            x-show="pluginVersion"
+            :disabled="updateState && updateState.checking"
+            :title="(updateState && updateState.error) ? ('Update check failed: ' + updateState.error) : ((updateState && updateState.available) ? 'Update available — click to install' : 'Click to check for updates')"
+            @click="(updateState && updateState.available) ? (openUpdateModal && openUpdateModal()) : (checkForUpdate && checkForUpdate(true))"
+            x-text="(updateState && updateState.checking) ? 'Checking…' : ((updateState && updateState.available) ? ('↑ Manifest v' + updateState.latestVersion) : ('v' + pluginVersion))"></button>
+    <div class="ms-auto d-flex align-items-center gap-2">
+        <button class="btn btn-sm btn-primary" x-show="svc.active" @click="openQuickAdd && openQuickAdd()">+ Quick Add</button>
+        <!-- Paste-to-Queue only stages items (queue.json) — it never talks to
+             aria2 — so it stays usable even before Setup / while aria2 is
+             stopped, unlike Quick Add which starts downloads immediately. -->
+        <button class="btn btn-sm btn-outline-secondary" @click="openPaste && openPaste()">Paste to Queue</button>
+        <button class="btn btn-sm btn-link" @click="openSettings && openSettings()" title="Settings">⚙</button>
+    </div>
+</header>
+
+<!-- SERVICE BANNER -->
+<div class="mf-banner d-flex align-items-center gap-2 px-3 py-2" :class="svc.active ? 'mf-banner-up' : 'mf-banner-down'">
+    <span class="mf-dot" :class="svc.active ? 'up' : 'down'"></span>
+    <template x-if="!svc.setup">
+        <div class="d-flex align-items-center gap-2">
+            <span>aria2 is not set up yet.</span>
+            <button class="btn btn-sm btn-success" :disabled="svc.busy" @click="runSetup()"
+                    x-text="svc.busy ? 'Setting up…' : 'Set up aria2 (turnkey)'"></button>
+        </div>
+    </template>
+    <template x-if="svc.setup">
+        <div class="d-flex align-items-center gap-2">
+            <span x-text="svc.active ? 'aria2 running' : 'aria2 stopped'"></span>
+            <button class="btn btn-sm btn-outline-success" x-show="!svc.active" @click="startService()">Start</button>
+            <button class="btn btn-sm btn-outline-secondary" x-show="svc.active" @click="stopService()">Stop</button>
+        </div>
+    </template>
+    <div class="mf-setup-log-wrap ms-3 flex-grow-1 d-flex align-items-start gap-2" x-show="svc.log">
+        <pre class="mf-setup-log flex-grow-1 mb-0" x-text="svc.log"></pre>
+        <button type="button" class="btn-close flex-shrink-0 mt-1" aria-label="Dismiss log"
+                title="Dismiss log" @click="svc.log = ''"></button>
+    </div>
+</div>
+
+<!-- FILTER PILLS (horizontal row — NOT a sidebar). Shown even before aria2 is
+     set up / while it's stopped so the Queue pill (staging only, no aria2
+     needed) stays reachable. -->
+<nav class="mf-pills d-flex flex-wrap align-items-center gap-2 px-3 py-2">
+    <template x-for="p in filterPills" :key="p.key">
+        <button class="btn btn-sm" :class="activeFilter===p.key ? 'btn-primary' : 'btn-outline-secondary'"
+                @click="activeFilter=p.key" x-text="p.label + ' (' + (counts[p.key]||0) + ')'"></button>
+    </template>
+    <!-- global one-click actions -->
+    <div class="ms-auto d-flex gap-2" x-show="svc.active && activeFilter !== 'queue'">
+        <button class="btn btn-sm btn-outline-secondary" title="Pause all downloads" @click="pauseAll()">⏸ Pause all</button>
+        <button class="btn btn-sm btn-outline-secondary" title="Resume all downloads" @click="resumeAll()">▶ Resume all</button>
+        <button class="btn btn-sm btn-outline-secondary" title="Clear finished/errored entries (files kept)" @click="purgeCompleted()">🧹 Clear finished</button>
+    </div>
+</nav>
+
+<!-- BULK-ACTION BAR: appears when one or more rows are checkbox-selected. The
+     same operations aria2 supports per-row are applied across the selection. -->
+<div class="mf-bulkbar d-flex align-items-center flex-wrap gap-2 px-3 py-2" x-cloak
+     x-show="svc.active && activeFilter !== 'queue' && selectedRows.length > 0">
+    <span class="fw-medium" x-text="selectedRows.length + ' selected'"></span>
+    <div class="vr mx-1"></div>
+    <button class="btn btn-sm btn-outline-primary" x-show="selectedRows.length === 1"
+            @click="openDetail(selectedRows[0])">Details</button>
+    <button class="btn btn-sm btn-outline-secondary" @click="bulkResume()">Resume</button>
+    <button class="btn btn-sm btn-outline-secondary" @click="bulkPause()">Pause</button>
+    <button class="btn btn-sm btn-outline-secondary" @click="bulkRetry()">Retry</button>
+    <button class="btn btn-sm btn-outline-danger" @click="bulkRemove()">Remove</button>
+    <button class="btn btn-sm btn-outline-danger" @click="bulkRemoveAndDelete()">Remove &amp; delete files</button>
+    <button class="btn btn-sm btn-link ms-auto text-decoration-none" @click="clearSelection()">Clear</button>
+</div>
+
+<!-- QUEUE VIEW (staging queue — its own filter pill). Works even with aria2
+     offline: staging is pure local persistence (queue.json), no RPC. -->
+<section class="mf-queue px-3" x-show="activeFilter === 'queue'">
+    <div class="d-flex align-items-center gap-2 py-2">
+        <button class="btn btn-sm btn-primary" :disabled="!svc.active || !queue.items.length" @click="startAll()">Start all</button>
+        <button class="btn btn-sm btn-outline-danger" :disabled="!queue.items.length" @click="clearQueue()">Clear</button>
+        <span class="text-body-secondary small ms-auto" x-text="queue.items.length + ' staged'"></span>
+    </div>
+    <div class="list-group mf-queue-list">
+        <template x-for="it in queue.items" :key="it.id">
+            <div class="list-group-item d-flex align-items-center gap-2">
+                <span x-text="qIcon(it.type)"></span>
+                <span class="text-truncate flex-grow-1" :title="it.raw" x-text="it.raw"></span>
+                <span class="badge text-bg-secondary" x-text="it.status || 'staged'"></span>
+                <button class="btn btn-sm btn-outline-primary" :disabled="!svc.active" title="aria2 must be running to start"
+                        @click="startItem(it)">Start</button>
+                <button class="btn btn-sm btn-outline-danger" @click="removeItem(it)">Remove</button>
+            </div>
+        </template>
+        <div class="list-group-item text-body-secondary text-center py-4" x-show="!queue.items.length">
+            Queue is empty. Use Paste to Queue to stage magnets, URLs, metalinks, or .torrent files.
+        </div>
+    </div>
+</section>
+
+<!-- UNIFIED TABLE (one row per download) -->
+<main class="mf-main px-3" x-show="svc.active && activeFilter !== 'queue'">
+    <table class="table table-sm mf-table align-middle">
+        <colgroup>
+            <col :style="'width:' + colWidths[0] + '%'"><col :style="'width:' + colWidths[1] + '%'">
+            <col :style="'width:' + colWidths[2] + '%'"><col :style="'width:' + colWidths[3] + '%'">
+            <col :style="'width:' + colWidths[4] + '%'"><col :style="'width:' + colWidths[5] + '%'">
+            <col :style="'width:' + colWidths[6] + '%'"><col :style="'width:' + colWidths[7] + '%'">
+            <col :style="'width:' + colWidths[8] + '%'"><col :style="'width:' + colWidths[9] + '%'">
+        </colgroup>
+        <thead><tr>
+            <th class="mf-th-check">
+                <input type="checkbox" class="form-check-input mf-check" title="Select all"
+                       :checked="allVisibleSelected"
+                       x-effect="$el.indeterminate = anyVisibleSelected && !allVisibleSelected"
+                       @click="toggleSelectAll()">
+                <span class="mf-col-grip" title="Drag to resize" @mousedown="startColResize($event, 0)"></span>
+            </th>
+            <th><span class="mf-col-grip" title="Drag to resize" @mousedown="startColResize($event, 1)"></span></th>
+            <th class="mf-sortable" @click="sortBy('name')">Name<span class="mf-sort-ind" x-text="sortInd('name')"></span><span class="mf-col-grip" title="Drag to resize" @mousedown="startColResize($event, 2)"></span></th>
+            <th class="mf-sortable" @click="sortBy('size')">Size<span class="mf-sort-ind" x-text="sortInd('size')"></span><span class="mf-col-grip" title="Drag to resize" @mousedown="startColResize($event, 3)"></span></th>
+            <th class="mf-sortable" @click="sortBy('progress')">Progress<span class="mf-sort-ind" x-text="sortInd('progress')"></span><span class="mf-col-grip" title="Drag to resize" @mousedown="startColResize($event, 4)"></span></th>
+            <th class="mf-sortable" @click="sortBy('down')">↓<span class="mf-sort-ind" x-text="sortInd('down')"></span><span class="mf-col-grip" title="Drag to resize" @mousedown="startColResize($event, 5)"></span></th>
+            <th class="mf-sortable" @click="sortBy('up')">↑<span class="mf-sort-ind" x-text="sortInd('up')"></span><span class="mf-col-grip" title="Drag to resize" @mousedown="startColResize($event, 6)"></span></th>
+            <th class="mf-sortable" @click="sortBy('eta')">ETA<span class="mf-sort-ind" x-text="sortInd('eta')"></span><span class="mf-col-grip" title="Drag to resize" @mousedown="startColResize($event, 7)"></span></th>
+            <th class="mf-sortable" @click="sortBy('status')">Status<span class="mf-sort-ind" x-text="sortInd('status')"></span><span class="mf-col-grip" title="Drag to resize" @mousedown="startColResize($event, 8)"></span></th>
+            <th></th>
+        </tr></thead>
+        <tbody>
+            <template x-for="d in visibleDownloads" :key="d.gid || d.key">
+                <tr class="mf-row" :class="{'mf-row-selected': selection && selection.has(d.gid)}"
+                    @click="selectRow && selectRow($event, d)"
+                    @contextmenu.prevent="openRowMenu && openRowMenu($event, d)">
+                    <td class="mf-row-check" @click.stop>
+                        <input type="checkbox" class="form-check-input mf-check"
+                               :checked="selection.has(d.gid)" @click.stop="toggleSelect(d)">
+                    </td>
+                    <td class="mf-row-type" x-text="rowType(d)"></td>
+                    <td class="mf-row-name" :title="rowName(d)" x-text="rowName(d)"></td>
+                    <td x-text="ManifestUtil.humanSize(d.totalLength)"></td>
+                    <td class="mf-row-progress">
+                        <div class="progress position-relative" style="height:1.2rem;">
+                            <div class="progress-bar"
+                                 :class="{'bg-danger': d.status==='error', 'bg-success': d.status==='complete'}"
+                                 role="progressbar" :style="'width:' + rowProgress(d) + '%'"
+                                 :aria-valuenow="rowProgress(d)" aria-valuemin="0" aria-valuemax="100"></div>
+                            <!-- percent centered ON the bar (visible at any fill) -->
+                            <span class="mf-row-pct position-absolute top-50 start-50 translate-middle small fw-medium"
+                                  x-text="rowProgress(d) + '%'"></span>
+                        </div>
+                    </td>
+                    <td x-text="ManifestUtil.humanSpeed(d.downloadSpeed)"></td>
+                    <td x-text="ManifestUtil.humanSpeed(d.uploadSpeed)"></td>
+                    <td x-text="rowEta(d)"></td>
+                    <td>
+                        <span class="badge"
+                              :class="{'text-bg-primary': d.status==='active', 'text-bg-secondary': d.status==='waiting' || d.status==='paused', 'text-bg-success': d.status==='complete', 'text-bg-danger': d.status==='error'}"
+                              x-text="d.status"></span>
+                    </td>
+                    <td class="text-end">
+                        <button class="btn btn-sm btn-link" title="Details" x-show="d.bittorrent"
+                                @click.stop="openDetail && openDetail(d)">▾</button>
+                        <button class="btn btn-sm btn-link" title="Actions"
+                                @click="openRowMenu && openRowMenu($event, d)">⋯</button>
+                    </td>
+                </tr>
+            </template>
+            <tr x-show="!visibleDownloads.length"><td colspan="10" class="text-body-secondary py-4 text-center">No downloads. Use Quick Add or Paste to Queue.</td></tr>
+        </tbody>
+    </table>
+</main>
+
+<!-- AGGREGATE STATUS BAR (bottom) -->
+<footer class="mf-statusbar d-flex align-items-center gap-3 px-3 py-2" x-show="svc.active">
+    <span>↓ <span x-text="agg.down"></span></span>
+    <span>↑ <span x-text="agg.up"></span></span>
+    <span x-text="agg.active + ' active'"></span>
+    <span class="ms-auto" x-show="agg.freeSpace" x-text="'Free: ' + agg.freeSpace"></span>
+</footer>
+
+<!-- CONTEXT MENU (popup at cursor position — NOT a sidebar/rail) -->
+<div class="mf-ctxmenu dropdown-menu shadow-sm" :class="{show: ctxMenu.open}"
+     :style="'position:fixed; left:' + ctxMenu.x + 'px; top:' + ctxMenu.y + 'px;'"
+     x-show="ctxMenu.open" x-cloak @click.stop>
+    <button class="dropdown-item" @click="openDetail && openDetail(ctxMenu.target)">Details</button>
+    <div class="dropdown-divider"></div>
+    <button class="dropdown-item" @click="pauseDl(ctxMenu.target)">Pause</button>
+    <button class="dropdown-item" @click="resumeDl(ctxMenu.target)">Resume</button>
+    <button class="dropdown-item" @click="retryDl(ctxMenu.target)">Retry</button>
+    <div class="dropdown-divider"></div>
+    <button class="dropdown-item" @click="copyUri(ctxMenu.target)">Copy URI</button>
+    <button class="dropdown-item" @click="copyMagnet(ctxMenu.target)">Copy magnet link</button>
+    <button class="dropdown-item" x-show="deepLinks.files" @click="openInFiles(ctxMenu.target)">Open folder in Files</button>
+    <button class="dropdown-item" x-show="deepLinks.explorer" @click="openInExplorer(ctxMenu.target)">Open folder in Explorer</button>
+    <div class="dropdown-divider"></div>
+    <button class="dropdown-item text-danger" @click="removeDl(ctxMenu.target)">Remove</button>
+    <button class="dropdown-item text-danger" @click="removeAndDelete(ctxMenu.target)">Remove &amp; delete files</button>
+</div>
+
+<!-- MINIMIZED-DETAILS TASKBAR: fixed bottom bar of minimized detail dialogs.
+     Floats above the modal layer so it stays clickable; click a chip to restore
+     the dialog, × to dismiss it. -->
+<div class="mf-taskbar" x-cloak x-show="svc.active">
+    <span class="mf-taskbar-empty" x-show="!minimizedDetails.length">No open details</span>
+    <template x-for="m in minimizedDetails" :key="m.gid">
+        <div class="mf-taskbar-item" :class="{ active: detail.open && detail.gid === m.gid }"
+             @click="restoreDetail(m.gid)" :title="m.name">
+            <span class="mf-taskbar-ico">🗔</span>
+            <span class="mf-taskbar-label" x-text="m.name"></span>
+            <button type="button" class="mf-taskbar-close" title="Close" @click.stop="closeMinimized(m.gid)">✕</button>
+        </div>
+    </template>
+</div>
+
+<!-- toasts -->
+<div class="mf-toasts">
+    <template x-for="t in toasts" :key="t.id">
+        <div class="toast show mf-toast" :class="'text-bg-'+(t.kind==='danger'?'danger':t.kind==='success'?'success':'secondary')">
+            <div class="toast-body" x-text="t.msg"></div>
+        </div>
+    </template>
+</div>
+
+<div id="manifest-partials"></div>
+<script src="js/bootstrap.bundle.min.js"></script>
+<!-- module scripts, dependency order: pure → fs → core → features → app → boot -->
+<script src="js/util.js"></script>
+<script src="js/core/detect.js"></script>
+<script src="js/core/queuemodel.js"></script>
+<script src="js/core/filetree.js"></script>
+<script src="js/core/peerid.js"></script>
+<script src="js/core/rpcenvelope.js"></script>
+<script src="js/core/aria2conf.js"></script>
+<script src="js/core/portpick.js"></script>
+<script src="js/core/installcmd.js"></script>
+<script src="js/core/columns.js"></script>
+<script src="js/core/selection.js"></script>
+<script src="js/core/sorting.js"></script>
+<script src="js/core/optdiff.js"></script>
+<script src="js/core/notify.js"></script>
+<script src="js/core/defaults.js"></script>
+<script src="js/js-yaml.min.js"></script>
+<script src="js/fs.js"></script>
+<script src="js/core/rpc.js"></script>
+<script src="js/core/systemctl.js"></script>
+<script src="js/core/service.js"></script>
+<script src="js/core/destlist.js"></script>
+<script src="js/core/themes.js"></script>
+<script src="js/core/settings.js"></script>
+<script src="js/core/fspicker.js"></script>
+<script src="js/features/serviceui.js"></script>
+<script src="js/features/downloads.js"></script>
+<script src="js/features/quickadd.js"></script>
+<script src="js/features/actions.js"></script>
+<script src="js/features/queue.js"></script>
+<script src="js/features/configure.js"></script>
+<script src="js/features/detail.js"></script>
+<script src="js/features/update.js"></script>
+<script src="js/features/settings-ui.js"></script>
+<script src="js/features/columns.js"></script>
+<script src="js/core/modalstack.js"></script>
+<script src="js/app.js"></script>
+<script src="js/boot.js"></script>
+</body>
+</html>

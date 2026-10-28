@@ -1,0 +1,189 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ *
+ * Copyright (C) 2018 Red Hat, Inc.
+ */
+import React from 'react';
+
+import type { VM, StoragePool } from '../../types';
+
+import { Button } from "@patternfly/react-core/dist/esm/components/Button";
+import { Progress } from "@patternfly/react-core/dist/esm/components/Progress";
+import { Tooltip } from "@patternfly/react-core/dist/esm/components/Tooltip";
+
+import { ListingPanel } from 'cockpit-components-listing-panel.jsx';
+import { KebabDropdown } from "cockpit-components-dropdown";
+import {
+    convertToUnit,
+    rephraseUI,
+    storagePoolId,
+    units
+} from '../../helpers.js';
+import { StateIcon } from '../common/stateIcon.jsx';
+import { StoragePoolOverviewTab } from './storagePoolOverviewTab.jsx';
+import { StoragePoolVolumesTab } from './storagePoolVolumesTab.jsx';
+import { StoragePoolDeleteAction } from './storagePoolDelete.jsx';
+import { storagePoolActivate, storagePoolDeactivate } from '../../libvirtApi/storagePool.js';
+import { appState } from '../../state';
+
+import cockpit from 'cockpit';
+
+const _ = cockpit.gettext;
+
+export const getStoragePoolRow = ({ storagePool, vms } : { storagePool: StoragePool, vms: VM[] }) => {
+    const idPrefix = `${storagePoolId(storagePool.name, storagePool.connectionName)}`;
+    const name = (
+        <span id={`${idPrefix}-name`}>
+            { storagePool.name }
+        </span>
+    );
+    const allocation = parseFloat(convertToUnit(storagePool.allocation, units.B, units.GiB).toFixed(2));
+    const capacity = parseFloat(convertToUnit(storagePool.capacity, units.B, units.GiB).toFixed(2));
+    const sizeLabel = String(cockpit.format("$0 / $1 GiB", allocation, capacity));
+    const size = (
+        <Progress value={Number(storagePool.allocation)}
+                  min={0}
+                  max={Number(storagePool.capacity)}
+                  label={sizeLabel}
+                  valueText={sizeLabel} />
+    );
+
+    const state = (
+        <StateIcon
+            state={storagePool.active ? _("active") : _("inactive") }
+            valueId={`${idPrefix}-state`}
+        />
+    );
+
+    const tabRenderers = [
+        {
+            name: _("Overview"),
+            renderer: StoragePoolOverviewTab,
+            data: { storagePool },
+            id: `${idPrefix}-overview`
+        },
+        {
+            name: _("Storage volumes"),
+            renderer: StoragePoolVolumesTab,
+            data: { storagePool, vms },
+            id: `${idPrefix}-storage-volumes`
+        },
+    ];
+
+    return {
+        columns: [
+            { title: name, header: true },
+            { title: size },
+            { title: rephraseUI('connections', storagePool.connectionName) },
+            { title: state },
+            { title: <StoragePoolActions storagePool={storagePool} vms={vms} /> },
+        ],
+        props: { key: storagePool.uuid, 'data-row-id': idPrefix },
+        expandedContent: <ListingPanel tabRenderers={tabRenderers} />
+    };
+};
+
+interface StoragePoolActionsProps {
+    storagePool: StoragePool,
+    vms: VM[],
+}
+
+interface StoragePoolActionsState {
+    operationInProgress: boolean;
+}
+
+class StoragePoolActions extends React.Component<StoragePoolActionsProps, StoragePoolActionsState> {
+    constructor(props: StoragePoolActionsProps) {
+        super(props);
+        this.state = {
+            operationInProgress: false,
+        };
+        this.onActivate = this.onActivate.bind(this);
+        this.onDeactivate = this.onDeactivate.bind(this);
+    }
+
+    async onActivate() {
+        const storagePool = this.props.storagePool;
+
+        this.setState({ operationInProgress: true });
+        try {
+            await storagePoolActivate({ connectionName: storagePool.connectionName, objPath: storagePool.id });
+        } catch (exc) {
+            appState.addNotification({
+                text: cockpit.format(_("Storage pool $0 failed to get activated"), storagePool.name),
+                detail: String(exc),
+                resourceId: storagePool.id,
+            });
+        }
+        this.setState({ operationInProgress: false });
+    }
+
+    async onDeactivate() {
+        const storagePool = this.props.storagePool;
+
+        this.setState({ operationInProgress: true });
+        try {
+            await storagePoolDeactivate({ connectionName: storagePool.connectionName, objPath: storagePool.id });
+        } catch (exc) {
+            appState.addNotification({
+                text: cockpit.format(_("Storage pool $0 failed to get deactivated"), storagePool.name),
+                detail: String(exc),
+                resourceId: storagePool.id,
+            });
+        }
+        this.setState({ operationInProgress: false });
+    }
+
+    render() {
+        const { storagePool, vms } = this.props;
+        const id = storagePoolId(storagePool.name, storagePool.connectionName);
+        let deactivateButton = (
+            <Button id={`deactivate-${id}`}
+                variant='secondary'
+                isLoading={this.state.operationInProgress}
+                isDisabled={this.state.operationInProgress}
+                onClick={this.onDeactivate}>
+                {_("Deactivate")}
+            </Button>
+        );
+        let activateButton = (
+            <Button id={`activate-${id}`}
+                variant='secondary'
+                isLoading={this.state.operationInProgress}
+                isDisabled={this.state.operationInProgress}
+                onClick={this.onActivate}>
+                {_("Activate")}
+            </Button>
+        );
+        if (this.state.operationInProgress) {
+            deactivateButton = (
+                <Tooltip id="tip-in-progress" content={_("Operation is in progress")}>
+                    <span>
+                        {deactivateButton}
+                    </span>
+                </Tooltip>
+            );
+            activateButton = (
+                <Tooltip id="tip-in-progress" content={_("Operation is in progress")}>
+                    <span>
+                        {activateButton}
+                    </span>
+                </Tooltip>
+            );
+        }
+
+        const dropdownItems = [
+            <StoragePoolDeleteAction key="storage-pool-delete-action"
+                                     storagePool={storagePool}
+                                     vms={vms} />
+        ];
+
+        return (
+            <div className="btn-group">
+                { storagePool.active && deactivateButton }
+                { !storagePool.active && activateButton }
+                <KebabDropdown toggleButtonId={`${id}-action-kebab`} position='right' dropdownItems={dropdownItems} />
+            </div>
+        );
+    }
+}

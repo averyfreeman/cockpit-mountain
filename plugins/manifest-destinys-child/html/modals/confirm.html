@@ -1,0 +1,112 @@
+<!-- confirm.html — generic confirm dialog + server-side folder-picker modal.
+     Injected into #manifest-partials by boot.js BEFORE Alpine starts, so
+     these are live x-data bindings on the `manifest` component.
+
+     Visibility is driven through the Bootstrap Modal JS API
+     (bootstrap.Modal.getOrCreateInstance(el).show()/.hide()), NOT x-show —
+     mirroring the reference /explorer plugin (js/core/dialogs.js). The
+     vendored css/bootstrap.min.css sets `.modal{display:none}` unconditionally;
+     only bootstrap.Modal's own inline style ever overrides it, and Alpine's
+     x-show 'show' path merely removes an inline style rather than forcing
+     display:block, so x-show alone can never make a `.modal` visible here. -->
+
+<!-- ===== Generic confirm dialog ===== -->
+<div id="mfConfirmModal" class="modal fade" tabindex="-1" x-data
+     x-init="confirmModalEl = $el; $el.addEventListener('hidden.bs.modal', () => {
+         confirm.open = false;
+         const r = confirm.resolve;
+         confirm.resolve = null;
+         if (r) r(confirm.result !== undefined ? confirm.result : false);
+     })">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" x-text="confirm.title"></h5>
+                <button type="button" class="btn-close" @click="_confirmCancel()"></button>
+            </div>
+            <div class="modal-body">
+                <p class="mb-0" x-text="confirm.message"></p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" @click="_confirmCancel()">Cancel</button>
+                <button type="button" class="btn btn-danger" @click="_confirmOk()">OK</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ===== Server-side folder picker (no sidebar: breadcrumb + single list) ===== -->
+<div id="mfFolderPicker" class="modal fade" tabindex="-1" x-data data-bs-backdrop="static" data-bs-keyboard="false"
+     x-init="fsPickerEl = $el; $el.addEventListener('hidden.bs.modal', () => {
+         fsPicker.open = false;
+         const r = fsPicker.resolve;
+         fsPicker.resolve = null;
+         if (r) r(null);
+     })">
+    <div class="modal-dialog modal-dialog-centered modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Choose a folder</h5>
+                <button type="button" class="btn-close" @click="_fpCancel()"></button>
+            </div>
+            <div class="modal-body">
+                <!-- breadcrumb -->
+                <nav aria-label="breadcrumb">
+                    <ol class="breadcrumb flex-wrap">
+                        <template x-for="(seg, idx) in _fpBreadcrumb()" :key="idx">
+                            <li class="breadcrumb-item">
+                                <a href="#" @click.prevent="_fpGoto(idx)" x-text="seg.label"></a>
+                            </li>
+                        </template>
+                    </ol>
+                </nav>
+
+                <!-- editable path: type/paste an absolute path and jump there -->
+                <div class="input-group input-group-sm mb-2">
+                    <span class="input-group-text">Path</span>
+                    <input type="text" class="form-control" placeholder="/absolute/path" spellcheck="false"
+                           x-model="fsPicker.pathInput" @keydown.enter.prevent="_fpGoPath()">
+                    <button type="button" class="btn btn-outline-secondary" @click="_fpGoPath()">Go</button>
+                </div>
+
+                <!-- inline error -->
+                <div class="alert alert-danger py-1 px-2 mb-2" x-show="fsPicker.error" x-text="fsPicker.error"></div>
+
+                <!-- search/filter within the current folder -->
+                <input type="search" class="form-control form-control-sm mb-2" placeholder="Search this folder…"
+                       x-model="fsPicker.filter" x-show="fsPicker.entries.length">
+
+                <!-- single folder list, no sidebar -->
+                <div class="list-group mf-fp-list" style="max-height: 320px; overflow-y: auto;">
+                    <template x-for="name in _fpFilteredEntries()" :key="name">
+                        <button type="button" class="list-group-item list-group-item-action"
+                                @dblclick="_fpEnter(name)"
+                                @click="fsPicker.selected = name">
+                            <span x-text="name"></span>
+                        </button>
+                    </template>
+                    <div class="list-group-item text-body-secondary" x-show="!fsPicker.entries.length && !fsPicker.error">
+                        (no subfolders)
+                    </div>
+                    <div class="list-group-item text-body-secondary"
+                         x-show="fsPicker.entries.length && !_fpFilteredEntries().length"
+                         x-text="'No folders match “' + fsPicker.filter + '”'"></div>
+                </div>
+
+                <!-- New folder -->
+                <div class="input-group mt-2">
+                    <input type="text" class="form-control" placeholder="New folder name"
+                           x-model="fsPicker.newFolderName" @keydown.enter.prevent="_fpNewFolder(fsPicker.newFolderName)">
+                    <button type="button" class="btn btn-outline-secondary" @click="_fpNewFolder(fsPicker.newFolderName)">
+                        New folder
+                    </button>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <span class="me-auto text-body-secondary small" x-text="fsPicker.cwd"></span>
+                <button type="button" class="btn btn-secondary" @click="_fpCancel()">Cancel</button>
+                <button type="button" class="btn btn-primary" @click="_fpChoose()">Choose</button>
+            </div>
+        </div>
+    </div>
+</div>

@@ -1,0 +1,1646 @@
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
+# Run this with --help to see available options for tracing and debugging
+# See https://github.com/cockpit-project/cockpit/blob/main/test/common/testlib.py
+# "class Browser" and "class MachineCase" for the available API.
+
+import re
+import time
+
+import packagelib
+import testlib
+from lib.constants import TEST_OS_DEFAULT
+
+
+def getMaximumSpike(test, g_type, saturation, hour, minute):
+    # only for minutes with events, which have SVG graphs
+    sel = f"#metrics-hour-{hour} div.metrics-minute[data-minute='{minute}'] div.metrics-data-{g_type} div"
+    if saturation:
+        sel += ":nth-child(2)"
+    else:
+        sel += ":first-child"
+
+    points = test.browser.attr(sel, "points")
+    xs = [float(x.split(" ")[0].rstrip("%")) for x in points.split(", ") if x != ""]
+    test.assertNotIn("NaN", xs)
+
+    return max(xs) / 100
+
+
+def getCompressedMinuteValue(test, g_type, saturation, hour, minute):
+    # only for minutes without events, which only have bars
+
+    polygon_class = ".polygon-sat" if saturation else ".polygon-use"
+    sel = f"#metrics-hour-{hour} div.metrics-minute[data-minute='{minute}'] div.metrics-data-{g_type} .compressed{polygon_class}"
+    m = re.search(r"--%s:\s*([0-9.]+);" % ("saturation" if saturation else "utilization"), test.browser.attr(sel, "style"))
+    test.assertIsNotNone(m)
+    return float(m.group(1))
+
+
+def topServiceValue(test, aria_label, col_label, row):
+    sel = "table[aria-label='%s'] tbody tr:nth-of-type(%d) td[data-label='%s']" % (aria_label, row, col_label)
+    # split off unit, like "12 MB"
+    return float(test.browser.text(sel).split(' ')[0])
+
+
+def prepareArchive(machine, name, time, hostname="localhost.localdomain"):
+    machine.upload([f"verify/files/metrics-archives/{name}"], "/tmp/")
+
+    command = f"tar -C / -xzvf /tmp/{name}"
+    if name.endswith("zip"):
+        command = f"unzip /tmp/{name} -d /"
+
+    machine.execute(f"""ntp=`timedatectl show --property NTP --value`
+                       if [ $ntp == "yes" ]; then
+                           timedatectl set-ntp off
+                       fi
+                       systemctl stop pmlogger
+                       # don't let NM set transient host names from DHCP
+                       systemctl stop NetworkManager
+                       hostnamectl set-hostname {hostname}
+                       rm -rf /var/log/pcp/pmlogger/*
+                       {command}
+                       # set-ntp off is asynchronous; wait until timesyncd stops before the time can be set
+                       while systemctl is-active systemd-timesyncd; do sleep 1; done
+                       date --set='@{time}'""")
+
+
+def redisService(image):
+    if image.startswith(("debian", "ubuntu")):
+        return "redis-server"
+    if image.startswith(("fedora", "centos-10", "rhel-10", "arch")):
+        return "valkey"
+    return "redis"
+
+
+def applySettings(browser, dialog_selector):
+    browser.click(f"{dialog_selector} button.pf-m-primary")
+    with browser.wait_timeout(60):
+        browser.wait_not_present(dialog_selector)
+
+
+@testlib.skipOstree("no PCP support")
+class TestHistoryMetrics(testlib.MachineCase):
+    def setUp(self):
+        super().setUp()
+        # start with a clean slate and avoid running into restart limits
+        self.machine.execute("systemctl stop pmlogger pmproxy; systemctl reset-failed pmlogger pmproxy 2>/dev/null || true")
+        self.pcp_dialog_selector = "#pcp-settings-modal"
+
+    def waitStream(self, current_max):
+        # should only have at most <current_max> valid minutes, the rest should be empty
+        valid_start = self.browser.count(".metrics-data-cpu.valid-data")
+        self.assertLessEqual(valid_start, current_max)
+        # page auto-updates every minute
+        with self.browser.wait_timeout(90):
+            self.browser.wait_count('.metrics-data-cpu.valid-data', valid_start + 1)
+
+        # Should never show more then 4 empty leading minutes (block of 5 minutes but always at least one used)
+        leading_empty = self.browser.call_js_func("""(function () {
+            const lines = document.getElementsByClassName("metrics-data-cpu");
+            let counter = 0;
+
+            Array.from(lines).every(l => {
+                if (l.classList.contains("empty-data")) {
+                    counter++;
+                    return true;
+                } else {
+                    return false;;
+                }
+            });
+
+            return counter;
+        })""")
+        self.assertLessEqual(leading_empty, 4)
+
+    def testBasic(self):
+        b = self.browser
+        m = self.machine
+
+        m.execute("""ntp=`timedatectl show --property NTP --value`
+             if [ $ntp == "yes" ]; then
+                 timedatectl set-ntp off
+             fi""")
+        m.execute("while systemctl is-active systemd-timesyncd; do sleep 1; done")
+        m.execute("date --set='2020-11-24 09:24:05'")
+
+        # clean slate, to avoid seeing the data from preparing the VM
+        m.execute("rm -rf /var/log/pcp/pmlogger/*; systemctl start pmlogger")
+
+        self.login_and_go("/metrics")
+        # eventually finishes data loading and shows heading
+        b.wait_in_text(".metrics-heading", "CPU")
+
+        # only shows current hour
+        b.wait_count(".metrics-hour", 1)
+
+        # VM just started, we don't have 12 hours of data
+        b.wait_in_text(".metrics .pf-v6-c-alert", "No data available between")
+        # initial data gap is < 24 hours, does not show date
+        year = m.execute("date +%Y").strip()
+        self.assertNotIn(year, b.text(".metrics .pf-v6-c-alert"))
+
+        # can try to load earlier data; only updates "no data" alert as there is no data
+        b.wait_text(".bottom-panel button", "Load earlier data")
+        b.click(".bottom-panel button")
+        # now the gap is > 24 hours, does show date
+        b.wait_in_text(".metrics .pf-v6-c-alert", year)
+        # still only one hour
+        b.wait_count(".metrics-hour", 1)
+
+        self.waitStream(3)
+
+        # Graphs are by default all visible
+        b.click("button[aria-label='Graph visibility options menu']")
+        testlib.wait(lambda: b.get_checked(".pf-v6-c-menu__list-item[data-label='cpu'] input"))
+        b.wait_visible(".metrics-label-graph:contains('CPU')")
+        self.assertTrue(b.get_checked(".pf-v6-c-menu__list-item[data-label='memory'] input"))
+        b.wait_visible(".metrics-label-graph:contains('Memory')")
+        self.assertTrue(b.get_checked(".pf-v6-c-menu__list-item[data-label='disks'] input"))
+        b.wait_visible(".metrics-label-graph:contains('Disk I/O')")
+        self.assertTrue(b.get_checked(".pf-v6-c-menu__list-item[data-label='network'] input"))
+        b.wait_visible(".metrics-label-graph:contains('Network')")
+
+        # Change graph visibility
+        b.wait_visible(".metrics-events:contains('Network I/O')")
+        b.set_checked(".pf-v6-c-menu__list-item[data-label='network'] input", val=False)
+        b.wait_not_present(".metrics-events:contains('Network I/O')")
+        b.wait_not_present(".metrics-label-graph:contains('Network')")
+        b.set_checked(".pf-v6-c-menu__list-item[data-label='network'] input", val=True)
+
+        # Change date to yesterday, should be empty
+        b.click("#date-picker-select-toggle")
+        b.click(".pf-v6-c-menu__list-item:nth-child(2) button")
+        b.wait_text(".pf-v6-c-empty-state", "No data available")
+
+        # Breadcrumb back to Overview page
+        b.click(".pf-v6-c-breadcrumb li:first-child")
+        b.enter_page("/system")
+        b.wait_visible('.system-information')
+
+    def testEvents(self):
+        b = self.browser
+        m = self.machine
+
+        b.wait_timeout(60)
+
+        def events_at(hour, minute):
+            b.wait_visible(f"#metrics-hour-{hour}.metrics-hour-compressed")
+            b.click(f"#metrics-hour-{hour} button.metrics-events-expander")
+            events = b.text(f"#metrics-hour-{hour} div.metrics-minute[data-minute='{minute}'] .metrics-events")
+            b.click(f"#metrics-hour-{hour} button.metrics-events-expander")
+
+            return events
+
+        #
+        # Disks
+        #
+
+        # disable swap, so that we can test current metrics without swap
+        m.execute("""systemctl stop "*.swap" "swap-create@*" "systemd-zram-setup@*" || true
+                     systemctl mask "swap-create@" "systemd-zram-setup@"
+                     swapoff --all
+                     while [ -n "$(swapon --show)" ]; do sleep 1; done""")
+
+        prepareArchive(m, "disk.tar.gz", 1597672800)
+
+        self.login_and_go("/metrics")
+        # eventually finishes data loading and shows heading
+        b.wait_in_text(".metrics-heading", "CPU")
+
+        # Big spike lasting 3 minutes
+        self.assertGreaterEqual(getMaximumSpike(test=self, g_type="disks", saturation=False, hour=1597662000000, minute=25), 0.9)
+        self.assertGreaterEqual(getCompressedMinuteValue(test=self, g_type="disks", saturation=False, hour=1597662000000, minute=26), 0.9)
+        self.assertGreaterEqual(getCompressedMinuteValue(test=self, g_type="disks", saturation=False, hour=1597662000000, minute=27), 0.9)
+
+        # Smaller spike lasting 2 minutes
+        self.assertGreaterEqual(getMaximumSpike(test=self, g_type="disks", saturation=False, hour=1597662000000, minute=28), 0.4)
+        self.assertLessEqual(getMaximumSpike(test=self, g_type="disks", saturation=False, hour=1597662000000, minute=28), 0.6)
+        self.assertGreaterEqual(getCompressedMinuteValue(test=self, g_type="disks", saturation=False, hour=1597662000000, minute=29), 0.4)
+        # recognized as event
+
+        self.assertIn("Disk I/O", events_at(1597662000000, 28))
+
+        # No visible activity after that
+        self.assertLessEqual(getCompressedMinuteValue(test=self, g_type="disks", saturation=False, hour=1597662000000, minute=30), 0.01)
+
+        # swap usage is not shown if there is no swap
+        b.wait_visible("#current-memory-usage")
+        self.assertFalse(b.is_present("#current-swap-usage"))
+
+        # Check that we don't show too much empty minutes in the first hour
+        self.assertLessEqual(b.count(".metrics-data-cpu"), 35)
+
+        # Check metrics hour header in compressed and expanded mode
+        b.click("#metrics-hour-1597662000000 button.metrics-events-expander")
+        b.wait_in_text("#metrics-hour-1597662000000:not(.metrics-hour-compressed) .metrics-events-hour-header-expanded time", "1:00")
+        b.wait_in_text("#metrics-hour-1597662000000:not(.metrics-hour-compressed) .metrics-events-hour-header-expanded .spikes_count", "3 spikes")
+        b.wait_in_text("#metrics-hour-1597662000000:not(.metrics-hour-compressed) .metrics-events-hour-header-expanded .spikes_info", "1 Memory, 1 Disk I/O, 1 Network I/O")
+
+        # move the mouse away from the pixel test region, to avoid spurious focus highlights
+        b.mouse("#metrics-header-section", "mousemove")
+
+        # "hold still while I take a photo!" -- the current metrics are too jumpy
+        b.eval_js("document.querySelector('.current-metrics').style.display = 'none'")
+
+        def on_layout_change():
+            # wait until the toolbar is fully rendered
+            b.wait_visible("#date-picker-select-toggle")
+            # wait until the metrics data is fully rendered
+            b.wait_visible("#metrics-hour-1597662000000")
+
+        # FIXME: mobile layout is racy in tests (only, not in reality), scrollIntoView() misplaces the menu bar
+        b.assert_pixels(
+            ".metrics",
+            "metrics-history-expanded-hour",
+            ignore=[".spikes_count"],
+            skip_layouts=["mobile"],
+            wait_after_layout_change=True,
+            wait_delay=1,
+            chrome_hack_double_shots=True,
+            abs_tolerance=40,
+            layout_change_hook=on_layout_change,
+        )
+
+        b.click("#metrics-hour-1597662000000 button.metrics-events-expander")
+        b.wait_in_text("#metrics-hour-1597662000000.metrics-hour-compressed", "1:00")
+        b.wait_in_text("#metrics-hour-1597662000000.metrics-hour-compressed .spikes_count", "3 spikes")
+        b.wait_in_text("#metrics-hour-1597662000000.metrics-hour-compressed .spikes_info", "1 Memory, 1 Disk I/O, 1 Network I/O")
+
+        # HACK: the bottom panel has some unpredictable extra white line at the bottom, but is also uninteresting
+        b.eval_js("document.querySelector('.bottom-panel').style.display = 'none'")
+
+        # move the mouse away from the pixel test region, to avoid spurious focus highlights
+        b.mouse("#metrics-header-section", "mousemove")
+
+        b.assert_pixels(".metrics", "metrics-history-compressed-hour", ignore=[".nodata"],
+                        skip_layouts=["mobile"], wait_after_layout_change=True)
+
+        # as you were -- you can jump around again
+        b.eval_js("document.querySelector('.current-metrics').style.removeProperty('display')")
+
+        b.eval_js("document.querySelector('.bottom-panel').style.removeProperty('display')")
+
+        # Check that events are not visible for compressed hours
+        b.wait_not_present("#metrics-hour-1597662000000 div.metrics-minute[data-minute='28'] .metrics-events")
+        b.click("#metrics-hour-1597662000000 button.metrics-events-expander")
+        b.wait_visible("#metrics-hour-1597662000000 div.metrics-minute[data-minute='28'] .metrics-events")
+
+        b.logout()
+
+        #
+        # Network and CPU
+        #
+
+        prepareArchive(m, "cpu_network.tar.gz", 1598918400)
+
+        self.login_and_go("/metrics")
+        # eventually finishes data loading and shows heading
+        b.wait_in_text(".metrics-heading", "CPU")
+
+        # Test network - Big spike lasting 2 minutes
+        self.assertGreaterEqual(getMaximumSpike(test=self, g_type="network", saturation=False, hour=1598950800000, minute=3), 0.5)
+        self.assertGreaterEqual(getMaximumSpike(test=self, g_type="network", saturation=False, hour=1598950800000, minute=4), 0.5)
+        # recognized as event
+        self.assertIn("Network I/O", events_at(1598950800000, 3))
+        # but it's not a new event in minute 4
+        self.assertNotIn("Network I/O", events_at(1598950800000, 4))
+
+        # Followed by smaller spike
+        self.assertGreaterEqual(getMaximumSpike(test=self, g_type="network", saturation=False, hour=1598950800000, minute=5), 0.35)
+        self.assertLessEqual(getMaximumSpike(test=self, g_type="network", saturation=False, hour=1598950800000, minute=5), 0.5)
+        # still not a new spike
+        self.assertNotIn("Network I/O", events_at(1598950800000, 5))
+
+        # Followed by virtually no data
+        self.assertLessEqual(getCompressedMinuteValue(test=self, g_type="network", saturation=False, hour=1598950800000, minute=6), 0.01)
+
+        # Test CPU load - big - small - big spikes
+        self.assertGreaterEqual(getMaximumSpike(test=self, g_type="cpu", saturation=False, hour=1598950800000, minute=3), 0.9)
+        self.assertGreaterEqual(getMaximumSpike(test=self, g_type="cpu", saturation=False, hour=1598950800000, minute=4), 0.5)
+        self.assertLessEqual(getMaximumSpike(test=self, g_type="cpu", saturation=False, hour=1598950800000, minute=4), 0.55)
+        self.assertGreaterEqual(getMaximumSpike(test=self, g_type="cpu", saturation=False, hour=1598950800000, minute=5), 0.9)
+        self.assertIn("CPU", events_at(1598950800000, 2))
+        self.assertIn("CPU", events_at(1598950800000, 5))
+
+        # Test CPU saturation - 3 spikes, each 2 minutes (medium, big, small)
+        self.assertGreaterEqual(getMaximumSpike(test=self, g_type="cpu", saturation=True, hour=1598950800000, minute=3), 0.5)
+        self.assertLessEqual(getMaximumSpike(test=self, g_type="cpu", saturation=True, hour=1598950800000, minute=3), 0.6)
+        self.assertGreaterEqual(getMaximumSpike(test=self, g_type="cpu", saturation=True, hour=1598950800000, minute=4), 0.5)
+        self.assertLessEqual(getMaximumSpike(test=self, g_type="cpu", saturation=True, hour=1598950800000, minute=4), 0.6)
+
+        self.assertGreaterEqual(getMaximumSpike(test=self, g_type="cpu", saturation=True, hour=1598950800000, minute=5), 0.8)
+        self.assertGreaterEqual(getCompressedMinuteValue(test=self, g_type="cpu", saturation=True, hour=1598950800000, minute=6), 0.8)
+
+        self.assertGreaterEqual(getCompressedMinuteValue(test=self, g_type="cpu", saturation=True, hour=1598950800000, minute=7), 0.3)
+        self.assertLessEqual(getCompressedMinuteValue(test=self, g_type="cpu", saturation=True, hour=1598950800000, minute=7), 0.4)
+        self.assertGreaterEqual(getCompressedMinuteValue(test=self, g_type="cpu", saturation=True, hour=1598950800000, minute=8), 0.1)
+        self.assertLessEqual(getCompressedMinuteValue(test=self, g_type="cpu", saturation=True, hour=1598950800000, minute=8), 0.4)
+
+        self.assertNotIn("Load", events_at(1598950800000, 2))
+        self.assertIn("Load", events_at(1598950800000, 3))
+        self.assertNotIn("Load", events_at(1598950800000, 4))
+        self.assertIn("Load", events_at(1598950800000, 5))
+
+        b.logout()
+
+        #
+        # Memory
+        #
+
+        have_swap = m.execute("swapon --show").strip()
+
+        prepareArchive(m, "memory.tar.gz", 1600248000)
+        self.login_and_go("/metrics")
+        b.wait_in_text(".metrics-heading", "CPU")
+
+        # basic RAM consumption after boot; it's still a network spike, thus event+SVG
+        self.assertLessEqual(getMaximumSpike(test=self, g_type="memory", saturation=False, hour=1600236000000, minute=44), 0.4)
+        self.assertNotIn("Memory", events_at(1600236000000, 44))
+        if have_swap:
+            self.assertAlmostEqual(getMaximumSpike(test=self, g_type="memory", saturation=True, hour=1600236000000, minute=44), 0)
+            self.assertNotIn("Swap", events_at(1600236000000, 44))
+
+            # swap event from :46 to :47
+            self.assertGreater(getMaximumSpike(test=self, g_type="memory", saturation=True, hour=1600236000000, minute=46), 0.9)
+            self.assertIn("Swap", events_at(1600236000000, 46))
+            # continuous, no new Swap event, but still a Memory+Network event
+            self.assertGreater(getMaximumSpike(test=self, g_type="memory", saturation=True, hour=1600236000000, minute=47), 0.9)
+            self.assertNotIn("Swap", events_at(1600236000000, 47))
+
+        else:
+            # If no swap, the column is hidden
+            self.assertNotIn(b.text(".metrics-heading"), "Swap")
+            b.wait_not_present(".metrics-data-memory .saturation")
+
+        # memory spike in :46 or :47 (depends on PCP version)
+        self.assertGreater(getMaximumSpike(test=self, g_type="memory", saturation=False, hour=1600236000000, minute=47), 0.6)
+        try:
+            self.assertIn("Memory", events_at(1600236000000, 46))
+        except AssertionError:
+            self.assertIn("Memory", events_at(1600236000000, 47))
+
+        # at :54 the machine is loaded to ~80% so no event even if elevated
+        self.assertGreater(getCompressedMinuteValue(test=self, g_type="memory", saturation=False, hour=1600236000000, minute=54), 0.3)
+        b.wait_not_present("#metrics-hour-1600236000000 div.metrics-minute[data-minute='54'] .metrics-events")
+        if have_swap:
+            self.assertAlmostEqual(getCompressedMinuteValue(test=self, g_type="memory", saturation=True, hour=1600236000000, minute=54), 0.0)
+
+        # everything is quiet in :55
+        self.assertLess(getCompressedMinuteValue(test=self, g_type="memory", saturation=False, hour=1600236000000, minute=55), 0.4)
+        if have_swap:
+            self.assertAlmostEqual(getCompressedMinuteValue(test=self, g_type="memory", saturation=True, hour=1600236000000, minute=55), 0.0)
+
+        b.logout()
+
+        #
+        # Check changing of time
+        #
+
+        m.execute("date --set=@1600550674")
+        self.login_and_go("/metrics")
+        # self.waitStream(3) # FIXME: wait for new data - pcp does not handle time change greatly
+        b.wait_text("#date-picker-select-toggle .pf-v6-c-menu-toggle__text", "Today")
+
+        b.select_PF("#date-picker-select-toggle", "Wednesday, September 16, 2020")
+        # memory spike at :50 or :51 (depends on PCP version)
+        try:
+            self.assertGreater(getMaximumSpike(test=self, g_type="memory", saturation=False, hour=1600236000000, minute=50), 0.3)
+            self.assertIn("Memory", events_at(1600236000000, 50))
+        except (AttributeError, AssertionError):
+            self.assertGreater(getMaximumSpike(test=self, g_type="memory", saturation=False, hour=1600236000000, minute=51), 0.3)
+            self.assertIn("Memory", events_at(1600236000000, 51))
+
+        # Reload should keep the filters intact
+        b.reload()
+        b.enter_page("/metrics")
+        b.wait_text("#date-picker-select-toggle .pf-v6-c-menu-toggle__text", "Wednesday, September 16, 2020")
+
+        b.click("#date-picker-select-toggle")
+        b.click(".pf-v6-c-menu__list-item button:contains('Today')")
+        b.wait_text("#date-picker-select-toggle .pf-v6-c-menu-toggle__text", "Today")
+        # self.waitStream(4) # FIXME: wait for new data - pcp does not handle time change greatly
+
+        b.logout()
+
+        #
+        # Check that for every minute only one event is present
+        #
+
+        if self.machine.image == TEST_OS_DEFAULT:  # Debian/Ubuntu is unhappy about this archive, one Fedora test is enough though
+            prepareArchive(m, "double_events.zip", 1602345600, "m1.cockpit.lan")
+            self.login_and_go("/metrics")
+            b.wait_in_text(".metrics-heading", "CPU")
+            b.wait_in_text("#metrics-hour-1602334800000", "CPU")
+            self.assertTrue(self.browser.call_js_func("""(function () {
+                const min_events = document.getElementsByClassName("metrics-events");
+                return Array.from(min_events).every(l => {
+                    const events = Array.from(l.getElementsByTagName("dd")).map(d => d.innerHTML);
+                    return (new Set(events)).size === events.length;
+                });
+            })"""))
+
+            b.logout()
+
+        #
+        # Journal logs
+        #
+
+        prepareArchive(m, "with_journal.tar.gz", 1615200500, "m1.cockpit.lan")
+        # first check the "no logs found" case
+        self.login_and_go("/metrics")
+        b.wait_in_text(".metrics-heading", "CPU")
+        b.click("#metrics-hour-1615197600000 button.metrics-events-expander")
+        b.wait_in_text("#metrics-hour-1615197600000", "Load")
+        # Load event at :38 or :39 (depending on PCP version)
+        for load_minute in [38, 39]:
+            load_minute_sel = f"#metrics-hour-1615197600000 div.metrics-minute[data-minute='{load_minute}']"
+            if "Load" in b.text(load_minute_sel):
+                break
+        else:
+            self.fail("no Load event found at either :38 or :39")
+
+        # Now add the journal
+        # Older systemds get a slightly wrong log window with --since/until, so only run on newer ones
+        if re.search(r"centos-[89]|rhel-[89]", self.machine.image):
+            return
+
+        m.upload(["verify/files/metrics-archives/journal.journal.gz"], "/tmp")
+        # we need to move all other existing journals out of the way, otherwise boot order is going back in time
+        m.execute("""gunzip /tmp/journal.journal.gz
+                     systemctl stop systemd-journald
+                     rm /var/log/journal/*/*.journal
+                     cp /tmp/journal.journal /var/log/journal/*/
+                     systemctl start systemd-journald""")
+        b.reload()
+        b.enter_page("/metrics")
+
+        # Expand metrics when loaded
+        b.wait_in_text(".metrics-heading", "CPU")
+        b.click("#metrics-hour-1615197600000 button.metrics-events-expander")
+
+        # Show boot as event
+        with b.wait_timeout(60):
+            b.wait_in_text(".metrics-minute[data-minute='35']", "Boot")
+
+        # details for above load event
+        b.click(f"{load_minute_sel} .metrics-events button.spikes_info")
+        b.wait_in_text(".cockpit-log-panel", "load-hog")
+        action = "Stopping" if load_minute == 39 else "Started"
+        b.wait_in_text(".cockpit-log-panel", f"{action} /usr/bin/sh -ec for i in `seq 500`")
+        b.click(f".cockpit-log-message:contains('{action} /usr/bin/sh -ec for i in `seq 500`')")
+        b.enter_page("/system/logs")
+        b.wait_in_text(".pf-v6-c-card__header", "load-hog.service")
+        b.wait_in_text(".pf-v6-c-card__title", "/usr/bin/sh -ec")
+        b.click("li:contains('Logs')")
+        b.wait_in_text(".cockpit-log-panel", "/usr/bin/sh -ec")
+
+        b.go("/metrics")
+        b.enter_page("/metrics")
+        # logs exist, should show tight range
+        b.click("button:contains('View detailed logs')")
+        b.enter_page("/system/logs")
+        b.wait_in_text(".cockpit-log-panel", "load-hog")
+        url = b.eval_js('window.location.hash')
+        self.assertIn("priority=info", url)
+        self.assertIn(f"since=2021-3-8%2010%3A{load_minute}%3A", url)
+        try:
+            self.assertIn(f"until=2021-3-8%2010%3A{load_minute}%3A", url)
+        except AssertionError:
+            self.assertIn(f"until=2021-3-8%2010%3A{load_minute + 1}%3A", url)
+
+    @testlib.nondestructive
+    def testNoDataEnable(self):
+        b = self.browser
+        m = self.machine
+
+        m.execute("""mount -t tmpfs tmpfs /var/log/pcp/pmlogger
+                     chown -R pcp:pcp /var/log/pcp/pmlogger
+                     if selinuxenabled; then restorecon /var/log/pcp/pmlogger; fi""")
+        self.addCleanup(m.execute, "systemctl stop pmlogger; until umount /var/log/pcp/pmlogger; do sleep 1; done")
+
+        self.login_and_go("/metrics")
+
+        b.wait_in_text(".pf-v6-c-empty-state", "Metrics history could not be loaded")
+        b.wait_in_text(".pf-v6-c-empty-state", "pmlogger.service is not running")
+
+        # enable pmlogger in settings dialog from empty state
+        b.click(".pf-v6-c-empty-state button.pf-m-primary")
+        b.wait_visible(self.pcp_dialog_selector)
+        b.wait_visible("#switch-pmlogger:not(:checked)")
+        b.click("#switch-pmlogger")
+        b.wait_visible("#switch-pmlogger:checked")
+        applySettings(b, self.pcp_dialog_selector)
+
+        m.execute("until systemctl is-active pmlogger; do sleep 1; done")
+
+        # there is a transient "No data available" state, but sometimes it's very short, so don't assert that
+
+        # page auto-updates every minute and starts to receive data,
+        # On ubuntu at least, we need to wait for two samples.
+        with self.browser.wait_timeout(180):
+            self.browser.wait(lambda: b.count(".metrics-data-cpu.valid-data") >= 1)
+        b.wait_not_present(".pf-v6-c-empty-state")
+
+        b.logout()
+
+    @testlib.nondestructive
+    def testNoDataFailed(self):
+        b = self.browser
+        m = self.machine
+
+        m.write("/run/systemd/system/pmlogger.service.d/break.conf", "[Service]\nExecStart=\nExecStart=/bin/false")
+        m.execute(r"""mount -t tmpfs tmpfs /var/log/pcp/pmlogger
+                      if selinuxenabled; then restorecon /var/log/pcp/pmlogger; fi
+                      systemctl daemon-reload
+                      systemctl start pmlogger || true""")
+        self.addCleanup(m.execute,
+                        """rm -r /run/systemd/system/pmlogger.service.d/
+                        umount /var/log/pcp/pmlogger
+                        systemctl daemon-reload""")
+
+        self.login_and_go("/metrics")
+
+        b.wait_in_text(".pf-v6-c-empty-state", "Metrics history could not be loaded")
+        b.wait_in_text(".pf-v6-c-empty-state", "pmlogger.service has failed")
+
+        # Troubleshoot
+        b.click(".pf-v6-c-empty-state button.pf-m-link")
+        b.enter_page("/system/services")
+        b.wait_in_text("#service-details", "pmlogger.service")
+
+    @testlib.nondestructive
+    def testLoggerSettings(self):
+        b = self.browser
+        m = self.machine
+
+        # start in defined state
+        m.execute("systemctl enable --now pmlogger")
+        self.addCleanup(m.execute, "systemctl disable --now pmlogger")
+
+        self.login_and_go("/metrics")
+
+        # disable pmlogger in settings dialog from header bar
+        b.click("#metrics-header-section button.pf-m-secondary")
+        b.wait_visible(self.pcp_dialog_selector)
+        b.wait_visible("#switch-pmlogger:checked")
+        b.click("#switch-pmlogger")
+        b.wait_visible("#switch-pmlogger:not(:checked)")
+        applySettings(b, self.pcp_dialog_selector)
+
+        self.assertEqual(m.execute("systemctl is-active pmlogger || true").strip(), "inactive")
+        self.assertEqual(m.execute("systemctl is-enabled pmlogger || true").strip(), "disabled")
+
+        # enable pmlogger in settings dialog from header bar
+        b.click("#metrics-header-section button.pf-m-secondary")
+        b.wait_visible(self.pcp_dialog_selector)
+        b.wait_visible("#switch-pmlogger:not(:checked)")
+        b.click("#switch-pmlogger")
+        b.wait_visible("#switch-pmlogger:checked")
+        applySettings(b, self.pcp_dialog_selector)
+
+        m.execute("until systemctl is-active pmlogger; do sleep 1; done")
+        self.assertEqual(m.execute("systemctl is-enabled pmlogger").strip(), "enabled")
+
+    @testlib.nondestructive
+    @testlib.skipImage("TODO: fix for OpenSUSE", "opensuse-tumbleweed")
+    def testPmProxySettings(self, customRedisService=None):
+        b = self.browser
+        m = self.machine
+
+        m.execute("systemctl start firewalld")
+
+        # Arch Linux has no active zone by default which the firewalld port alert test requires.
+        if m.image == "arch":
+            m.execute("firewall-cmd --zone=public --change-interface eth0 --permanent")
+            m.execute("firewall-cmd --reload")
+
+        redis = customRedisService or redisService(m.image)
+        hostname = m.execute("hostname").strip()
+
+        self.addCleanup(m.execute, f"systemctl disable --now {redis}")
+
+        def checkEnable(firewalld_alert):
+            b.click("#metrics-header-section button.pf-m-secondary")
+            b.wait_visible(self.pcp_dialog_selector)
+            b.wait_visible("#switch-pmproxy:not(:checked)")
+            b.click('#switch-pmproxy')
+            b.wait_visible('#switch-pmproxy:checked')
+            applySettings(b, self.pcp_dialog_selector)
+            if firewalld_alert:
+                b.wait_in_text("#firewalld-request-alert", "pmproxy")
+            else:
+                b.wait_not_present("#firewalld-request-alert")
+            m.execute('while [ $(systemctl is-active pmproxy) = activating ]; do sleep 1; done')
+            self.assertEqual(m.execute("systemctl is-active pmproxy").strip(), "active")
+            self.assertEqual(m.execute(f"systemctl is-active {redis}").strip(), "active")
+            self.assertEqual(m.execute("systemctl is-enabled pmproxy").strip(), "enabled")
+            self.assertIn(redis, m.execute("systemctl show -p Wants --value pmproxy").strip())
+            testlib.wait(lambda: hostname in m.execute("curl --max-time 10 --silent --show-error 'http://localhost:44322/series/labels?names=hostname'"), delay=10, tries=30)
+
+        def checkDisable():
+            b.click("#metrics-header-section button.pf-m-secondary")
+            b.wait_visible(self.pcp_dialog_selector)
+            b.wait_visible('#switch-pmproxy:checked')
+            b.click('#switch-pmproxy')
+            b.wait_visible("#switch-pmproxy:not(:checked)")
+            applySettings(b, self.pcp_dialog_selector)
+            # always clears the firewalld alert
+            b.wait_not_present("#firewalld-request-alert")
+            self.assertEqual(m.execute("! systemctl is-active pmproxy").strip(), "inactive")
+            self.assertEqual(m.execute("! systemctl is-enabled pmproxy").strip(), "disabled")
+            # keeps redis running, it's a shared service
+            self.assertEqual(m.execute(f"systemctl is-active {redis}").strip(), "active")
+            # but drops the pmproxy dependency
+            self.assertNotIn(redis, m.execute("systemctl show -p Wants --value pmproxy").strip())
+            m.execute("! curl --silent --show-error --max-time 10 'http://localhost:44322/series/labels?names=hostname' 2>&1")
+
+        # start in a defined state; all test images have pcp and redis pre-installed
+        m.execute(f"systemctl disable --now pmlogger pmie pmproxy {redis}")
+        m.execute("systemctl reset-failed")
+        # ensure pmproxy is not already opened in firewall
+        m.execute("firewall-cmd --remove-service pmproxy; firewall-cmd --permanent --remove-service pmproxy")
+        self.login_and_go("/metrics")
+
+        # pmproxy can't be enabled without pmlogger
+        b.click("#metrics-header-section button.pf-m-secondary")
+        b.wait_visible(self.pcp_dialog_selector)
+        b.wait_visible("#switch-pmlogger:not(:checked)")
+        b.wait_visible("#switch-pmproxy:not(:checked)")
+        b.wait_visible("#switch-pmproxy:disabled")
+        # enable pmlogger
+        b.click('#switch-pmlogger')
+        b.wait_visible('#switch-pmlogger:checked')
+        applySettings(b, self.pcp_dialog_selector)
+        m.execute('while [ $(systemctl is-active pmlogger) = activating ]; do sleep 1; done')
+        self.assertEqual(m.execute("systemctl is-active pmlogger").strip(), "active")
+        b.wait_not_present("#firewalld-request-alert")
+
+        checkEnable(firewalld_alert=True)
+        checkDisable()
+
+        # redis already running
+        m.execute(f"systemctl start {redis}")
+        checkEnable(firewalld_alert=True)
+        checkDisable()
+
+        # pmproxy already running; 44322 queries hang without redis and until restart
+        m.execute(f"systemctl disable --now {redis}; systemctl start pmproxy")
+        checkEnable(firewalld_alert=True)
+
+        # without firewalld
+        m.execute("firewall-cmd --remove-service pmproxy; firewall-cmd --permanent --remove-service pmproxy")
+        m.execute("systemctl stop firewalld")
+        self.allow_journal_messages(".*org.fedoraproject.FirewallD1.*disconnected.*")
+        checkDisable()
+        checkEnable(firewalld_alert=False)
+        m.execute("systemctl start firewalld")
+
+        # Go to firewall page from alert
+        checkDisable()
+        checkEnable(firewalld_alert=True)
+        b.click(".pf-v6-c-alert button.pf-m-link")
+        b.enter_page("/network/firewall")
+        b.wait_visible("#firewall-heading")
+        b.go("/metrics")
+        b.enter_page("/metrics")
+
+        # add pmproxy to default zone directly in alert
+        default_zone = m.execute("firewall-cmd --get-default-zone").strip()
+        b.wait_text("#firewalld-request-pmproxy", default_zone)
+        b.click(".pf-v6-c-alert button.pf-m-primary")
+        b.wait_not_present(".pf-v6-c-alert:contains('pmproxy')")
+        self.assertIn("pmproxy", m.execute("firewall-cmd --list-services").strip())
+        self.assertIn("pmproxy", m.execute("firewall-cmd --list-services --permanent").strip())
+
+        # now service is already enabled, does not show alert
+        checkDisable()
+        checkEnable(firewalld_alert=False)
+
+        # firewalld service enabled in permanent config already, does not trip over ALREADY_ENABLED
+        checkDisable()
+        m.execute("firewall-cmd --remove-service pmproxy")
+        checkEnable(firewalld_alert=True)
+        b.click(".pf-v6-c-alert button.pf-m-primary")
+        b.wait_not_present(".pf-v6-c-alert:contains('pmproxy')")
+        self.assertIn("pmproxy", m.execute("firewall-cmd --list-services").strip())
+
+        # error during zone addition: zone disappears underneath us
+        checkDisable()
+        m.execute("""set -eux
+                     firewall-cmd --permanent --remove-service pmproxy
+                     firewall-cmd --permanent --new-zone=comeandgo
+                     systemctl start NetworkManager
+                     nmcli con add type dummy con-name fake ifname fake0 ip4 1.2.3.4/24
+                     firewall-cmd --permanent --zone public --remove-interface fake0
+                     firewall-cmd --permanent --zone comeandgo --add-interface fake0
+                     firewall-cmd --reload
+                  """)
+        self.addCleanup(m.execute, "nmcli con delete fake; firewall-cmd --permanent --delete-zone comeandgo || true; firewall-cmd  --reload")
+        checkEnable(firewalld_alert=True)
+        b.select_PF("#firewalld-request-pmproxy", "comeandgo")
+        m.execute("firewall-cmd --permanent --delete-zone comeandgo; firewall-cmd  --reload")
+        b.click(".pf-v6-c-alert button.pf-m-primary")
+        self.allow_browser_errors("Failed to enable pmproxy in firewalld:.*INVALID_ZONE: comeandgo.*")
+        b.wait_in_text(".pf-v6-c-alert.pf-m-warning", "Failed to enable pmproxy in firewalld")
+        b.wait_in_text(".pf-v6-c-alert.pf-m-warning", "INVALID_ZONE: comeandgo")
+        # close warning
+        b.click(".pf-v6-c-alert.pf-m-warning button.pf-m-plain")
+        b.wait_not_present(".pf-v6-c-alert:contains('pmproxy')")
+
+        # reacts to service changes from outside; this is asynchronous and the dialog deliberately
+        # does not update automatically, so retry a few times
+        def checkEnabled(expected):
+            for _ in range(10):
+                b.click("#metrics-header-section button.pf-m-secondary")
+                b.wait_visible('#switch-pmproxy')
+                found = b.is_present("#switch-pmproxy" + (":checked" if expected else ":not(:checked)"))
+                b.click(f"{self.pcp_dialog_selector} button.btn-cancel")
+                b.wait_not_present(self.pcp_dialog_selector)
+
+                if found:
+                    break
+                time.sleep(1)
+            else:
+                raise testlib.Error("PCP settings dialog did not get expected value")
+
+        m.execute(f"systemctl stop {redis}")
+        checkEnabled(expected=False)
+        m.execute(f"systemctl start {redis}")
+        checkEnabled(expected=True)
+        m.execute("systemctl stop pmproxy")
+        checkEnabled(expected=False)
+        m.execute("systemctl start pmproxy")
+        checkEnabled(expected=True)
+
+
+@testlib.nondestructive
+class TestCurrentMetrics(testlib.MachineCase):
+    def setUp(self):
+        super().setUp()
+        m = self.machine
+        # packagekit/dnf often eats a lot of CPU; silence it to have better control over CPU usage
+        packagekitd = "/usr/lib/packagekitd" if m.image == "arch" else "/usr/libexec/packagekitd"
+        m.execute(f"systemctl mask packagekit && killall -9 {packagekitd} && killall -9 dnf || true")
+
+        self.addCleanup(m.execute, "systemctl unmask packagekit")
+        # make sure to clean up our test resource consumers on failures
+        self.addCleanup(m.execute, "systemctl stop cockpittest.slice 2>/dev/null || true")
+        self.addCleanup(m.execute, "su - admin -c 'XDG_RUNTIME_DIR=/run/user/$(id -u admin) "
+                                   "systemctl --user stop cockpittest.slice 2>/dev/null || true'")
+
+        self.busybox_image = m.execute("podman images --format '{{.Repository}}' | grep busybox").strip()
+        self.login_and_go("/metrics")
+
+        # Disable pre-loading packagekit, dnf consumes tons of memory/CPU and interferes too much
+        self.disable_preload("packagekit")
+
+    def run_as_admin(self, cmd: str) -> str:
+        return self.machine.execute(f"systemd-run --machine=admin@ --quiet --user --collect --pipe --wait /bin/sh -ec '{cmd}'")
+
+    def run_as_admin_background(self, cmd: str, unit: str) -> None:
+        """Asynchronous alternative to `run_as_admin` which can "background" tasks."""
+        m = self.machine
+        m.execute(f"systemd-run --user --machine=admin@ --unit={unit} /bin/sh -ec '{cmd}'")
+        m.execute(f"until systemctl --user --machine=admin@ is-active {unit}; do sleep 1; done")
+
+    def testCPU(self):
+        b = self.browser
+        m = self.machine
+
+        if m.image.startswith(("fedora-", "rhel-")):
+            # HACK - https://bugzilla.redhat.com/show_bug.cgi?id=2461071
+            m.execute("setenforce 0")
+            self.addCleanup(m.execute, "setenforce 1")
+
+        b.wait_timeout(60)
+
+        nproc = m.execute("nproc").strip()
+        b.wait_in_text("#current-cpu-usage", nproc + " CPU")
+        # top CPU core is not visible with just 1 core; our upstream test VMs have only 1 core,
+        # but let's not just assume this for downstream gating/custom VMs
+        if nproc == '1':
+            self.assertFalse(b.is_present("#current-top-cpu-usage"))
+            b.wait_text("#current-cpu-usage-description", "1 CPU")
+        else:
+            b.wait_visible("#current-top-cpu-usage")
+
+        # wait until system settles down
+        b.wait(lambda: b.get_pf_progress_value("#current-cpu-usage") < 20)
+        m.execute("systemd-run --collect --slice cockpittest -p CPUQuota=60% --unit cpu-hog dd if=/dev/urandom of=/dev/null")
+        m.execute("systemd-run --collect --slice cockpittest -p CPUQuota=30% --unit cpu-piglet dd if=/dev/urandom of=/dev/null")
+        try:
+            b.wait(lambda: b.get_pf_progress_value("#current-cpu-usage") > 75)
+            # no other process in the test VM should take > 30% CPU, by the "settles down" assertion above
+            b.wait_text("table[aria-label='Top 5 CPU services'] tbody tr:nth-of-type(1) td[data-label='Service']", "cpu-hog")
+            b.wait_text("table[aria-label='Top 5 CPU services'] tbody tr:nth-of-type(2) td[data-label='Service']", "cpu-piglet")
+
+            # There might be some other processes which take more resources
+            # Keep this logging so we can easily debug which ones we might need to cleanup
+            try:
+                b.wait(lambda: topServiceValue(self, "Top 5 CPU services", "%", 1) > 50)
+                b.wait(lambda: topServiceValue(self, "Top 5 CPU services", "%", 1) < 70)
+                b.wait(lambda: topServiceValue(self, "Top 5 CPU services", "%", 2) > 20)
+                b.wait(lambda: topServiceValue(self, "Top 5 CPU services", "%", 2) < 40)
+            except BaseException:
+                print(m.execute("top -b -n 1"))
+                raise
+        finally:
+            m.execute("systemctl stop cpu-hog cpu-piglet")
+        # should go back to idle usage
+        b.wait(lambda: b.get_pf_progress_value("#current-cpu-usage") < 20)
+        # it could be that the table disappears completely if no service has a noticeable CPU usage;
+        # so don't assume the table exists
+        b.wait_not_in_text("#current-metrics-card-cpu", "cpu-hog")
+        b.wait_not_in_text("#current-metrics-card-cpu", "cpu-piglet")
+
+        # Load is a flex, each part looks like "1 min: 1.41,"; wait until the 1min load is low
+        b.wait(lambda: float(b.text("#load-avg .pf-v6-l-flex div:first-child").split()[-1].rstrip(',')) < 5)
+
+        m.execute("systemd-run --collect --slice cockpittest --unit load-hog sh -ec "
+                  "  'for i in `seq 50`; do dd if=/dev/urandom of=/dev/zero bs=100K status=none & done; sleep infinity'")
+        try:
+            with b.wait_timeout(120):
+                b.wait(lambda: float(b.text("#load-avg .pf-v6-l-flex div:first-child").split()[-1].rstrip(',')) > 15)
+        finally:
+            m.execute("systemctl stop load-hog 2>/dev/null || true")  # ok to fail, as the command exits by itself
+
+        container_name = "pod-cpu-hog"
+        m.execute(f"podman run --rm -d --name {container_name} {self.busybox_image} /bin/dd if=/dev/urandom of=/dev/null")
+        try:
+            container_sha = m.execute(f"podman inspect --format '{{{{.Id}}}}' {container_name}").strip()
+            shortid = container_sha[:12]
+
+            # On some test images the container takes a while to show up
+            with b.wait_timeout(300):
+                b.wait_in_text("#current-metrics-card-cpu", f"pod {shortid}")
+            b.wait(lambda: topServiceValue(self, "Top 5 CPU services", "%", 1) > 70)
+
+            # It takes one re-render for the name lookup
+            with b.wait_timeout(30):
+                b.wait_in_text("#current-metrics-card-cpu", f"pod {container_name}")
+        finally:
+            m.execute(f"podman stop -t 0 {container_name}")
+
+        # RHEL-8's podman user containers do not show up as
+        # libpod-$containerid but as podman-3679.scope.
+        if not m.image.startswith("rhel-8"):
+            # copy images for user podman tests; podman insists on user session
+            m.execute(f"podman save {self.busybox_image} | sudo -i -u admin podman load")
+
+            # Test user containers
+            user_container_name = "user-cpu-hog"
+            self.run_as_admin_background(
+                    f"podman run --rm -i --name {user_container_name} {self.busybox_image} /bin/dd if=/dev/urandom of=/dev/null",
+                    unit=user_container_name)
+
+            # Wait for container to be running as we can't infer this from the systemd unit state
+            self.run_as_admin(f'while [ "$(podman inspect --format {{{{.State.Status}}}} {user_container_name} 2>/dev/null)" != "running" ]; do sleep 1; done')
+            container_sha = self.run_as_admin(f"podman inspect --format '{{{{.Id}}}}' {user_container_name}").strip()
+            shortid = container_sha[:12]
+
+            # On some test images the container takes a while to show up
+            with b.wait_timeout(300):
+                b.wait_in_text("#current-metrics-card-cpu", f"pod {shortid}")
+            b.wait(lambda: topServiceValue(self, "Top 5 CPU services", "%", 1) > 70)
+
+            # It takes one re-render for the name lookup
+            with b.wait_timeout(30):
+                b.wait_in_text("#current-metrics-card-cpu", f"pod {user_container_name}")
+
+            self.run_as_admin(f"podman stop -t 0 {user_container_name}")
+
+        # this settles down slowly, don't wait for becoming really quiet
+        with b.wait_timeout(300):
+            b.wait(lambda: float(b.text("#load-avg .pf-v6-l-flex div:first-child").split()[-1].rstrip(',')) < 10)
+
+        # Files with CPU temperature do not exist, nothing is displayed
+        b.wait_not_present("#current-metrics-card-cpu .temperature")
+
+        # No matching type
+        self.addCleanup(m.execute, "rm -rf /tmp/sensor-sys-class")
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon0/name", "BAT0")
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon0/temp1_input", "40000")
+        m.execute("mount -o bind /tmp/sensor-sys-class /sys/class")
+        self.addCleanup(m.execute, "umount /sys/class")
+        b.logout()
+        self.login_and_go("/metrics")
+
+        b.wait_not_present("#current-metrics-card-cpu .temperature")
+
+        # create files that contain CPU temperature
+        # ARM
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon1/name", "cpu_thermal")
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon1/temp1_input", "30000")
+
+        b.logout()
+        self.login_and_go("/metrics")
+
+        b.wait_in_text("#current-metrics-card-cpu", "30 °C")
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon1/temp1_input", "45000")
+        b.wait_in_text("#current-metrics-card-cpu", "45 °C")
+
+        # AMD
+        m.execute("rm -rf /tmp/sensor-sys-class/hwmon/hwmon1/*")
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon1/name", "k10temp")
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon1/temp1_label", "Tctl")
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon1/temp1_input", "40000")
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon1/temp1_max", "100000")
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon1/temp2_label", "Tccd1")
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon1/temp2_input", "35000")
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon1/temp2_max", "100000")
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon1/temp3_label", "Tccd3")
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon1/temp3_input", "30000")
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon1/temp3_max", "100000")
+
+        b.logout()
+        self.login_and_go("/metrics")
+
+        b.wait_in_text("#current-metrics-card-cpu", "40 °C")
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon1/temp3_input", "55000")
+        b.wait_in_text("#current-metrics-card-cpu", "55 °C")
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon1/temp2_input", "90000")
+        b.wait_visible("#current-metrics-card-cpu .text-color-warning")
+        b.wait_in_text("#current-metrics-card-cpu .text-color-warning", "90 °C")
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon1/temp2_input", "45000")
+        # temp2_input cooled down, temp3_input is the hottest again
+        b.wait_in_text("#current-metrics-card-cpu", "55 °C")
+
+        # atk0110 motherboard
+        m.execute("rm -rf /tmp/sensor-sys-class/hwmon/hwmon1/*")
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon1/name", "atk0110")
+        # MB Temperature (temp2_label) will be ignored
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon1/temp1_label", "CPU Temperature")
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon1/temp1_input", "50000")
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon1/temp2_label", "MB Temperature")
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon1/temp2_input", "70000")
+
+        b.logout()
+        self.login_and_go("/metrics")
+
+        b.wait_in_text("#current-metrics-card-cpu", "50 °C")
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon1/temp1_input", "95000")
+        b.wait_visible("#current-metrics-card-cpu .text-color-critical")
+        b.wait_in_text("#current-metrics-card-cpu .text-color-critical", "95 °C")
+        # cooled down a little, warning color changes from red to yellow
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon1/temp1_input", "85000")
+        b.wait_visible("#current-metrics-card-cpu .text-color-warning")
+        b.wait_in_text("#current-metrics-card-cpu .text-color-warning", "85 °C")
+
+        # intel
+        m.execute("rm -rf /tmp/sensor-sys-class/hwmon/hwmon1/*")
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon1/name", "coretemp")
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon1/temp1_label", "Package id 0")
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon1/temp1_input", "60000")
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon1/temp1_crit", "100000")
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon1/temp2_label", "Core 0")
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon1/temp2_input", "50000")
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon1/temp2_crit", "100000")
+
+        b.logout()
+        self.login_and_go("/metrics")
+
+        b.wait_in_text("#current-metrics-card-cpu", "60 °C")
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon1/temp2_input", "85000")
+        b.wait_visible("#current-metrics-card-cpu .text-color-warning")
+        b.wait_in_text("#current-metrics-card-cpu .text-color-warning", "85 °C")
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon1/temp2_input", "70000")
+        # cooled down, warning color is not visible
+        b.wait_not_present("#current-metrics-card-cpu .text-color-warning")
+        b.wait_in_text("#current-metrics-card-cpu", "70 °C")
+
+        # add second CPU
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon2/name", "coretemp")
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon2/temp1_label", "Package id 0")
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon2/temp1_input", "60000")
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon2/temp2_label", "Core 0")
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon2/temp2_input", "75000")
+
+        b.logout()
+        self.login_and_go("/metrics")
+
+        # CPU 2 is the hottest
+        b.wait_in_text("#current-metrics-card-cpu", "75 °C")
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon2/temp1_input", "80000")
+        b.wait_in_text("#current-metrics-card-cpu", "80 °C")
+        # CPU 1 is the hottest again
+        m.write("/tmp/sensor-sys-class/hwmon/hwmon1/temp1_input", "90000")
+        b.wait_in_text("#current-metrics-card-cpu", "90 °C")
+
+        # Test link to user services
+        # older releases don't have CPU accounting enabled for user services
+        if not self.machine.image.startswith("rhel-8-"):
+            m.execute("su - admin -c 'XDG_RUNTIME_DIR=/run/user/$(id -u admin) systemd-run --user --collect --slice cockpittest -p CPUQuota=60% --unit cpu-userhog dd if=/dev/urandom of=/dev/null'")
+            # user services are always running underneath user@1000.service, so these two will compete for row 1 or 2
+            b.wait_in_text("table[aria-label='Top 5 CPU services'] tbody", "cpu-userhog")
+            b.click("table[aria-label='Top 5 CPU services'] tbody td[data-label='Service'] a:contains('cpu-userhog')")
+            b.enter_page("/system/services")
+            b.wait_in_text(".service-name", "/usr/bin/dd if=/dev/urandom of=/dev/null")
+
+    @testlib.skipImage("TODO: fix for OpenSUSE", "opensuse-tumbleweed")
+    def testMemory(self):
+        b = self.browser
+        m = self.machine
+
+        if m.image.startswith(("fedora-", "rhel-")):
+            # HACK - https://bugzilla.redhat.com/show_bug.cgi?id=2461071
+            m.execute("setenforce 0")
+            self.addCleanup(m.execute, "setenforce 1")
+
+        # only some images have swap
+        have_swap = m.execute("swapon --show").strip()
+        # wait until RAM usage is initialized
+        b.wait(lambda: b.get_pf_progress_value("#current-memory-usage") > 10)
+
+        # our test machines should use a reasonable chunk of available memory
+        initial_usage = b.get_pf_progress_value("#current-memory-usage")
+        self.assertGreater(initial_usage, 10)
+        self.assertLess(initial_usage, 80)
+        # allocate a chunk of memory; this may cause other stuff to get unmapped,
+        # thus not exact addition, but usage should go up
+        size = 300 if have_swap else 200  # MB
+        self.write_file("/usr/local/bin/memhog.sh", f"""#!/usr/bin/awk -f
+BEGIN {{
+    x = sprintf("%{size}000000s","");
+    system("touch /tmp/hogged; sleep infinity")
+}}""", perm="755")
+
+        m.execute("systemd-run --collect --slice cockpittest --unit mem-hog memhog.sh")
+        m.execute("while [ ! -e /tmp/hogged ]; do sleep 1; done")
+        # bars update every 3s
+        time.sleep(8)
+        hog_usage = b.get_pf_progress_value("#current-memory-usage")
+        self.assertGreater(hog_usage, initial_usage + 8)
+
+        b.wait_text("table[aria-label='Top 5 memory services'] tbody tr:nth-of-type(1) td[data-label='Service']", "mem-hog")
+        b.wait(lambda: topServiceValue(self, "Top 5 memory services", "Used", 1) > size)
+        b.wait(lambda: topServiceValue(self, "Top 5 memory services", "Used", 1) < size + 50)
+
+        # total memory is shown as tooltip
+        b.mouse("#current-memory-usage", "mouseenter")
+        b.wait_in_text(".pf-v6-c-tooltip", "B total")
+        b.mouse("#current-memory-usage", "mouseleave")
+
+        # table entries are links to Services page
+        b.click("table[aria-label='Top 5 memory services'] tbody tr:nth-of-type(1) td[data-label='Service'] a")
+        b.enter_page("/system/services")
+        b.wait_in_text("#path", "/mem-hog.service")
+        b.wait_in_text(".service-name", "memhog.sh")
+
+        b.go("/metrics")
+        b.enter_page("/metrics")
+        b.wait_visible("table[aria-label='Top 5 memory services']")
+
+        if have_swap:
+            usage_hog1 = b.get_pf_progress_value("#current-memory-usage")
+
+            # use even more memory to trigger swap
+            m.execute("systemd-run --collect --slice cockpittest --unit mem-hog2 awk "
+                      """'BEGIN { x = sprintf("%750000000s",""); system("touch /tmp/hogged2; sleep infinity") }'""")
+            m.execute("while [ ! -e /tmp/hogged2 ]; do sleep 1; done")
+            b.wait(lambda: b.get_pf_progress_value("#current-swap-usage") > 0)
+
+            m.execute("systemctl stop mem-hog mem-hog2; rm /tmp/hogged2")
+
+            # after stopping both hogs, usage should go down
+            b.wait(lambda: b.get_pf_progress_value("#current-memory-usage") < usage_hog1)
+            self.assertGreater(b.get_pf_progress_value("#current-memory-usage"), 10)
+            b.wait_not_in_text("table[aria-label='Top 5 memory services'] tbody", "mem-hog")
+
+            # total swap is shown as tooltip
+            b.mouse("#current-swap-usage", "mouseenter")
+            b.wait_in_text(".pf-v6-c-tooltip", "B total")
+            b.mouse("#current-swap-usage", "mouseleave")
+        else:
+            m.execute("systemctl stop mem-hog")
+
+        m.execute("rm /tmp/hogged")
+
+        # Test Podman containers
+        container_name = "pod-mem-hog"
+        # pipe to tail to keep the data in memory
+        m.execute(f"""
+            podman run --rm -d --name {container_name} {self.busybox_image} /bin/sh -c '
+            head -c 300m /dev/zero | tail | sleep infinity'""")
+
+        # It takes one re-render for the name lookup
+        with b.wait_timeout(30):
+            b.wait_text("table[aria-label='Top 5 memory services'] tbody tr:nth-of-type(1) td[data-label='Service']", f"pod {container_name}")
+
+        m.execute(f"podman stop -t 0 {container_name}")
+
+        # RHEL-8's podman user containers do not show up as
+        # libpod-$containerid but as podman-3679.scope.
+        if not m.image.startswith("rhel-8"):
+            # copy images for user podman tests; podman insists on user session
+            m.execute(f"podman save {self.busybox_image} | sudo -i -u admin podman load")
+
+            # Test user containers
+            user_container_name = "user-mem-hog"
+            cmd = f'podman run --rm -i --name {user_container_name} {self.busybox_image} /bin/sh -c "head -c 300m /dev/zero | tail | sleep infinity"'
+            self.run_as_admin_background(cmd, user_container_name)
+
+            # It takes one re-render for the name lookup
+            with b.wait_timeout(30):
+                b.wait_text("table[aria-label='Top 5 memory services'] tbody tr:nth-of-type(2) td[data-label='Service']", f"pod {user_container_name}")
+
+            self.run_as_admin(f"podman stop -t 0 {user_container_name}")
+
+        # Test link to user services
+        # older releases don't have memory accounting enabled for user services
+        if not m.image.startswith("rhel-8"):
+            m.execute("su - admin -c 'XDG_RUNTIME_DIR=/run/user/$(id -u admin) systemd-run --user --collect --slice cockpittest --unit mem-userhog memhog.sh'")
+            m.execute("while [ ! -e /tmp/hogged ]; do sleep 1; done")
+            # The DOM is very volatile and we sometimes click on the
+            # wrong row, so let's try a couple of times
+            n = 0
+            while True:
+                # user services are always running underneath user@1000.service, so these two will compete for row 1 or 2
+                b.wait_in_text("table[aria-label='Top 5 memory services'] tbody", "mem-userhog")
+                b.click("table[aria-label='Top 5 memory services'] tbody td[data-label='Service'] a:contains('mem-userhog')")
+                b.enter_page("/system/services")
+                try:
+                    b.wait_in_text(".service-name", "memhog.sh")
+                    break
+                except testlib.Error as ex:
+                    if n < 5:
+                        print("WARNING: Got the wrong service, retrying")
+                    else:
+                        raise ex
+                b.eval_js("window.history.back()")
+                b.enter_page("/metrics")
+                n = n + 1
+
+    def testDiskIO(self):
+        b = self.browser
+        m = self.machine
+
+        b.wait_timeout(60)
+
+        # test env should be quiet enough to not transmit MB/s
+        b.wait(lambda: re.match(r'^(0|[0-9.]+ (kB|B)/s)$', b.text("#current-disks-read")))
+        b.wait(lambda: re.match(r'^(0|[0-9.]+ (kB|B)/s)$', b.text("#current-disks-write")))
+        # reading lots of data
+        m.execute("systemd-run --collect --slice cockpittest --unit disk-read-hog sh -ec 'while true; do echo 3 > /proc/sys/vm/drop_caches; grep -r . /usr >/dev/null; done'")
+        b.wait(lambda: re.match(r'^[0-9.]+ (MB|GB)/s$', b.text("#current-disks-read")))
+        b.wait(lambda: re.match(r'^(0|[0-9.]+ (kB|B)/s)$', b.text("#current-disks-write")))  # this should stay calm
+        # read in popover
+        b.click("#current-metrics-card-disks .all-disks-no-gap button")
+        b.wait_visible(".pf-v6-c-popover .disks-nowrap")
+        b.wait(lambda: re.match(r'^[0-9.]+ (MB|GB)/s$', b.text("[aria-label='Disks usage'] [device-name='vda'] [data-label='Read']")))
+        b.wait(lambda: re.match(r'^(0|[0-9.]+ (kB|B)/s)$', b.text("[aria-label='Disks usage'] [device-name='vda'] [data-label='Write']")))  # write should stay calm
+        b.wait(lambda: re.match(r'^(0|[0-9.]+ (kB|B)/s)$', b.text("[aria-label='Disks usage'] [device-name='sr0'] [data-label='Read']")))  # other disks should stay calm
+        # top service should be disk-read-hog
+        # unsupported on rhel 8 as it uses cgroupv1
+        if not m.image.startswith("rhel-8"):
+            b.wait_text_matches("table[aria-label='Top 5 disk usage services'] tr:first-child td[data-label='Service']", "disk-read-hog")
+            b.wait(lambda: re.match(r'^[0-9.]+ (MB|GB)/s$', b.text("table[aria-label='Top 5 disk usage services'] tr:first-child td[data-label='Read']")))
+            b.wait(lambda: re.match(r'^0|([0-9.]+ (kB|B)/s)$', b.text("table[aria-label='Top 5 disk usage services'] tr:first-child td[data-label='Write']")))  # this should stay calm
+
+        m.execute("systemctl stop disk-read-hog")
+        b.wait(lambda: re.match(r'^(0|[0-9.]+ (kB|B)/s)$', b.text("[aria-label='Disks usage'] [device-name='vda'] [data-label='Read']")))  # back to quiet
+        b.wait(lambda: re.match(r'^(0|[0-9.]+ (kB|B)/s)$', b.text("#current-disks-read")))  # back to quiet
+        b.click(".pf-v6-c-popover__close > button")
+        # writing lots of data
+        m.execute("systemd-run --collect --slice cockpittest --unit disk-write-hog sh -ec "
+                  " 'while true; do dd if=/dev/zero of=/var/tmp/blob bs=1M count=100; done'")
+        self.addCleanup(m.execute, "rm -f /var/tmp/blob")
+        b.wait(lambda: re.match(r'^[0-9.]+ (MB|GB)/s$', b.text("#current-disks-write")))
+        b.wait(lambda: re.match(r'^(0|[0-9.]+ (kB|B)/s)$', b.text("#current-disks-read")))  # this should stay calm
+        # write in popover
+        b.click("#current-metrics-card-disks .all-disks-no-gap button")
+        b.wait(lambda: re.match(r'^[0-9.]+ (MB|GB)/s$', b.text("[aria-label='Disks usage'] [device-name='vda'] [data-label='Write']")))
+        b.wait(lambda: re.match(r'^(0|[0-9.]+ (kB|B)/s)$', b.text("[aria-label='Disks usage'] [device-name='vda'] [data-label='Read']")))  # read should stay calm
+        b.wait(lambda: re.match(r'^(0|[0-9.]+ (kB|B)/s)$', b.text("[aria-label='Disks usage'] [device-name='sr0'] [data-label='Write']")))  # other disks should stay calm
+        # top service should be disk-write-hog
+        # unsupported on rhel 8 as it uses cgroupv1
+        if not m.image.startswith("rhel-8"):
+            b.wait_text_matches("table[aria-label='Top 5 disk usage services'] tr:first-child td[data-label='Service']", "disk-write-hog")
+            b.wait(lambda: re.match(r'^[0-9.]+ (MB|GB)/s$', b.text("table[aria-label='Top 5 disk usage services'] tr:first-child td[data-label='Write']")))
+            b.wait(lambda: re.match(r'^0|([0-9.]+ (kB|B)/s)$', b.text("table[aria-label='Top 5 disk usage services'] tr:first-child td[data-label='Read']")))  # this should stay calm
+
+        m.execute("systemctl stop disk-write-hog")
+        b.wait(lambda: re.match(r'^(0|[0-9.]+ (kB|B)/s)$', b.text("[aria-label='Disks usage'] [device-name='vda'] [data-label='Write']")))  # back to quiet
+        b.wait(lambda: re.match(r'^(0|[0-9.]+ (kB|B)/s)$', b.text("#current-disks-write")))  # back to quiet
+        b.click(".pf-v6-c-popover__close > button")
+        # top service should be podman container busybox-write-hog
+        m.execute(f"podman run --rm -d --name busybox-write-hog {self.busybox_image} /bin/ash -c 'while true; do dd if=/dev/urandom of=/testfile bs=20M count=100; done'")
+        self.addCleanup(m.execute, "podman rm -f busybox-write-hog || true")
+        b.wait_text_matches("table[aria-label='Top 5 disk usage services'] tr:first-child td[data-label='Service']", "pod busybox-write-hog")
+        b.wait(lambda: re.match(r'^[0-9.]+ (MB|GB)/s$', b.text("table[aria-label='Top 5 disk usage services'] tr:first-child td[data-label='Write']")))
+        b.wait(lambda: re.match(r'^0|([0-9.]+ (kB|B)/s)$', b.text("table[aria-label='Top 5 disk usage services'] tr:first-child td[data-label='Read']")))  # this should stay calm
+        m.execute('podman stop busybox-write-hog')
+
+        # Disk usage
+
+        # add 50 MB loopback disk; mount it once rw and once ro
+        m.execute("""
+            F=$(mktemp /var/tmp/loop.XXXX)
+            dd if=/dev/zero of=$F bs=1M count=50
+            mkfs -t ext3 $F
+            mkdir -p /var/cockpittest /var/cockpit-ro-test
+            mount -o loop $F /var/cockpittest
+            RODEV=$(losetup -f --show $F)
+            mount -r $RODEV /var/cockpit-ro-test
+            losetup -d $RODEV
+            rm $F""")
+        self.addCleanup(m.execute, "umount /var/cockpittest /var/cockpit-ro-test")
+
+        self.assertLess(b.get_pf_progress_value(".pf-v6-c-progress[data-disk-usage-target='/var/cockpittest']"), 5)
+        progress_sel = ".pf-v6-c-progress[data-disk-usage-target='/var/cockpittest'] .pf-v6-c-progress__status"
+        # free size is anything between 40 and 50 MB
+        self.assertRegex(b.text(progress_sel), r"^4\d\.\d MB free$")
+        # total size is shown in tooltip
+        b.mouse(progress_sel, "mouseenter")
+        b.wait_in_text(".pf-v6-c-tooltip", "total")
+        # total size is anything between 40 and 50 MB
+        self.assertRegex(b.text(".pf-v6-c-tooltip"), r"^4\d\.\d MB total$")
+        b.mouse(progress_sel, "mouseleave")
+        # read-only loop devices are not shown
+        self.assertFalse(b.is_present(".pf-v6-c-progress[data-disk-usage-target='/var/cockpit-ro-test']"))
+
+        m.execute("dd if=/dev/zero of=/var/cockpittest/blob bs=1M count=40")
+        b.wait(lambda: b.get_pf_progress_value(".pf-v6-c-progress[data-disk-usage-target='/var/cockpittest']") >= 90)
+
+        # clicking on progress leads to the storage page
+        # CoreOS images don't have cockpit-storaged; all others including bootc do
+        if "coreos" not in m.image:
+            self.assertTrue(b.is_present("#current-disks-usage button"))
+            b.click(progress_sel)
+            b.enter_page("/storage")
+            # weird -- storage page does not show transient mount points, only permanent ones; so check for the device
+            dev = m.execute("findmnt --noheadings -o SOURCE /var/cockpittest").strip()
+            b.wait_in_text('[data-test-card-title="Storage"]', dev.replace("/dev/", ""))
+
+            b.go("/metrics")
+            b.enter_page("/metrics")
+            b.wait_visible(progress_sel)
+            b.logout()
+
+            # no host-local configs/overrides in beiboot mode
+            if testlib.isBeibootLogin():
+                return
+
+            # without cockpit-storaged, mounts are not links
+            self.write_file("/etc/cockpit/storaged.override.json",
+                            '{"conditions": [{"path-exists": "/disable"}]}')
+            self.login_and_go("/metrics")
+        b.wait_visible(progress_sel)
+        self.assertFalse(b.is_present("#current-disks-usage button"))
+
+    @testlib.skipOstree("no netcat on CoreOS")
+    def testNetwork(self):
+        b = self.browser
+        m = self.machine
+
+        # add synthetic veth which is guaranteed quiet
+        m.execute("ip link add name cockpittest1 type veth peer name vcockpittest1")
+        self.addCleanup(m.execute, "ip link del dev cockpittest1")
+
+        # has expected interfaces
+        b.wait_in_text("[aria-label='Network usage'] [data-interface='cockpittest1']", "cockpittest1")
+        b.wait_in_text("[aria-label='Network usage'] [data-interface='lo']", "lo")
+
+        # can jump to network interface details
+        b.wait_visible("[aria-label='Network usage'] [data-interface='cockpittest1'] button")
+        b.wait_visible("[aria-label='Network usage'] [data-interface='lo'] button")
+
+        def rateMatches(label, regexp):
+            text = b.text(f"[aria-label='Network usage'] [data-interface='lo'] td[data-label='{label}']")
+            return re.match(regexp, text) is not None
+
+        # loopback is quiet enough to not transmit MB/s
+        b.wait(lambda: rateMatches("In", r'^(0|[0-9.]+ (kB|B)/s)$'))
+        b.wait(lambda: rateMatches("Out", r'^(0|[0-9.]+ (kB|B)/s)$'))
+        # pipe lots of data through lo
+        m.execute("systemd-run --collect --slice cockpittest --unit lo-hog sh -ec "
+                  " 'nc -n -vv -l 2000 > /dev/null & sleep 1; nc -vv localhost 2000 </dev/zero'")
+        b.wait(lambda: rateMatches("In", r'^[0-9.]+ (MB|GB)/s$'))
+        b.wait(lambda: rateMatches("Out", r'^[0-9.]+ (MB|GB)/s$'))
+        m.execute("systemctl stop lo-hog")
+
+        # nothing happens on cockpittest1
+        b.wait_text("[aria-label='Network usage'] [data-interface='cockpittest1'] td[data-label='In']", "0")
+        b.wait_text("[aria-label='Network usage'] [data-interface='cockpittest1'] td[data-label='Out']", "0")
+
+        b.click("[aria-label='Network usage'] [data-interface='lo'] button")
+        b.enter_page("/network")
+        b.wait_in_text("#network-interface-name", "lo")
+        b.wait_in_text(".network-interface-details", "This device cannot be managed here.")
+
+        b.go("/metrics")
+        b.enter_page("/metrics")
+        b.click("[aria-label='Network usage'] [data-interface='cockpittest1'] button")
+        b.enter_page("/network")
+        b.wait_in_text("#network-interface-name", "cockpittest1")
+        b.wait_in_text(".network-interface-details", "This device cannot be managed here.")
+
+
+@testlib.skipImage("TODO: Arch Linux packagekit support", "arch")
+@testlib.skipImage("image has pcp installed, but cannot be removed", "*-bootc")
+@testlib.skipImage("TODO: fix for OpenSUSE", "opensuse-tumbleweed")
+class TestMetricsPackages(packagelib.PackageCase):
+    pcp_dialog_selector = "#pcp-settings-modal"
+
+    def testBasic(self):
+        b = self.browser
+        m = self.machine
+
+        # Packaging python in the correct directory generates some noisy *pyc*
+        # files on at least Fedora, for testing purposes extend PYTHONPATH and
+        # install to /usr/local/lib in the fake python3-pcp package.
+        self.write_file("/etc/environment", "PYTHONPATH=/usr/local/lib")
+
+        redis_service = redisService(m.image)
+        redis_package = "valkey" if redis_service == "valkey" else "redis"
+        extra_packages = []
+        if redis_package == "valkey" and m.image.startswith(("fedora", "rhel-10", "centos-10")):
+            # Fedora has a compat package that we need to
+            # remove at the same time as valkey.
+            # Fedora split out valkey to more packages as
+            # well which we need to remove.
+            extra_packages += m.execute("rpm -qa valkey-*").split("\n")
+
+        if m.ostree_image:
+            self.login_and_go("/metrics")
+            b.wait_in_text(".pf-v6-c-empty-state", "PCP is missing")
+            b.wait_not_present(".pf-v6-c-empty-state button.pf-m-primary")
+
+            b.click("#metrics-header-section button.pf-m-secondary")
+            b.wait_visible(self.pcp_dialog_selector)
+            b.wait_visible("#switch-pmlogger:not(:checked)")
+            # no packagekit, can't enable
+            b.wait_visible("#switch-pmlogger:disabled")
+            b.wait_visible("#switch-pmproxy:disabled")
+            return
+
+        if m.image.startswith("debian") or m.image.startswith("ubuntu"):
+            m.execute("dpkg --purge libpcp-pmda-perl python3-pcp pcp-dstat pcp redis redis-server")
+            # HACK: pcp does not clean up correctly on Debian https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=986074
+            m.execute("rm -f /etc/systemd/system/pmlogger.service.requires/pmlogger_farm.service")
+        else:
+            m.execute(f"rpm --erase --verbose pcp python3-pcp {redis_package} {' '.join(extra_packages)}")
+            if "centos-8" in m.image or "rhel-8" in m.image:
+                # RHEL 8 ships this in a module, make sure that doesn't hide our fake package
+                m.execute("dnf module disable -y redis || true")
+
+        dummy_service = "[Service]\nExecStart=/bin/sleep infinity\n[Install]\nWantedBy=multi-user.target\n"
+
+        # Fake it enough for cockpit.channels.pcp to import successfully
+        cpcp_content = {
+            "/usr/local/lib/pcp.py": "pmapi = True",
+            "/usr/local/lib/cpmapi.py": "",
+        }
+        pcp_content = {
+            "/lib/systemd/system/pmlogger.service": dummy_service,
+            "/lib/systemd/system/pmproxy.service": dummy_service,
+        }
+        redis_content = {
+            f"/lib/systemd/system/{redis_service}.service": dummy_service,
+        }
+
+        self.createPackage("python3-pcp", "999", "1", content=cpcp_content, depends="pcp")
+        self.createPackage("pcp", "999", "1", content=pcp_content, postinst="systemctl daemon-reload")
+        self.createPackage(redis_package, "999", "1", content=redis_content, postinst="systemctl daemon-reload")
+        self.enableRepo(refresh_repo=self.backend != "dnf5")
+
+        # install c-pcp from the empty state
+        self.login_and_go("/metrics")
+        b.wait_in_text(".pf-v6-c-empty-state", "Install PCP support")
+        b.click(".pf-v6-c-empty-state button.pf-m-primary")
+        b.click("#dialog button:contains('Install')")
+        b.wait_not_present("#dialog")
+        b.wait_in_text(".pf-v6-c-empty-state", "Metrics history could not be loaded")
+        b.logout()
+
+        # install c-pcp from the Metrics Settings dialog
+        self.removePackages(["python3-pcp", "pcp"])
+        self.login_and_go("/metrics")
+        b.click("#metrics-header-section button.pf-m-secondary")
+        b.wait_visible(self.pcp_dialog_selector)
+        b.wait_visible("#switch-pmlogger:not(:checked)")
+        b.click("#switch-pmlogger")
+        b.wait_visible("#switch-pmlogger:checked")
+        applySettings(b, self.pcp_dialog_selector)
+        # install dialog
+        b.click("#dialog button:contains('Install')")
+        b.wait_not_present("#dialog")
+        # sets up pmlogger correctly; this is asynchronous, as it happens in the background after closing install dialog
+        m.execute('until [ $(systemctl is-enabled pmlogger) = enabled ]; do sleep 1; done')
+        # also needs to wait for activating → active
+        m.execute('until [ $(systemctl is-active pmlogger) = active ]; do sleep 1; done')
+        b.wait_in_text(".pf-v6-c-empty-state", "Metrics history could not be loaded")
+        b.wait_in_text(".pf-v6-c-empty-state", "pmlogger.service is failing to collect data")
+        # wait till systemd actions are finished before opening a new dialog,
+        # not doing so creates a race where Dialogs.close() can be called when opening a new dialog.
+        b.wait_visible("#metrics-header-section button.pf-m-secondary[data-test-install-finished='done']")
+
+        # HACK: There's a PF bug that makes the memory tooltip stay around forever
+        # once opening the PCP config dialog; make sure it goes away, to avoid
+        # obscuring the pmproxy switch
+        if b.is_present(".pf-v6-c-tooltip"):
+            b.mouse("#current-memory-usage-description", "mouseleave")
+            b.wait_not_present(".pf-v6-c-tooltip")
+
+        # install redis
+        b.click("#metrics-header-section button.pf-m-secondary")
+        b.wait_visible(self.pcp_dialog_selector)
+        b.wait_visible("#switch-pmproxy:not(:checked)")
+        b.click("#switch-pmproxy")
+        b.wait_visible("#switch-pmproxy:checked")
+        applySettings(b, self.pcp_dialog_selector)
+        # install dialog
+        b.click("#dialog button:contains('Install')")
+        b.wait_not_present("#dialog")
+        # sets up redis correctly; this is asynchronous, as it happens in the background after closing install dialog
+        m.execute('until [ $(systemctl is-enabled pmproxy) = enabled ]; do sleep 1; done')
+        m.execute('until [ $(systemctl is-active pmproxy) = active ]; do sleep 1; done')
+        m.execute(f'until [ $(systemctl is-active {redis_service}) = active ]; do sleep 1; done')
+        self.assertIn(redis_service, m.execute("systemctl show -p Wants --value pmproxy").strip())
+
+
+@testlib.skipOstree("no PCP support")
+class TestMultiCPU(testlib.MachineCase):
+
+    provision = {
+        "0": {"cpus": 2}
+    }
+
+    def testCPUUsage(self):
+        b = self.browser
+        m = self.machine
+
+        # Disable pre-loading packagekit, dnf consumes tons of memory/CPU and interferes too much
+        self.disable_preload("packagekit")
+
+        prepareArchive(m, "2corescpu.tar.gz", 1598971635)
+        self.login_and_go("/metrics")
+
+        # one core is busy, the other idle -- that should be 50% total usage
+        self.assertGreaterEqual(getCompressedMinuteValue(test=self, g_type="cpu", saturation=False, hour=1598968800000, minute=44), 0.2)
+        self.assertLessEqual(getCompressedMinuteValue(test=self, g_type="cpu", saturation=False, hour=1598968800000, minute=44), 0.55)
+
+        # next minute, both cores are busy
+        self.assertGreaterEqual(getMaximumSpike(test=self, g_type="cpu", saturation=False, hour=1598968800000, minute=45), 0.5)
+        self.assertLessEqual(getMaximumSpike(test=self, g_type="cpu", saturation=False, hour=1598968800000, minute=45), 1.0)
+
+        b.wait_timeout(60)
+
+        # Test current usage of cores
+        b.wait_text("#current-cpu-usage-description", "2 CPUs")
+        b.wait(lambda: b.get_pf_progress_value("#current-cpu-usage") < 20)
+        m.execute("systemd-run --collect --slice cockpittest -p CPUQuota=50% --unit cpu-hog dd if=/dev/urandom of=/dev/null")
+        m.execute("systemd-run --collect --slice cockpittest -p CPUQuota=20% --unit cpu-piglet dd if=/dev/urandom of=/dev/null")
+        # View all CPUs
+        b.click("#current-metrics-card-cpu button")
+        b.wait(lambda: int(b.text(".pf-v6-c-popover .cpu-all dd:nth-of-type(1)")[:-1]) > 40)
+        b.wait(lambda: int(b.text(".pf-v6-c-popover .cpu-all dd:nth-of-type(2)")[:-1]) > 15)
+        b.click(".pf-v6-c-popover button")
+        b.wait_not_present(".pf-v6-c-popover")
+
+        # the top CPU core runs cpu-hog
+        b.wait(lambda: b.get_pf_progress_value("#current-top-cpu-usage") >= 38)
+        # the hoglet gets scheduled between core 1 and 2
+        b.wait(lambda: b.get_pf_progress_value("#current-top-cpu-usage") <= 80)
+        # looks like "average: 45% max: 60%"
+        b.wait(lambda: int(b.text("#current-cpu-usage .pf-v6-c-progress__status").split()[-1].rstrip('%')) >= 38)
+        b.wait(lambda: int(b.text("#current-cpu-usage .pf-v6-c-progress__status").split()[-1].rstrip('%')) <= 80)
+
+        self.allow_journal_messages('.*apparmor="DENIED" operation="open" class="file" profile="hostname" name="/proc/sys/net/ipv6/conf/all/disable_ipv6".*')
+
+
+@testlib.skipOstree("no PCP support")
+@testlib.skipImage("TODO: fix for OpenSUSE", "opensuse-tumbleweed")
+class TestGrafanaClient(testlib.MachineCase):
+
+    provision = {
+        "0": {"address": "10.111.112.1/20", "dns": "10.111.112.1"},
+        # forward Grafana port, so that a developer can connect to it with local browser
+        "services": {"image": "services", "forward": {"3000": 3000}}
+    }
+
+    def testBasic(self):
+        m = self.machine
+        b = self.browser
+        mg = self.machines['services']
+        pcp_dialog_selector = "#pcp-settings-modal"
+
+        # Disable pre-loading packagekit, dnf needs-restarting (dnf 4) consumes tons of cpu/memory on RHEL-10-1
+        self.disable_preload("packagekit")
+
+        # HACK - https://github.com/performancecopilot/pcp/issues/2573 https://launchpad.net/bugs/2152271
+        # Unset PMPROXY_LOCAL, we want it to listen externally.
+        if m.image == "ubuntu-2604":
+            m.execute("sed -i 's/^PMPROXY_LOCAL/# PMPROXY_LOCAL/' /etc/default/pmproxy")
+
+        # avoid dynamic host name changes during PCP data collection, and start from clean slate
+        m.execute("""systemctl stop pmlogger || true
+                     systemctl reset-failed pmlogger || true
+                     rm -rf /var/log/pcp/pmlogger/*
+                     hostnamectl set-hostname grafana-client""")
+
+        # start Grafana
+        mg.execute("/root/run-grafana")
+        m.execute("until curl --silent --show-error http://10.111.112.100:3000; do sleep 1; done")
+        # enable PCP plugin; like on Cog (Configuration) menu → Plugins → Performance Co-Pilot → Enable
+        mg.execute("curl --silent --show-error -u admin:foobar -d '' 'http://127.0.0.1:3000/api/plugins/performancecopilot-pcp-app/settings?enabled=true'")
+        self.login_and_go("/metrics")
+
+        # pmlogger data collection is not running initially
+        b.wait_in_text(".pf-v6-c-empty-state", "Metrics history could not be loaded")
+        b.wait_in_text(".pf-v6-c-empty-state", "pmlogger.service is not running")
+        b.click(".pf-v6-c-empty-state button.pf-m-primary")
+        b.wait_visible(pcp_dialog_selector)
+        b.wait_visible("#switch-pmlogger:not(:checked)")
+        b.click("#switch-pmlogger")
+        b.wait_visible("#switch-pmlogger:checked")
+        applySettings(b, pcp_dialog_selector)
+
+        # enable pmproxy+redis (none of our test OSes have both of them running by default)
+        b.click("#metrics-header-section button.pf-m-secondary")
+        b.wait_visible(pcp_dialog_selector)
+        b.wait_visible("#switch-pmproxy:not(:checked)")
+        b.click('#switch-pmproxy')
+        b.wait_visible('#switch-pmproxy:checked')
+        applySettings(b, pcp_dialog_selector)
+
+        # enable pmproxy service in firewalld in the alert
+        b.wait_visible("#firewalld-request-pmproxy")
+        b.click(".pf-v6-c-alert button.pf-m-primary")
+
+        # we are done with the Cockpit side
+        b.logout()
+        b.kill()
+
+        # Log into Grafana (usually http://127.0.0.2:3002 if you do it interactively)
+        bg = testlib.Browser(mg.forward['3000'], label=self.label() + "-" + mg.label, machine=self)
+
+        # HACK: Grafana uses zone.js which patches the global Promise object
+        # this breaks webdriver's `awaitPromise` logic, so none of our Browser.wait_*() work
+        def bgwait_present(sel):
+            for _ in range(15):
+                if bg.is_present(sel):
+                    break
+                time.sleep(1)
+            else:
+                raise testlib.Error("timed out waiting for " + sel)
+
+        # we don't get the Promise result of ph_find_scroll_into_view, use JS events
+        def bgclick(sel):
+            bgwait_present(sel)
+            bg.mouse(sel, "click", x=1)
+
+        try:
+            bg.open("/")
+            bgwait_present("input[name='password']")
+            testlib.wait(lambda: "Welcome to Grafana" in bg.text("body"))
+            bg.set_input_text("input[name='user']", "admin")
+            bg.set_input_text("input[name='password']", "foobar")
+            bgclick("button:contains('Log in')")
+            testlib.wait(lambda: "Add your first data source" in bg.text("body"))
+
+            # Add the PCP redis data source for our client machine
+            # Cog (Configuration) menu → Data Sources → Add
+            # Select PCP redis, HTTP URL http://10.111.112.1:44322
+            redis_url = 'http://10.111.112.1:44322'
+            bg.open("/datasources/new")
+            bgclick("[aria-label='Add new data source PCP Redis']")
+            bgwait_present("input[placeholder='http://localhost:44322']")
+            bg.set_input_text("input[placeholder='http://localhost:44322']", redis_url)
+            bgclick("button:contains('Save &')")  # Save & [tT]est
+            testlib.wait(lambda: "Data source is working" in bg.text("body"))
+
+            # Grafana auto-discovers "host" variable for incoming metrics; it takes a while to receive the first
+            # measurement; that event is not observable directly in Grafana, and the dashboard does not auto-update to
+            # new variables; so probe the API until it appears
+            testlib.wait(lambda: "grafana-client" in mg.execute(f"curl --max-time 10 --silent --show-error '{redis_url}/series/labels?names=hostname'"), delay=10, tries=30)
+            # ... and the load metrics as well
+            testlib.wait(lambda: mg.execute(f"curl --max-time 10 --silent --show-error '{redis_url}/series/query?expr=kernel.all.load'").strip() != '[]', delay=10, tries=30)
+
+            # Switch to "Dashboards" tab, import "Host Overview"
+            bgclick("a[href$='/dashboards'][role=tab]")
+            testlib.wait(lambda: "Loading" not in bg.text("body"))
+            # Assert that PCP Redis: Host overview is the first row.
+            bgwait_present(".filter-table tr:first-of-type:contains('PCP Redis: Host Overview')")
+            bgclick("tr:first-of-type button:contains('Import')")
+            bgwait_present(".filter-table tr:first-of-type:contains('PCP Redis: Host Overview')")
+            bgwait_present("tr:first-of-type button:contains('Re-import')")
+
+            # .. and the dashboard name becomes clickable
+            bgclick("a:contains('PCP Redis: Host Overview')")
+
+            # expect the hostname in the dashboard controls
+            bgwait_present("[data-testid*='link text grafana-client']")
+
+            # expect a "Load average" panel with sensible numbers
+            load_avg_sel = "section[data-testid*='Load average'],div[data-testid*='Load average']"
+            testlib.wait(lambda: "minute" in bg.text(load_avg_sel))
+            self.assertRegex(bg.text(load_avg_sel), r"[0-9]\.[0-9]")
+        except Exception:
+            bg.snapshot("FAIL-grafana")
+            raise
+        finally:
+            bg.kill()
+
+
+if __name__ == '__main__':
+    testlib.test_main()

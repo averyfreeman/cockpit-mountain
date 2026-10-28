@@ -1,0 +1,22 @@
+# Managed by Cockpit Sudo Manager
+# System networking services
+#
+# Scope:
+#   - Network reachability
+#   - Safe network diagnostics
+#   - No interface reconfiguration
+
+# ==========================================================
+# Network services (choose one)
+# ==========================================================
+Cmnd_Alias SYSTEM_NETWORK = \
+  /usr/bin/systemctl status NetworkManager, \
+  /usr/bin/systemctl restart NetworkManager
+
+# ==========================================================
+# Network inspection (read-only)
+# ==========================================================
+Cmnd_Alias SYSTEM_NETINFO = \
+  /usr/sbin/ip addr, \
+  /usr/sbin/ip route, \
+  /usr/sbin/ss -lntup

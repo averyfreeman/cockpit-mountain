@@ -1,0 +1,274 @@
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
+
+#
+# Copyright (C) 2020 Red Hat, Inc.
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
+
+import os
+import re
+import subprocess
+import unittest
+
+import testlib
+
+dirname = os.path.dirname(__file__)
+run_tests = os.path.join(testlib.TEST_DIR, "common", "run-tests")
+EXAMPLE_DIR = os.path.join(testlib.TEST_DIR, "example")
+VERIFY_DIR = os.path.join(testlib.TEST_DIR, "verify")
+ROOT_DIR = os.path.dirname(testlib.TEST_DIR)
+
+
+class TestRunTestListing(unittest.TestCase):
+
+    def testBasic(self):
+        # Listing on check-* file
+        self.assertEqual(subprocess.check_output([os.path.join(EXAMPLE_DIR, "check-example"), "-l", "TestNondestructiveExample"]).strip().decode(),
+                         "TestNondestructiveExample.testOne\nTestNondestructiveExample.testTwo")
+        # Filter on class
+        p = subprocess.run([run_tests, "--test-dir", EXAMPLE_DIR, "-l", "TestNondestructiveExample"], capture_output=True, check=True)
+        self.assertIn(b"TestNondestructiveExample.testOne\nTestNondestructiveExample.testTwo", p.stdout.strip())
+        # Filter a specific test
+        self.assertIn("TestNondestructiveExample.testOne",
+                      subprocess.check_output([run_tests, "--test-dir", EXAMPLE_DIR, "-l", "TestNondestructiveExample.testOne"]).strip().decode())
+        # Exclude test patterns
+        out = subprocess.check_output([run_tests, "--test-dir", EXAMPLE_DIR, "-l",
+                                       "--exclude", "bogus", "--exclude", "TestNondestructiveExample.testTwo",
+                                       "TestNondestructiveExample"]).strip().decode()
+        self.assertIn("TestNondestructiveExample.testOne", out)
+        self.assertNotIn("testTwo", out)
+
+        ndtests = subprocess.run([run_tests, "--test-dir", EXAMPLE_DIR, "-n", "-l"], check=True, capture_output=True)
+        self.assertIn(b"TestExample.testNondestructive\n", ndtests.stdout)
+        self.assertIn(b"TestNondestructiveExample.testOne\nTestNondestructiveExample.testTwo", ndtests.stdout)
+
+        # nondestructive tests are sorted alphabetically
+        verify_ndtests = subprocess.run([run_tests, "--test-dir", VERIFY_DIR, "-n", "-l"],
+                                        check=True, capture_output=True)
+        self.assertRegex(
+            verify_ndtests.stdout,
+            re.compile(rb".*TestAccounts.*TestFirewall.*TestLogin.*TestServices.*TestTerminal.*", re.S))
+
+    def testNonDestructive(self):
+        self.assertEqual(subprocess.check_output([run_tests, "--test-dir", EXAMPLE_DIR, "--nondestructive", "-l", "TestExample"]).strip().decode(),
+                         "TestExample.testNondestructive")
+
+        # with short option and substring
+        self.assertEqual(subprocess.check_output([run_tests, "--test-dir", EXAMPLE_DIR, "-nl", "TestExamp"]).strip().decode(),
+                         "TestExample.testNondestructive")
+
+
+# This can't be @nondestructive, as we run our own @nondestructive test nested inside this test. This will already call the
+# cleanup handlers, and the outside cleanup would then fail to do that again.
+@testlib.onlyImage("Only run on the required image", "fedora-coreos")
+class TestRunTest(testlib.MachineCase):
+    def testExistingMachine(self):
+        env = os.environ.copy()
+        try:
+            del env["TEST_JOBS"]
+        except KeyError:
+            pass
+        out = subprocess.check_output([run_tests, "--test-dir", EXAMPLE_DIR, "-vt",
+                                       "--machine", self.machine.ssh_address + ":" + self.machine.ssh_port,
+                                       "--browser", self.machine.web_address + ":" + self.machine.web_port,
+                                       "TestNondestructiveExample"], env=env)
+        self.assertRegex(out, b"\nok .* TestNondestructiveExample.testOne")
+        self.assertRegex(out, b"\nok .* TestNondestructiveExample.testTwo")
+        self.assertIn(b"TESTS PASSED", out)
+
+        # implies --nondestructive
+        out = subprocess.check_output([run_tests, "--test-dir", EXAMPLE_DIR, "--machine", "1.2.3.4:56", "--browser", "1.2.3.4:67",
+                                       "TestExample.testBasic"], env=env)
+        self.assertIn(b"1..0", out)
+        self.assertNotIn(b"TestExample", out)
+
+    def testRetry(self):
+        # Don't test this if not in git repo as we use `git diff` for this logic
+        if not os.path.exists(os.path.join(ROOT_DIR, ".git")):
+            return
+
+        env = os.environ.copy()
+        env["TEST_FAILURES"] = "1"
+        # pretend this was a PR against main (set by CI normally, or by the user with --base)
+        env["BASE_BRANCH"] = "main"
+        try:
+            del env["TEST_JOBS"]
+        except KeyError:
+            pass
+
+        # Check that we retry 3 times failing tests
+        process = subprocess.run([run_tests, "--test-dir", EXAMPLE_DIR, "TestExample.testFail", "TestExample.testSkip"],
+                                 env=env, capture_output=True)
+        stdout = process.stdout
+        self.assertRegex(stdout, rb"\nnot ok 1 .*test\/example\/check-example TestExample.testFail \(1\.7GB\) # RETRY 1 \(be robust against unstable tests\)\n")
+        self.assertRegex(stdout, rb"\nnot ok 1 .*test\/example\/check-example TestExample.testFail \(1\.7GB\) # RETRY 2 \(be robust against unstable tests\)\n")
+        self.assertRegex(stdout, rb"\nnot ok 1 .*test\/example\/check-example TestExample.testFail \(1\.7GB\)\n")
+        self.assertNotRegex(stdout, b"RETRY 3")
+        self.assertRegex(stdout, rb"\nok 2 .*test\/example\/check-example TestExample.testSkip \(1\.7GB\) # SKIP testSkip \(__main__\.TestExample")
+        self.assertRegex(stdout, rb"# 1 TESTS FAILED \[\d*s on .*, 2 destructive tests, 0 nondestructive tests: \]")
+
+        # Check retry logic for changed tests
+        test_file = os.path.join(EXAMPLE_DIR, "check-retry")
+        with open(test_file, 'r') as f:
+            original_test = f.read()
+
+        def write_file(file, content, mode=0o666):
+            # test files need to be executable, respect umask
+            content_bin = content.encode()
+            fd = os.open(file, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, mode=mode)
+            try:
+                written = os.write(fd, content_bin)
+                assert written == len(content_bin)
+            finally:
+                os.close(fd)
+
+        self.addCleanup(write_file, test_file, original_test)
+        write_file(test_file, original_test.replace("class NoTest", "class Test"))
+
+        process = subprocess.run([run_tests, "--test-dir", EXAMPLE_DIR, "TestRetryExample.testFail", "TestRetryExample.testBasic",
+                                  "TestRetryExample.testNoRetry"], env=env, capture_output=True)
+        stdout = process.stdout
+
+        # Changed test need to succeed 3 times
+        self.assertRegex(stdout, rb"\nok 1 .*test\/example\/check-retry TestRetryExample.testBasic \(1\.7GB\) # RETRY 1 \(test affected tests 3 times\)\n")
+        self.assertRegex(stdout, rb"\nok 1 .*test\/example\/check-retry TestRetryExample.testBasic \(1\.7GB\) # RETRY 2 \(test affected tests 3 times\)\n")
+        self.assertRegex(stdout, rb"\nok 1 .*test\/example\/check-retry TestRetryExample.testBasic \(1\.7GB\)\n")
+        self.assertNotRegex(stdout, b"RETRY 3")
+
+        # Changed test is never retried
+        self.assertRegex(stdout, rb"\nnot ok 2 .*test\/example\/check-retry TestRetryExample.testFail \(1\.7GB\)\n")
+        self.assertNotRegex(stdout, b"testFail # RETRY")
+
+        # Using @no_retry_when_changed prevents this retry logic
+        self.assertRegex(stdout, rb"\nok 3 .*test\/example\/check-retry TestRetryExample.testNoRetry \(1\.7GB\)\n")
+        self.assertNotRegex(stdout, b"testNoRetry # RETRY")
+
+        # Check retry logic for changed source
+        shell = os.path.join("pkg", "shell", "hosts.tsx")
+        self.assertTrue(os.path.exists(shell))
+
+        with open(shell, 'r') as f:
+            original_source = f.read()
+
+        self.addCleanup(write_file, shell, original_source)
+        write_file(shell, original_source + "\n")
+
+        # create affected test for shell changes
+        affected_testfile = os.path.join(EXAMPLE_DIR, "check-shell-testlib")
+        new_content = original_test.replace("class NoTest", "class NeinTest")
+        write_file(affected_testfile, new_content.replace("class NeinTestRetryExample", "class TestShell"), mode=0o777)
+        self.addCleanup(os.unlink, affected_testfile)
+
+        process = subprocess.run([run_tests, "--test-dir", EXAMPLE_DIR,
+                                  "TestShell.testBasic", "TestShell.testNoRetry"],
+                                 env=env, capture_output=True)
+        stdout = process.stdout
+        self.assertRegex(stdout, rb"\nok .* TestShell.testBasic \(1\.7GB\) # RETRY 1 \(test affected tests 3 times\)\n")
+        self.assertRegex(stdout, rb"\nok .* TestShell.testBasic \(1\.7GB\) # RETRY 2 \(test affected tests 3 times\)\n")
+        self.assertRegex(stdout, rb"\nok .* TestShell.testBasic \(1\.7GB\)\n")
+        self.assertNotRegex(stdout, b"RETRY 3")
+        self.assertRegex(stdout, b"\nok .* TestShell.testNoRetry \\(1\\.7GB\\)\n")
+        self.assertNotRegex(stdout, b"TestShell.testNoRetry # RETRY")
+
+        # Check that just .css changes do no affect retry logic
+        systemd = os.path.join("pkg", "systemd", "overview.scss")
+        self.assertTrue(os.path.exists(systemd))
+
+        with open(systemd, 'r') as f:
+            original_source = f.read()
+
+        self.addCleanup(write_file, systemd, original_source)
+        write_file(systemd, original_source + "\n")
+
+        # create affected test for systemd changes
+        affected_testfile = os.path.join(EXAMPLE_DIR, "check-system-testlib")
+        write_file(affected_testfile, """#!/usr/bin/env python3
+import unittest
+class TestSystemd(unittest.TestCase):
+    def testBasic(self):
+        self.assertTrue(True)
+        """, mode=0o777)
+        self.addCleanup(os.unlink, affected_testfile)
+
+        process = subprocess.run([run_tests, "--test-dir", EXAMPLE_DIR, "TestSystemd.testBasic"],
+                                 env=env, capture_output=True)
+        stdout = process.stdout
+        self.assertRegex(stdout, rb"\nok .* TestSystemd.testBasic \(1\.7GB\)\n")
+        self.assertNotRegex(stdout, b"RETRY")
+
+    @testlib.nondestructive
+    def testTodo(self):
+        env = os.environ.copy()
+        try:
+            del env["TEST_JOBS"]
+        except KeyError:
+            pass
+        env["TEST_TODO"] = "1"
+
+        process = subprocess.run([run_tests, "--test-dir", EXAMPLE_DIR, "TestTodo"],
+                                 env=env, capture_output=True)
+        stdout = process.stdout
+
+        # A @todo test which fails should write 'not ok ... # TODO ...'
+        self.assertRegex(stdout, rb"\nnot ok . .*test/example/check-example TestTodo.testTodoFail \(1\.7GB\) # TODO 2 is not yet sufficiently large\n")
+
+        # A @todo test which passes should write 'not ok ... # expected failure ...' and hard fail
+        self.assertRegex(stdout, rb"\nnot ok . .*test/example/check-example TestTodo.testTodoPass \(1\.7GB\) # expected failure: 2 is not yet sufficiently large\n")
+
+        # There should have been 2 cases, one fail
+        self.assertEqual(process.returncode, 1)
+
+
+@testlib.nondestructive
+class TestTestlib(testlib.MachineCase):
+    def testRestoreAPI(self):
+        m = self.machine
+
+        self.assertEqual(m.execute("whoami").strip(), "root")
+        # existing file
+        m.execute("echo original > /etc/someconfig")
+        self.restore_file("/etc/someconfig")
+        m.execute("echo changed > /etc/someconfig")
+        # nonexisting file
+        self.restore_file("/var/lib/cockpittest.txt")
+        m.execute("echo data > /var/lib/cockpittest.txt")
+
+        # existing dir
+        m.execute("mkdir -p /var/lib/existing_dir; echo hello > /var/lib/existing_dir/original")
+        self.restore_dir("/var/lib/existing_dir")
+        m.execute("rm /var/lib/existing_dir/original; echo pwned > /var/lib/existing_dir/new")
+        # nonexisting dir
+        self.restore_dir("/var/lib/cockpittestnew")
+        m.execute("mkdir -p /var/lib/cockpittestnew; echo hello > /var/lib/cockpittestnew/cruft")
+
+        # NSS is backed up by default
+        m.execute("useradd cockpittest")
+
+        # now pretend the test ends here
+        self.doCleanups()
+
+        # correctly restored existing file
+        self.assertEqual("original", m.execute("cat /etc/someconfig").strip())
+        m.execute("rm /etc/someconfig")
+        # correctly cleaned up nonexisting file
+        m.execute("test ! -e /var/lib/cockpittest.txt")
+
+        # correctly restored existing dir
+        self.assertEqual("original", m.execute("ls /var/lib/existing_dir").strip())
+        self.assertEqual("hello\n", m.execute("cat /var/lib/existing_dir/original"))
+        m.execute("rm -r /var/lib/existing_dir")
+        # correctly removed nonexisting dir
+        m.execute("test ! -e /var/lib/cockpittestnew")
+
+        # NSS/home got restored
+        self.assertNotIn("cockpittest", self.machine.execute("cat /etc/passwd"))
+        self.machine.execute("test ! -e /home/cockpittest")
+
+    @testlib.skipBeiboot("no cockpit-system package installed in beiboot mode")
+    def testMiscAPI(self):
+        assert self.system_before(1000)
+        assert not self.system_before(100)
+
+
+if __name__ == '__main__':
+    testlib.test_main()

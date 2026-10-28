@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+package-lock.json
+
+# Build outputs
+dist/
+*.js.map
+*.css.map
+metafile.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Temporary files
+*.tmp
+.DS_Store
+*~
+
+# Keep src/ and backend/
+!src/
+!backend/
+
+build-rpm.sh
+cockpit-dns-bind-*.tar.gz

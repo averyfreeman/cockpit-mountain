@@ -1,0 +1,886 @@
+cockpit-file-sharing (4.6.3-1focal) focal; urgency=medium
+
+  * resized RBD/LVM devices now show their new capacity to connected initiators immediately,
+    without requiring a failover
+
+ -- Rachit Hans <rhans@45drives.com>  Fri, 18 Sep 2026 10:27:16 -0300
+
+cockpit-file-sharing (4.6.2-3focal) focal; urgency=medium
+
+  * building release package: fixed device resizing and ordering of portblocks and
+    vips
+
+ -- Rachit Hans <rhans@45drives.com>  Tue, 01 Sep 2026 12:57:38 -0300
+
+cockpit-file-sharing (4.6.2-2focal) focal; urgency=medium
+
+  * building test package
+
+ -- Rachit Hans <rhans@45drives.com>  Mon, 31 Aug 2026 12:16:53 -0300
+
+cockpit-file-sharing (4.6.2-1focal) focal; urgency=medium
+
+  * fixing the rbd/vg resize issue
+
+ -- Rachit Hans <rhans@45drives.com>  Mon, 31 Aug 2026 11:53:16 -0300
+
+cockpit-file-sharing (4.6.1-2focal) focal; urgency=medium
+
+  * Repackage with correct houston-common submodule commit
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Thu, 23 Jul 2026 15:32:00 -0300
+
+cockpit-file-sharing (4.6.1-1focal) focal; urgency=medium
+
+  * fix: add debian-trixie packaging support
+
+ -- Rachit Hans <rhans@45drives.com>  Wed, 08 Jul 2026 19:55:22 -0300
+
+cockpit-file-sharing (4.6.0-1focal) focal; urgency=medium
+
+  * Ensure NFS service continues running after removing Ceph remount
+  * Add systemd service monitoring and management for NFS and Samba
+  * Samba: Fix net command option injection from advanced options
+  * Improve Ceph option handling
+  * NFS: Ensure exports files are in sync across PCS cluster nodes with option to
+    merge when out-of-sync
+  * Fix tooltip width
+  * Support toggling dark mode on Cockpit version < 281
+  * Improve clarity of error message when cluster host is down
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Tue, 09 Jun 2026 11:20:46 -0300
+
+cockpit-file-sharing (4.6.0-0rc2focal) focal; urgency=medium
+
+  * Ensure NFS service continues running after removing Ceph remount
+  * Add systemd service monitoring and management for NFS and Samba
+  * Samba: Fix net command option injection from advanced options
+  * Improve Ceph option handling
+  * NFS: Ensure exports files are in sync across PCS cluster nodes with option to
+    merge when out-of-sync
+  * Fix tooltip width
+  * Support toggling dark mode on Cockpit version < 281
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Mon, 08 Jun 2026 12:27:12 -0300
+
+cockpit-file-sharing (4.6.0-0rc1focal) focal; urgency=medium
+
+  * Ensure NFS service continues running after removing Ceph remount
+  * Add systemd service monitoring and management for NFS and Samba
+  * Samba: Fix net command option injection from advanced options
+  * Improve Ceph option handling
+  * NFS: Ensure exports files are in sync across PCS cluster nodes with option to
+    merge when out-of-sync
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Fri, 05 Jun 2026 14:22:53 -0300
+
+cockpit-file-sharing (4.5.9-1focal) focal; urgency=medium
+
+  * Ensure NFS service continues running after removing Ceph remount
+  * Add systemd service monitoring and management for NFS and Samba
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Wed, 27 May 2026 12:55:55 -0300
+
+cockpit-file-sharing (4.5.8-1focal) focal; urgency=medium
+
+  * fix: prevent .rgw.root pool creation on clusters without RGW through s3 module
+
+ -- Rachit Hans <rhans@45drives.com>  Mon, 25 May 2026 15:07:35 -0300
+
+cockpit-file-sharing (4.5.7-2focal) focal; urgency=medium
+
+  * added python3-venv dependency for ubuntu in manifest.
+
+ -- Rachit Hans <rhans@45drives.com>  Thu, 14 May 2026 08:19:24 -0300
+
+cockpit-file-sharing (4.5.7-1focal) focal; urgency=medium
+
+  * added python3-venv dependency in manifest.json
+
+ -- Rachit Hans <rhans@45drives.com>  Thu, 14 May 2026 07:51:37 -0300
+
+cockpit-file-sharing (4.5.6-1focal) focal; urgency=medium
+
+  * allowed non root user with esclated priviliges to modify iscsi resources +  building
+    pacakge
+
+ -- Rachit Hans <rhans@45drives.com>  Mon, 20 Apr 2026 12:39:28 -0300
+
+cockpit-file-sharing (4.5.5-1focal) focal; urgency=medium
+
+  * Allow quoted values in imported smb.conf
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Mon, 23 Mar 2026 11:52:11 -0300
+
+cockpit-file-sharing (4.5.4-8focal) focal; urgency=medium
+
+  * fixed build  yml file + making relase package
+
+ -- Rachit Hans <rhans@45drives.com>  Fri, 06 Mar 2026 09:11:25 -0400
+
+cockpit-file-sharing (4.5.4-7focal) focal; urgency=medium
+
+  * building release  pacakage
+
+ -- Rachit Hans <rhans@45drives.com>  Thu, 05 Mar 2026 10:11:45 -0400
+
+cockpit-file-sharing (4.5.4-6focal) focal; urgency=medium
+
+  * building test pacakage
+
+ -- Rachit Hans <rhans@45drives.com>  Thu, 05 Mar 2026 06:55:59 -0400
+
+cockpit-file-sharing (4.5.4-5focal) focal; urgency=medium
+
+  * building test pacakage
+
+ -- Rachit Hans <rhans@45drives.com>  Thu, 05 Mar 2026 06:17:31 -0400
+
+cockpit-file-sharing (4.5.4-4focal) focal; urgency=medium
+
+  * building test pacakge for rust fs + ui improvements
+
+ -- Rachit Hans <rhans@45drives.com>  Thu, 26 Feb 2026 10:19:33 -0400
+
+cockpit-file-sharing (4.5.4-3focal) focal; urgency=medium
+
+  * building test pacakge for rust fs + ui improvements
+
+ -- Rachit Hans <rhans@45drives.com>  Thu, 26 Feb 2026 09:52:11 -0400
+
+cockpit-file-sharing (4.5.4-2focal) focal; urgency=medium
+
+  * building test pacakge for rust fs wit installing awscurl
+
+ -- Rachit Hans <rhans@45drives.com>  Thu, 26 Feb 2026 08:09:21 -0400
+
+cockpit-file-sharing (4.5.4-1focal) focal; urgency=medium
+
+  * building test pacakge for rust fs
+
+ -- Rachit Hans <rhans@45drives.com>  Thu, 26 Feb 2026 07:18:51 -0400
+
+cockpit-file-sharing (4.5.3-4focal) focal; urgency=medium
+
+  * fixed tab visibilty logic for s3 management + building package
+
+ -- Rachit Hans <rhans@45drives.com>  Wed, 11 Feb 2026 08:44:39 -0400
+
+cockpit-file-sharing (4.5.3-3focal) focal; urgency=medium
+
+  * building package with s3 management tab
+
+ -- Rachit Hans <rhans@45drives.com>  Tue, 10 Feb 2026 13:15:51 -0400
+
+cockpit-file-sharing (4.5.3-2focal) focal; urgency=medium
+
+  * fixed light mode view + added view mode for minio service accounts + building
+    test package
+
+ -- Rachit Hans <rhans@45drives.com>  Wed, 04 Feb 2026 08:14:59 -0400
+
+cockpit-file-sharing (4.5.3-1focal) focal; urgency=medium
+
+  * added service account creation for minio users + building test pacakge
+
+ -- Rachit Hans <rhans@45drives.com>  Tue, 03 Feb 2026 05:55:38 -0400
+
+cockpit-file-sharing (4.5.2-1focal) focal; urgency=medium
+
+  * Fix Windows ACLs toggle switch in Samba share editor - now stays on when extra
+    vfs objects are added
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Wed, 21 Jan 2026 07:18:09 -0400
+
+cockpit-file-sharing (4.5.2-1focal) focal; urgency=medium
+
+  * building test package for s3 management
+
+ -- Rachit Hans <rhans@45drives.com>  Mon, 12 Jan 2026 09:10:33 -0400
+
+cockpit-file-sharing (4.5.1-4focal) focal; urgency=medium
+
+  * build package
+
+ -- Rachit Hans <rhans@45drives.com>  Tue, 06 Jan 2026 13:52:06 -0400
+
+cockpit-file-sharing (4.5.1-1focal) focal; urgency=medium
+
+  * building pacakge with iscsi cluster changes and single server UI changes
+
+ -- Rachit Hans <rhans@45drives.com>  Tue, 06 Jan 2026 07:59:44 -0400
+
+cockpit-file-sharing (4.5.1-2focal) focal; urgency=medium
+
+  * building pacakge for s3 testing
+
+ -- Rachit Hans <rhans@45drives.com>  Tue, 30 Dec 2025 11:28:26 -0400
+
+cockpit-file-sharing (4.4.1-10focal) focal; urgency=medium
+
+  * building package internal for repo
+
+ -- Rachit Hans <rhans@45drives.com>  Wed, 24 Dec 2025 05:28:08 -0400
+
+cockpit-file-sharing (4.5.1-1focal) focal; urgency=medium
+
+  * added S3 management
+
+ -- Rachit Hans <rhans@45drives.com>  Wed, 24 Dec 2025 05:06:06 -0400
+
+
+cockpit-file-sharing (4.4.0-1focal) focal; urgency=medium
+
+  * Added smbpasswd management
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Fri, 12 Dec 2025 13:21:36 -0400
+
+cockpit-file-sharing (4.4.1-9focal) focal; urgency=medium
+
+  * fixed table long name bug + hiding unwanted vgs + changed ocf directory name
+
+ -- Rachit Hans <rhans@45drives.com>  Tue, 02 Dec 2025 08:09:33 -0400
+
+cockpit-file-sharing (4.4.1-8focal) focal; urgency=medium
+
+  * fixed edge case of targetname having colon
+
+ -- Rachit Hans <rhans@45drives.com>  Thu, 13 Nov 2025 13:35:53 -0400
+
+cockpit-file-sharing (4.4.1-7focal) focal; urgency=medium
+
+  * fixed deletion race condition causiong issue for multiple lun deletion
+  * updated ip of lun added to group
+
+ -- Rachit Hans <rhans@45drives.com>  Mon, 10 Nov 2025 08:17:34 -0400
+
+cockpit-file-sharing (4.4.1-6focal) focal; urgency=medium
+
+  * fixed deletion race condition causiong issue for multiple lun deletion
+
+ -- Rachit Hans <rhans@45drives.com>  Mon, 10 Nov 2025 05:49:54 -0400
+
+cockpit-file-sharing (4.4.1-5focal) focal; urgency=medium
+
+  * shell escaping colons
+
+ -- Rachit Hans <rhans@45drives.com>  Thu, 06 Nov 2025 07:23:45 -0400
+
+cockpit-file-sharing (4.4.1-4focal) focal; urgency=medium
+
+  * fixed deletion of incrorect lun
+
+ -- Rachit Hans <rhans@45drives.com>  Wed, 05 Nov 2025 15:31:48 -0400
+
+cockpit-file-sharing (4.4.1-3focal) focal; urgency=medium
+
+  * removed reference to heartbeat1
+
+ -- Rachit Hans <rhans@45drives.com>  Tue, 04 Nov 2025 13:21:24 -0400
+
+cockpit-file-sharing (4.4.1-2focal) focal; urgency=medium
+
+  * changed the commands of addition groups
+
+ -- Rachit Hans <rhans@45drives.com>  Thu, 30 Oct 2025 14:00:03 -0300
+
+cockpit-file-sharing (4.4.1-1focal) focal; urgency=medium
+
+  * improved speed of iscsi module + added functionality f adding multiple groups
+    to target + build package
+
+ -- Rachit Hans <rhans@45drives.com>  Fri, 26 Sep 2025 08:34:55 -0300
+
+cockpit-file-sharing (4.3.2-2focal) focal; urgency=medium
+
+  * Fix bug causing nfs server crash during export removal with ceph by removing
+    ceph remount after removing share instead of before
+  * Fix bug causing NFS hooks to be run multiple times for clustered environments
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Fri, 19 Sep 2025 11:33:07 -0300
+
+cockpit-file-sharing (4.3.2-1focal) focal; urgency=medium
+
+  * Fix bug causing nfs server crash during export removal with ceph by removing
+    ceph remount after removing share instead of before
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Mon, 08 Sep 2025 13:27:59 -0300
+
+cockpit-file-sharing (4.3.1-2focal) focal; urgency=medium
+
+  * Fix os release display in app info popup on EL8/EL9
+  * Enable AD accounts what's new popup for v4.3.1
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Mon, 25 Aug 2025 08:31:47 -0300
+
+cockpit-file-sharing (4.3.1-1focal) focal; urgency=medium
+
+  * Fix build issue causing edit permissions popup to be blank
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Fri, 22 Aug 2025 09:59:33 -0300
+
+cockpit-file-sharing (4.3.0-1focal) focal; urgency=medium
+
+  * Add option for Active Directory/Domain users and groups to appear in dropdown
+    lists while editing path permissions
+  * Improvements to SelectMenu UX
+  * Samba - make 'Inherit Permissions' and 'Windows ACLs' options mutually-exclusive
+  * Prompt to kick all users from share while deleting
+  * Clarify warning messages while deleting shares that files and folders will not
+    be deleted
+  * Fix importing smb.conf
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Tue, 19 Aug 2025 13:29:20 -0300
+
+cockpit-file-sharing (4.2.13-4focal) focal; urgency=medium
+
+  * build package
+
+ -- Rachit Hans <rhans@45drives.com>  Fri, 15 Aug 2025 08:07:28 -0300
+
+cockpit-file-sharing (4.2.13-3focal) focal; urgency=medium
+
+  * build package
+
+ -- Rachit Hans <rhans@45drives.com>  Tue, 12 Aug 2025 11:07:28 -0300
+
+cockpit-file-sharing (4.2.13-2focal) focal; urgency=medium
+
+  * fixing dropdown values getting hidden
+
+ -- Rachit Hans <rhans@45drives.com>  Mon, 11 Aug 2025 07:56:53 -0300
+
+cockpit-file-sharing (4.2.13-1focal) focal; urgency=medium
+
+  * Removes conditional flag on group add/delete for iscsi initiator groups
+
+ -- Jordan Keough <jkeough@45drives.com>  Tue, 08 Jul 2025 12:17:12 -0300
+
+cockpit-file-sharing (4.2.12-1focal) focal; urgency=medium
+
+  * ISCSI - Shows all virtual devices and whether in use or not
+
+ -- Jordan Keough <jkeough@45drives.com>  Thu, 29 May 2025 11:03:26 -0300
+
+cockpit-file-sharing (4.2.11-1focal) focal; urgency=medium
+
+  * remove acl_xattr:ignore
+  * system
+  * acls
+  * =
+  * yes option from windowsACLsOptions
+
+ -- Jordan Keough <jkeough@45drives.com>  Thu, 29 May 2025 05:17:16 -0300
+
+cockpit-file-sharing (4.2.10-4focal) focal; urgency=medium
+
+  * Updates houston-common commit, fixes isDomainJoined function
+
+ -- Jordan Keough <jkeough@45drives.com>  Fri, 04 Apr 2025 05:55:47 -0300
+
+cockpit-file-sharing (4.2.10-3focal) focal; urgency=medium
+
+  * Merges prerelease packages into stable
+
+ -- Jordan Keough <jkeough@45drives.com>  Wed, 02 Apr 2025 06:53:28 -0300
+
+cockpit-file-sharing (4.2.10-2focal) focal; urgency=medium
+
+  * Removes unused Windows ACL option and adds conditional check to only show desired
+    ACL toggle if server is Domain Joined
+
+ -- Jordan Keough <jkeough@45drives.com>  Tue, 01 Apr 2025 12:29:06 -0300
+
+cockpit-file-sharing (4.2.9-8focal) focal; urgency=medium
+
+  * build
+
+ -- Jordan Keough <jkeough@45drives.com>  Tue, 04 Mar 2025 12:05:53 -0400
+
+cockpit-file-sharing (4.2.9-7focal) focal; urgency=medium
+
+  * made some type checking changes trying to build again
+
+ -- Jordan Keough <jkeough@45drives.com>  Tue, 04 Mar 2025 12:01:12 -0400
+
+cockpit-file-sharing (4.2.9-6focal) focal; urgency=medium
+
+  * Removes module test from makefile to see if debian builds successfully
+
+ -- Jordan Keough <jkeough@45drives.com>  Tue, 04 Mar 2025 09:49:29 -0400
+
+cockpit-file-sharing (4.2.9-5focal) focal; urgency=medium
+
+  * Updates Vue version to 3.5
+
+ -- Jordan Keough <jkeough@45drives.com>  Tue, 04 Mar 2025 09:41:37 -0400
+
+cockpit-file-sharing (4.2.9-4focal) focal; urgency=medium
+
+  * updates dependencies and houston-common
+
+ -- Jordan Keough <jkeough@45drives.com>  Tue, 04 Mar 2025 07:45:55 -0400
+
+cockpit-file-sharing (4.2.9-3focal) focal; urgency=medium
+
+  * Removes unneccesary force config loading, config loading done via ansible playbook/service
+    file now
+
+ -- Jordan Keough <jkeough@45drives.com>  Tue, 04 Mar 2025 07:29:37 -0400
+
+cockpit-file-sharing (4.2.10-1focal) focal; urgency=medium
+
+  * Changes scst default config path in one other spot that was initially missed,
+    and adds check to see if file exists and replaces old config path with new config
+    path if applicable. Should fix bug where scst config not auto-loading on boot.
+
+ -- Jordan Keough <jkeough@45drives.com>  Tue, 04 Mar 2025 05:05:31 -0400
+
+cockpit-file-sharing (4.2.10-1focal) focal; urgency=medium
+
+  * Defer applying Ceph options until apply button is clicked
+  * Add shadow:localtime = yes to default shadow-copy share options
+  * Auto hide tabs that aren't configured
+  * Allow overriding tab visibility in user settings menu
+  * Get PCS cluster nodes from corosync.conf since Ubuntu 20.04 pcs version does
+    not have JSON output
+  * Migrate samba management code to houston-common-lib
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Wed, 26 Feb 2025 08:10:38 -0400
+
+cockpit-file-sharing (4.2.9-2focal) focal; urgency=medium
+
+  * Updates Build Number + Changes user-defined iscsi config path to a static/default
+    path, adds enable + config commands after saving targets to ensure config loads
+    on reboot
+
+ -- Jordan Keough <jkeough@45drives.com>  Tue, 25 Feb 2025 14:07:50 -0400
+
+cockpit-file-sharing (4.2.9-1focal) focal; urgency=medium
+
+  * Changes user-defined iscsi config path to a static/default path, adds enable
+    + config commands after saving targets to ensure config loads on reboot
+
+ -- Jordan Keough <jkeough@45drives.com>  Tue, 25 Feb 2025 14:06:15 -0400
+
+cockpit-file-sharing (4.2.8-1focal) focal; urgency=medium
+
+  * Merge AutoAddRBDs_MinorFixes
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Tue, 26 Nov 2024 08:11:58 -0400
+
+cockpit-file-sharing (4.2.7-1focal) focal; urgency=medium
+
+  * Fix missing global configuration when [global] missing from net conf registry
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Mon, 25 Nov 2024 12:20:26 -0400
+
+cockpit-file-sharing (4.2.6-1focal) focal; urgency=medium
+
+  * Fix bug where only first instance of "include = " was inspected while looking for "include = registry"
+  * Harden getting list of clustered servers
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Fri, 15 Nov 2024 12:22:25 -0400
+
+cockpit-file-sharing (4.2.5-2focal) focal; urgency=medium
+
+  * iscsi release
+
+ -- Josh Boudreau <jboudreau@45drives.com>  Thu, 31 Oct 2024 07:37:17 -0300
+
+cockpit-file-sharing (4.2.5-1focal) focal; urgency=medium
+
+  * iSCSI Release
+
+ -- Brandon Kelly <brkelly@45drives.com>  Mon, 28 Oct 2024 12:18:32 -0300
+
+cockpit-file-sharing (4.2.4-1focal) focal; urgency=medium
+
+  * Removed standalone RBD creation to use LVs instead
+
+ -- Brandon Kelly <brkelly@45drives.com>  Mon, 23 Sep 2024 08:08:50 -0300
+
+cockpit-file-sharing (4.2.3-1focal) focal; urgency=medium
+
+  * Added more validations
+
+ -- Brandon Kelly <brkelly@45drives.com>  Thu, 19 Sep 2024 13:26:43 -0300
+
+cockpit-file-sharing (4.2.2-1focal) focal; urgency=medium
+
+  * Refactored iSCSI Clustered integration
+
+ -- Brandon Kelly <brkelly@45drives.com>  Wed, 18 Sep 2024 08:26:21 -0300
+
+cockpit-file-sharing (4.2.1-1focal) focal; urgency=medium
+
+  * Fixes to iSCSI Tab
+
+ -- Brandon Kelly <brkelly@45drives.com>  Thu, 25 Jul 2024 08:13:54 -0300
+
+cockpit-file-sharing (4.2.0-1focal) focal; urgency=medium
+
+  * Fixes to iSCSI Tab
+
+ -- Brandon Kelly <brkelly@45drives.com>  Thu, 25 Jul 2024 08:07:50 -0300
+
+cockpit-file-sharing (4.1.0-1focal) focal; urgency=medium
+
+  * Add iSCSI tab
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Mon, 24 Jun 2024 08:36:58 -0300
+
+cockpit-file-sharing (4.0.3-1focal) focal; urgency=medium
+
+  * New Samba shares now default to read only = no
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Fri, 14 Jun 2024 11:42:30 -0300
+
+cockpit-file-sharing (4.0.2-1focal) focal; urgency=medium
+
+  * Fixed error spamming when path does not exist for Ceph path settings
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Tue, 11 Jun 2024 09:38:41 -0300
+
+cockpit-file-sharing (4.0.1-1focal) focal; urgency=medium
+
+  * Assign UUID FSID option for new NFS exports
+  * Add input validation for NFS exports
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Tue, 11 Jun 2024 09:04:56 -0300
+
+cockpit-file-sharing (4.0.0-2focal) focal; urgency=medium
+
+  * fix table corners
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Mon, 10 Jun 2024 16:09:01 -0300
+
+cockpit-file-sharing (4.0.0-1focal) focal; urgency=medium
+
+  * Complete rewrite for better maintainability and expansion
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Mon, 10 Jun 2024 15:19:05 -0300
+
+cockpit-file-sharing (3.3.7-1focal) focal; urgency=medium
+
+  * Samba - fix saving global advanced settings with '=' in their value
+  * NFS - better whitespace handling while parsing exports file
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Tue, 23 Apr 2024 09:52:27 -0300
+
+cockpit-file-sharing (3.3.6-1focal) focal; urgency=medium
+
+  * Fix import smb.conf modal overflow
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Wed, 03 Apr 2024 07:11:29 -0300
+
+cockpit-file-sharing (3.3.5-1focal) focal; urgency=medium
+
+  * Workaround for Safari < 15.4 missing String.prototype.at()
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Tue, 12 Mar 2024 13:12:02 -0300
+
+cockpit-file-sharing (3.3.4-1focal) focal; urgency=medium
+
+  * Remove AD users from Edit Permissions modal
+  * Update Samba Audit parameters to conform with SnapShield requirements
+
+ -- Dawson Della Valle <ddellavalle@45drives.com>  Fri, 02 Jun 2023 06:44:14 -0300
+
+cockpit-file-sharing (3.3.2-1focal) focal; urgency=medium
+
+  * Add Ceph + NFS support
+  * Add NFS config propagation aligning with corosync cluster hosts
+
+ -- Dawson Della Valle <ddellavalle@45drives.com>  Fri, 24 Mar 2023 11:16:40 -0300
+
+cockpit-file-sharing (3.3.0-1focal) focal; urgency=medium
+
+  * Add Ceph settings to the NFS tab
+  * Propagate remount units across corosync cluster
+
+ -- Josh Boudreau <jboudreau@45drives.com>  Fri, 06 Jan 2023 07:00:38 -0400
+
+cockpit-file-sharing (3.2.9-2focal) focal; urgency=medium
+
+  * add gawk as dependency
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Fri, 28 Oct 2022 12:55:57 -0300
+
+cockpit-file-sharing (3.2.9-1focal) focal; urgency=medium
+
+  * Optimize getting users and groups from AD/domain
+  * Add second Windows ACLs option for Linux/Mac clients
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Thu, 27 Oct 2022 14:52:33 -0300
+
+cockpit-file-sharing (3.2.8-1focal) focal; urgency=medium
+
+  * Handle case where NFS exports.d directory does not exist.
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Mon, 12 Sep 2022 11:33:10 -0300
+
+cockpit-file-sharing (3.2.7-1focal) focal; urgency=medium
+
+  * Fix scrolling in Safari
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Wed, 24 Aug 2022 13:58:34 -0300
+
+cockpit-file-sharing (3.2.6-1focal) focal; urgency=medium
+
+  * Support Safari by removing regex lookbehinds
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Wed, 24 Aug 2022 13:20:56 -0300
+
+cockpit-file-sharing (3.2.5-1focal) focal; urgency=medium
+
+  * Added ability to create ZFS datasets when path DNE and is within ZFS mountpoint
+  * Fixed CSS styling of directory permission editor
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Fri, 19 Aug 2022 11:03:59 -0300
+
+cockpit-file-sharing (3.2.4-1focal) focal; urgency=medium
+
+  * Add settings menu for configuring smb.conf and exports file locations
+  * Fix parsing "valid users" field for Samba shares
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Thu, 18 Aug 2022 15:05:29 -0300
+
+cockpit-file-sharing (3.2.3-1focal) focal; urgency=medium
+
+  * Fixed issue saving NFS exports file when /etc/exports.d DNE
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Thu, 04 Aug 2022 13:06:53 -0300
+
+cockpit-file-sharing (3.2.2-1focal) focal; urgency=medium
+
+  * Remove end of line comment in automatically inserted content of smb.conf
+  * Optimize getting users and groups from domain
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Wed, 27 Jul 2022 09:58:31 -0300
+
+cockpit-file-sharing (3.2.1-1focal) focal; urgency=medium
+
+  * Fix bug where cockpit-ws kills session while querying too many groups with getent
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Wed, 20 Jul 2022 11:38:32 -0300
+
+cockpit-file-sharing (3.2.0-1focal) focal; urgency=medium
+
+  * Add button to import configuration from /etc/samba/smb.conf, backup original
+    smb.conf, and replace it to just include registry
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Wed, 06 Jul 2022 12:05:36 -0300
+
+cockpit-file-sharing (3.1.12-1focal) focal; urgency=medium
+
+  * Try to get ceph layout pools with /etc/ceph/ceph.client.samba.keyring first
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Mon, 27 Jun 2022 10:17:15 -0300
+
+cockpit-file-sharing (3.1.11-1focal) focal; urgency=medium
+
+  * Use fileDownload() and processOutputDownload() from cockpit-helpers for exporting
+    configs
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Fri, 24 Jun 2022 13:00:41 -0300
+
+cockpit-file-sharing (3.1.10-1focal) focal; urgency=medium
+
+  * Watch for newly added users, groups, and CTDB hosts and refresh lists automatically
+    in NFS tab too
+  * Set cursor to `cursor: wait` while processing for user feedback
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Thu, 23 Jun 2022 07:43:40 -0300
+
+cockpit-file-sharing (3.1.9-1focal) focal; urgency=medium
+
+  * Fixed getting users and groups from system and domain
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Wed, 22 Jun 2022 09:39:33 -0300
+
+cockpit-file-sharing (3.1.8-1focal) focal; urgency=medium
+
+  * Remove realm and wbinfo dependencies by getting users and groups with `getent
+    -s winbind -s sss -s ldap`
+  * Handle directory permissions by numeric ID rather than user/group name
+  * Fixed yet another regex bug in validating smb.conf
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Mon, 20 Jun 2022 14:25:56 -0300
+
+cockpit-file-sharing (3.1.7-1focal) focal; urgency=medium
+
+  * Use systemdUnitEscape() from cockpit-helpers to escape mount unit name instead
+    of unreliable regex replace
+  * Fix regular expressions used to check for and insert 'include = registry' in
+    smb.conf
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Wed, 08 Jun 2022 14:34:24 -0300
+
+cockpit-file-sharing (3.1.6-1focal) focal; urgency=medium
+
+  * Fixed bug where regex would crash from too much recursion while parsing Ubuntu
+    default smb.conf
+  * Watch for newly added users, groups, and CTDB hosts and refresh lists automatically
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Fri, 03 Jun 2022 14:31:55 -0300
+
+cockpit-file-sharing (3.1.5-1focal) focal; urgency=medium
+
+  * Tweak input width to be full width for mobile
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Wed, 01 Jun 2022 15:05:49 -0300
+
+cockpit-file-sharing (3.1.4-1focal) focal; urgency=medium
+
+  * Tweak styling of components
+  * Fix bug where Ceph remount tries to apply when directory DNE
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Wed, 01 Jun 2022 14:41:41 -0300
+
+cockpit-file-sharing (3.1.3-2focal) focal; urgency=medium
+
+  * Add dependencies for packaging
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Thu, 19 May 2022 11:05:16 -0300
+
+cockpit-file-sharing (3.1.3-1focal) focal; urgency=medium
+
+  * fix typo in acl_xattr setting
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Thu, 19 May 2022 07:01:27 -0300
+
+cockpit-file-sharing (3.1.2-1focal) focal; urgency=medium
+
+  * Fixed canonicalizing Samba share path to fix bug with Ceph remount unit file
+    name
+  * Canonicalize NFS share path
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Tue, 10 May 2022 08:46:04 -0300
+
+cockpit-file-sharing (3.1.1-1focal) focal; urgency=medium
+
+  * Fix info button positioning
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Fri, 06 May 2022 10:16:33 -0300
+
+cockpit-file-sharing (3.1.0-1focal) focal; urgency=medium
+
+  * Fix bugs with ceph remounting
+  * Add fix button for missing ceph remounts
+  * Clean up tab navigation
+  * Allow for disabling ceph remount
+  * Add plugin info button
+  * Automatically canonicalize share path on input change
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Wed, 04 May 2022 14:13:40 -0300
+
+cockpit-file-sharing (3.0.1-1focal) focal; urgency=medium
+
+  * Fix some placeholder text, add tooltip for valid users
+  * Fix shadow copy settings for Ceph shares
+  * Clean up systemd mount files after deleting a Ceph share
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Thu, 24 Mar 2022 10:09:44 -0300
+
+cockpit-file-sharing (3.0.0-1focal) focal; urgency=medium
+
+  * Overhaul Plugin with Vue.js and Tailwind CSS
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Wed, 23 Mar 2022 12:02:23 -0300
+
+cockpit-file-sharing (2.4.5-1focal) focal; urgency=medium
+
+  * add support for using samba varibles in path names
+
+ -- Brett Kelly <bkelly@45drives.com>  Tue, 08 Mar 2022 11:56:47 -0400
+
+cockpit-file-sharing (2.4.4-1focal) focal; urgency=medium
+
+  * added support for setting per share pool layout when using cephfs
+
+ -- Brett Kelly <bkelly@45drives.com>  Mon, 14 Feb 2022 06:51:25 -0400
+
+cockpit-file-sharing (2.4.3-1focal) focal; urgency=medium
+
+  * Use optional chaining operator while checking output on error in isCephSubDir()
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Mon, 13 Dec 2021 05:43:36 -0400
+
+cockpit-file-sharing (2.4.2-1focal) focal; urgency=medium
+
+  * Use optional chaining operator while checking output on error in isCephFS()
+
+ -- Joshua Boudreau <jboudreau@45drives.com>  Fri, 10 Dec 2021 07:30:28 -0400
+
+cockpit-file-sharing (2.4.1-1focal) focal; urgency=medium
+
+  * change cephfs quotas after share creation
+
+ -- Brett Kelly <bkelly@45drives.com>  Mon, 27 Sep 2021 14:30:09 -0300
+
+cockpit-file-sharing (2.4.0-2focal) focal; urgency=medium
+
+  * improved error handling
+
+ -- Brett Kelly <bkelly@45drives.com>  Tue, 21 Sep 2021 06:40:32 -0300
+
+cockpit-file-sharing (2.4.0-1focal) focal; urgency=medium
+
+  * rework cephfs mounts
+
+ -- Brett Kelly <bkelly@45drives.com>  Mon, 20 Sep 2021 14:06:11 -0300
+
+cockpit-file-sharing (2.3.1-1focal) focal; urgency=medium
+
+  * Fixed a bug where the 'set samba password' loader would not clear.
+
+ -- Sam Silver <ssilver@45drives.com>  Mon, 23 Aug 2021 06:58:55 -0300
+
+cockpit-file-sharing (2.3.0-1focal) focal; urgency=medium
+
+  * Changed how users are filtered
+
+ -- Sam Silver <ssilver@45drives.com>  Wed, 18 Aug 2021 08:07:55 -0300
+
+cockpit-file-sharing (2.2.1-1focal) focal; urgency=medium
+
+  * Added 'populate macos share' to single share settings as well as global settings
+
+ -- Sam Silver <ssilver@45drives.com>  Tue, 17 Aug 2021 12:17:33 -0300
+
+cockpit-file-sharing (2.2.0-1focal) focal; urgency=medium
+
+  * Added a 'populate macOS shares' setting in the Samba global config.
+
+ -- Sam Silver <ssilver@45drives.com>  Tue, 17 Aug 2021 07:36:17 -0300
+
+cockpit-file-sharing (2.1.0-1focal) focal; urgency=medium
+
+  * Added more error catching and better descriptions
+
+ -- Sam Silver <ssilver@45drives.com>  Wed, 11 Aug 2021 10:37:54 -0300
+
+cockpit-file-sharing (2.0.2-1focal) focal; urgency=medium
+
+  * Fixed small bugs
+
+ -- Sam Silver <ssilver@45drives.com>  Wed, 11 Aug 2021 07:23:32 -0300
+
+cockpit-file-sharing (2.0.1-1focal) focal; urgency=medium
+
+  * Fixed small bugs and typos.
+
+ -- Sam Silver <ssilver@45drives.com>  Wed, 11 Aug 2021 06:48:33 -0300
+
+cockpit-file-sharing (2.0.0-1focal) focal; urgency=medium
+
+  * A code refactor and UI redesign of NFS Manager.
+
+ -- Sam Silver <ssilver@45drives.com>  Wed, 11 Aug 2021 06:21:42 -0300
+
+cockpit-file-sharing (1.0.0-1focal) focal; urgency=medium
+
+  * Initial packaging
+
+ -- Sam Silver <ssilver@45drives.com>  Mon, 05 Jul 2021 12:47:55 -0300

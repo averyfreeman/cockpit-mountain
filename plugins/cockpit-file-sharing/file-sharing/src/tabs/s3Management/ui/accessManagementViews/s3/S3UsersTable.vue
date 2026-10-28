@@ -1,0 +1,358 @@
+<!-- MinioUsersTable.vue -->
+<template>
+  <div class="px-6 py-6 mx-auto box-border">
+    <section class="bg-default rounded-lg border border-default px-5 py-4 shadow-sm">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="text-lg font-semibold">User list</h2>
+
+        <div class="flex items-center space-x-2">
+          <div class="relative">
+            <MagnifyingGlassIcon class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 size-icon text-muted" />
+            <input
+              v-model.trim="searchQuery"
+              type="text"
+              placeholder="Search users"
+              style="padding-left: 2rem;"
+              class="w-72 rounded-md border border-accent bg-accent pl-8 pr-3 py-2.5 text-sm text-default"
+            />
+          </div>
+          <button
+            class="inline-flex items-center gap-1 btn-primary text-default text-xs font-semibold rounded px-3 py-1.5 hover:bg-green-700 disabled:opacity-60 disabled:cursor-default"
+            @click="openCreateDialog" :disabled="loading">
+            <PlusIcon class="size-icon" />
+            Create user
+          </button>
+        </div>
+      </div>
+
+      <div v-if="error" class="mb-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+        {{ error }}
+      </div>
+
+      <div v-if="loading" class="py-3 text-sm text-gray-600">
+        Loading users...
+      </div>
+
+      <div v-else-if="filteredUsers.length" class="overflow-x-auto">
+        <table class="min-w-full border-collapse text-sm">
+          <thead>
+            <tr>
+              <th class="px-3 py-2 border-b border-default text-center font-semibold whitespace-nowrap">
+                Username
+              </th>
+              <th class="px-3 py-2 border-b border-default text-center font-semibold whitespace-nowrap">
+                Status
+              </th>
+              <th class="px-3 py-2 border-b border-default text-center font-semibold whitespace-nowrap">
+                Policies
+              </th>
+
+              <th class="px-3 py-2 border-b border-default text-center font-semibold whitespace-nowrap">
+                Actions
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="u in filteredUsers" :key="u.username" class="text-center">
+              <td class="px-3 py-2 border-b border-default">
+                {{ u.username }}
+              </td>
+              <td class="px-3 py-2 border-b border-default">
+                <span class="inline-flex items-center rounded-full px-2 py-0.5 text-sm font-medium" :class="u.status === 'enabled'
+                    ? 'bg-emerald-50 text-emerald-700'
+                    : 'bg-red-50 text-red-700'
+                  ">
+                  {{ u.status === "enabled" ? "Enabled" : "Disabled" }}
+                </span>
+              </td>
+              <td class="px-3 py-2 border-b border-default">
+                <span v-if="u.policies && u.policies.length" class="text-sm">
+                  {{ u.policyCount }}
+                </span>
+                <span v-else class="text-sm italic text-muted">
+                  None
+                </span>
+              </td>
+              <td class="px-3 py-2 border-b border-default whitespace-nowrap">
+                <button
+                  class="inline-flex items-center gap-1 btn-primary text-sm text-default font-semibold rounded px-2 py-1 mr-1"
+                  @click="onViewUser(u)">
+                  <EyeIcon class="size-icon" />
+                  View
+                </button>
+                <button
+                  class="inline-flex items-center gap-1 btn-secondary text-default text-sm font-semibold rounded px-2 py-1 mr-1"
+                  @click="openEditDialog(u)">
+                  <PencilSquareIcon class="size-icon" />
+                  Edit
+                </button>
+
+                <button
+                  class="inline-flex items-center gap-1 text-white border border-red-600 bg-red-500 text-default text-sm font-semibold rounded px-2 py-1 hover:bg-red-600 disabled:opacity-60"
+                  @click="onDeleteUser(u)">
+                  <TrashIcon class="size-icon" />
+                  Delete
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div v-else class="py-3 text-sm text-muted">
+        {{ users.length ? "No matching users found." : `No ${backendDisplay} users found.` }}
+      </div>
+    </section>
+
+    <!-- Create MinIO user modal -->
+    <MinioUserCreateModal v-model="showUserDialog" :loading="loading" :error-message="userDialogError"
+      :available-policies="availablePolicies" :available-groups="availableGroups"
+      :backend-label="backendDisplay" @submit="handleUserSubmit" />
+    <MinioUserDetailsModal v-model="showUserDetailsDialog" :user="selectedUserDetails" :loading="userDetailsLoading"
+      :error-message="userDetailsError" :show-service-accounts="!isRustfsBackend" />
+    <MinioUserEditModal v-model="showEditDialog" :user="editTarget" :loading="loading" :error-message="editDialogError"
+      :available-policies="availablePolicies" :available-groups="availableGroups"
+      :show-service-accounts="!isRustfsBackend" @submit="handleUserUpdate" />
+  </div>
+</template>
+
+<script lang="ts" setup>
+import { computed, ref, onMounted } from "vue";
+import MinioUserCreateModal from "./S3UserCreateModal.vue";
+import MinioUserDetailsModal from "./S3UserDetailsModal.vue";
+import MinioUserEditModal from "./S3UserEditModal.vue";
+import { MagnifyingGlassIcon, PlusIcon, EyeIcon, PencilSquareIcon, TrashIcon } from "@heroicons/vue/20/solid";
+
+import {listMinioUsers,deleteMinioUser,createMinioUser,listMinioPolicies,getMinioUserInfo,updateMinioUser,listMinioGroups,
+} from "../../../api/minioCliAdapter";
+import {
+  createRustfsUser,
+  deleteRustfsUser,
+  getRustfsUserInfo,
+  listRustfsGroups,
+  listRustfsPolicies,
+  listRustfsUsers,
+  updateRustfsUser,
+} from "../../../api/rustfsCliAdapter";
+import type {
+  S3AccessUser,
+  S3AccessUserCreatePayload,
+  S3AccessUserDetails,
+  S3AccessUserUpdatePayload,
+} from "@/tabs/s3Management/types/types";
+import { confirm, pushNotification, Notification } from "@45drives/houston-common-ui";
+import { unwrap } from "@45drives/houston-common-lib";
+
+const props = defineProps<{
+  backendLabel?: string;
+}>();
+const isRustfsBackend = (props.backendLabel?.trim() || "").toLowerCase() === "rustfs";
+const rawBackendLabel = props.backendLabel?.trim() || "MinIO";
+const backendDisplay =
+  rawBackendLabel.toLowerCase() === "rustfs"
+    ? "RustFS"
+    : rawBackendLabel.toLowerCase() === "minio"
+      ? "MinIO"
+      : rawBackendLabel;
+
+const users = ref<S3AccessUser[]>([]);
+const searchQuery = ref("");
+const loading = ref(false);
+const error = ref<string | null>(null);
+const filteredUsers = computed(() => {
+  const q = searchQuery.value.trim().toLowerCase();
+  if (!q) return users.value;
+  return users.value.filter((u) => String(u.username ?? "").toLowerCase().includes(q));
+});
+
+// Create dialog state
+const showUserDialog = ref(false);
+const userDialogError = ref<string | null>(null);
+
+const availablePolicies = ref<string[]>([]);
+const availableGroups = ref<string[]>([]);
+// details modal state
+const showUserDetailsDialog = ref(false);
+const userDetailsLoading = ref(false);
+const userDetailsError = ref<string | null>(null);
+const selectedUserDetails = ref<S3AccessUserDetails | null>(null);
+// Edit dialog state
+const showEditDialog = ref(false);
+const editTarget = ref<S3AccessUserDetails | null>(null);
+const editDialogError = ref<string | null>(null);
+
+async function loadUsers() {
+  loading.value = true;
+  error.value = null;
+  try {
+    users.value = isRustfsBackend ? await listRustfsUsers() : await listMinioUsers();
+  } catch (e: any) {
+    error.value = e?.message || `Failed to load ${backendDisplay} users.`;
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function loadPolicies() {
+  try {
+    availablePolicies.value = isRustfsBackend
+      ? await listRustfsPolicies()
+      : await listMinioPolicies();
+  } catch (e) {
+    // Non-fatal; just log or ignore
+    console.warn("Failed to load policies", e);
+  }
+}
+
+function openCreateDialog() {
+  userDialogError.value = null;
+  showUserDialog.value = true;
+}
+
+async function onDeleteUser(user: S3AccessUser) {
+  const username = user.username;
+  const confirmed: boolean = await unwrap(confirm({
+    header: `Delete user "${username}"?`,
+    body: `Are you sure you want to delete this ${backendDisplay} user?\n\nThis will revoke their access to ${backendDisplay}. This action cannot be undone.`,
+    confirmButtonText: "Delete",
+    dangerous: true,
+  }));
+  if (!confirmed) return;
+
+  try {
+    loading.value = true;
+    error.value = null;
+
+    if (isRustfsBackend) {
+      await deleteRustfsUser(username);
+    } else {
+      await deleteMinioUser(username);
+    }
+    pushNotification(new Notification("Success", `User "${username}" deleted successfully`, "success"));
+
+  } catch (e: any) {
+    const msg = (e?.message || "").toLowerCase();
+
+    // If MinIO says the user doesn't exist, treat it as already deleted.
+    const notFound =
+      msg.includes("the specified user does not exist") ||
+      msg.includes("nosuchuser") ||
+      msg.includes("not found");
+    if (!notFound) {
+      pushNotification(new Notification(`Failed to delete user."`, e?.message, "error"));
+
+      // error.value = e?.message || "Failed to delete MinIO user.";
+      return;
+    }
+  } finally {
+    loading.value = false;
+  }
+
+  // Locally remove the user from the list regardless
+  users.value = users.value.filter((u) => u.username !== username);
+}
+
+async function handleUserSubmit(payload: S3AccessUserCreatePayload) {
+  userDialogError.value = null;
+  try {
+    loading.value = true;
+    if (isRustfsBackend) {
+      await createRustfsUser(payload);
+    } else {
+      await createMinioUser(payload);
+    }
+    await loadUsers();
+    showUserDialog.value = false;
+    pushNotification(new Notification("Success", "User created successfully.", "success"));
+
+  } catch (e: any) {
+    pushNotification(new Notification(`Failed to create user."`, e?.message, "error"));
+
+    // userDialogError.value = e?.message || "Failed to create MinIO user.";
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function onViewUser(user: S3AccessUser) {
+  userDetailsError.value = null;
+  selectedUserDetails.value = null;
+  showUserDetailsDialog.value = true;
+  userDetailsLoading.value = true;
+
+  try {
+    selectedUserDetails.value = isRustfsBackend
+      ? await getRustfsUserInfo(user.username)
+      : await getMinioUserInfo(user.username);
+  } catch (e: any) {
+    pushNotification(new Notification(`Failed to load user details"`, e?.message, "error"));
+
+    // userDetailsError.value = e?.message || "Failed to load user details.";
+  } finally {
+    userDetailsLoading.value = false;
+  }
+}
+
+function openEditDialog(user: S3AccessUser) {
+  editDialogError.value = null;
+  editTarget.value = null;
+  showEditDialog.value = true;
+  userDetailsLoading.value = true;
+
+  const loadDetails = isRustfsBackend
+    ? getRustfsUserInfo(user.username)
+    : getMinioUserInfo(user.username);
+  loadDetails
+    .then((details) => {
+      editTarget.value = details;
+    })
+    .catch((e: any) => {
+      pushNotification(new Notification(`Failed to load user for editing"`, e?.message, "error"));
+
+      // editDialogError.value = e?.message || "Failed to load user for editing.";
+    })
+    .finally(() => {
+      userDetailsLoading.value = false;
+    });
+}
+
+async function handleUserUpdate(payload: S3AccessUserUpdatePayload) {
+  editDialogError.value = null;
+  try {
+    loading.value = true;
+    if (isRustfsBackend) {
+      await updateRustfsUser(payload);
+    } else {
+      await updateMinioUser(payload);
+    }
+    await loadUsers();
+    showEditDialog.value = false;
+    pushNotification(new Notification("Success", "User updated successfully", "success", 2000));
+
+  } catch (e: any) {
+    pushNotification(new Notification(`Failed to update ${isRustfsBackend ? "RustFS" : "MinIO"} user`, e?.message, "error"));
+
+    // editDialogError.value = e?.message || "Failed to update MinIO user.";
+  } finally {
+    loading.value = false;
+  }
+}
+async function loadGroups() {
+  try {
+    availableGroups.value = isRustfsBackend
+      ? await listRustfsGroups()
+      : await listMinioGroups();
+  } catch (e) {
+    console.warn("Failed to load groups", e);
+  }
+}
+
+
+
+onMounted(() => {
+  loadUsers();
+  loadPolicies();
+  loadGroups()
+
+});
+</script>

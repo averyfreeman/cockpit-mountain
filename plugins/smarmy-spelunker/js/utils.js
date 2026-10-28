@@ -1,0 +1,342 @@
+// utils.js — formatting & helpers (no Cockpit / DOM dependencies)
+'use strict';
+
+window.Util = (function () {
+
+    function humanSize(bytes) {
+        if (bytes == null || isNaN(bytes)) return '';
+        if (bytes < 1024) return bytes + ' B';
+        const units = ['KB', 'MB', 'GB', 'TB', 'PB'];
+        let v = bytes / 1024;
+        let i = 0;
+        while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+        return v.toFixed(v >= 10 ? 0 : 1) + ' ' + units[i];
+    }
+
+    function formatDate(epochSec) {
+        if (!epochSec) return '';
+        const d = new Date(epochSec * 1000);
+        if (isNaN(d.getTime())) return '';
+        const yyyy = d.getFullYear();
+        const mm = String(d.getMonth() + 1).padStart(2, '0');
+        const dd = String(d.getDate()).padStart(2, '0');
+        const HH = String(d.getHours()).padStart(2, '0');
+        const MM = String(d.getMinutes()).padStart(2, '0');
+        return `${yyyy}-${mm}-${dd} ${HH}:${MM}`;
+    }
+
+    function joinPath(base, name) {
+        if (!base || base === '/') return '/' + name;
+        if (base.endsWith('/')) return base + name;
+        return base + '/' + name;
+    }
+
+    function dirname(p) {
+        if (!p || p === '/') return '/';
+        const trimmed = p.replace(/\/+$/, '');
+        const idx = trimmed.lastIndexOf('/');
+        if (idx <= 0) return '/';
+        return trimmed.slice(0, idx);
+    }
+
+    function basename(p) {
+        if (!p || p === '/') return '/';
+        const trimmed = p.replace(/\/+$/, '');
+        const idx = trimmed.lastIndexOf('/');
+        return idx < 0 ? trimmed : trimmed.slice(idx + 1);
+    }
+
+    function normalizePath(p) {
+        if (!p) return '/';
+        if (!p.startsWith('/')) return p; // relative — caller must resolve
+        const parts = p.split('/').filter(Boolean);
+        const stack = [];
+        for (const part of parts) {
+            if (part === '.') continue;
+            if (part === '..') { stack.pop(); continue; }
+            stack.push(part);
+        }
+        return '/' + stack.join('/');
+    }
+
+    // Pathologically careful POSIX shell quoting (single-quote-wrap).
+    function shq(s) {
+        if (s == null) return "''";
+        return "'" + String(s).replace(/'/g, "'\\''") + "'";
+    }
+
+    // Returns segments for breadcrumbs: [{label, path}].
+    // Does NOT include the root '/' (the breadcrumb template renders that
+    // separately so we don't end up with '/ / home / ismet').
+    function pathSegments(p) {
+        if (!p || p === '/') return [];
+        const parts = p.split('/').filter(Boolean);
+        const segs = [];
+        let cur = '';
+        for (const part of parts) {
+            cur += '/' + part;
+            segs.push({ label: part, path: cur });
+        }
+        return segs;
+    }
+
+    // Map extension/MIME to a Prism language tag
+    function langFromExt(name) {
+        const lower = (name || '').toLowerCase();
+        const ext = lower.includes('.') ? lower.split('.').pop() : '';
+        const base = lower.split('/').pop();
+        const map = {
+            'js': 'javascript', 'mjs': 'javascript', 'cjs': 'javascript',
+            'ts': 'typescript', 'tsx': 'typescript', 'jsx': 'javascript',
+            'py': 'python', 'rb': 'ruby', 'go': 'go', 'rs': 'rust',
+            'java': 'java', 'kt': 'kotlin', 'swift': 'swift',
+            'c': 'c', 'h': 'c', 'cpp': 'cpp', 'cc': 'cpp', 'hpp': 'cpp', 'cxx': 'cpp',
+            'cs': 'csharp', 'php': 'php', 'pl': 'perl', 'lua': 'lua',
+            'sh': 'bash', 'bash': 'bash', 'zsh': 'bash',
+            'html': 'markup', 'htm': 'markup', 'xml': 'markup', 'svg': 'markup',
+            'css': 'css', 'scss': 'scss', 'sass': 'scss',
+            'json': 'json', 'yml': 'yaml', 'yaml': 'yaml', 'toml': 'toml',
+            'md': 'markdown', 'markdown': 'markdown',
+            'sql': 'sql', 'ini': 'ini', 'conf': 'ini', 'cfg': 'ini',
+            'log': 'log', 'diff': 'diff', 'patch': 'diff',
+            'dockerfile': 'docker',
+            'makefile': 'makefile', 'mk': 'makefile',
+            'nginx': 'nginx', 'proto': 'protobuf',
+            'ps1': 'powershell',
+        };
+        if (map[ext]) return map[ext];
+        if (base === 'dockerfile') return 'docker';
+        if (base === 'makefile') return 'makefile';
+        if (/^\.?nginx/.test(base)) return 'nginx';
+        return 'plain';
+    }
+
+    // Extensions that are binary / not editable as text. Images, media,
+    // PDFs and archives are detected separately (isImage/isVideo/…); this
+    // list is the remaining binary blobs we never want to treat as text.
+    const BINARY_EXTS = new Set([
+        'exe','dll','so','o','a','lib','bin','dat','class','jar','war','ear',
+        'pyc','pyo','pyd','wasm','obj','dylib','ko','elf','out',
+        'db','sqlite','sqlite3','mdb','accdb','dbf','frm','myd','myi',
+        'woff','woff2','ttf','otf','eot',
+        'iso','img','dmg','vmdk','vdi','qcow2',
+        'deb','rpm','pkg','msi','apk','appimage','snap','flatpak',
+        'doc','docx','xls','xlsx','ppt','pptx','odt','ods','odp',
+        'psd','ai','sketch','fig','blend','dwg','xcf',
+    ]);
+
+    function isBinaryExt(file) {
+        const n = ((file && file.name) || '').toLowerCase();
+        const ext = n.includes('.') ? n.split('.').pop() : '';
+        return BINARY_EXTS.has(ext);
+    }
+
+    // Heuristic: is this file editable/previewable AS TEXT? Permissive —
+    // anything that isn't a recognised binary/media/archive type qualifies,
+    // so dotfiles (.bashrc), extensionless files (Makefile) and unknown
+    // configs all get Edit/Preview. A content sniff (looksBinary) is used at
+    // open time to catch true binaries that slip through by name alone.
+    function isTextLike(file) {
+        if (!file || file.type !== 'f') return false;
+        if (isImage(file) || isPdf(file) || isVideo(file) || isAudio(file) || isArchive(file)) return false;
+        if (isBinaryExt(file)) return false;
+        return true;
+    }
+
+    // Content-based binary detection (run on the bytes we actually read).
+    // cockpit.file().read() decodes as UTF-8, so binary data shows up as NUL
+    // bytes, U+FFFD replacement chars, and C0 control characters.
+    function looksBinary(str) {
+        if (!str) return false;
+        const sample = str.length > 8192 ? str.slice(0, 8192) : str;
+        let bad = 0;
+        for (let i = 0; i < sample.length; i++) {
+            const c = sample.charCodeAt(i);
+            if (c === 0) return true;                          // NUL → definitely binary
+            if (c === 0xFFFD) bad++;                           // UTF-8 replacement
+            else if (c < 9 || (c > 13 && c < 32)) bad++;       // C0 controls except \t \n \r
+        }
+        return sample.length > 0 && (bad / sample.length) > 0.15;
+    }
+
+    function isImage(file) {
+        const ext = (file.name || '').toLowerCase().split('.').pop();
+        return ['png','jpg','jpeg','gif','webp','bmp','ico','avif','svg'].includes(ext);
+    }
+
+    function isPdf(file) { return (file.name || '').toLowerCase().endsWith('.pdf'); }
+
+    // Extension -> MIME type, for blobs handed to <img>/<iframe>/<audio>/<video>
+    // (the browser needs a real content type to decide how to render/play a
+    // blob: URL — an empty type silently falls back to "download this").
+    // Only covers the types isImage/isPdf/isAudio/isVideoNative recognise;
+    // '' is the deliberate fallback for everything else (e.g. text, which is
+    // rendered from string content, not a blob URL, so no type is needed).
+    const MIME_TYPES = {
+        'pdf': 'application/pdf',
+        'png': 'image/png', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg',
+        'gif': 'image/gif', 'webp': 'image/webp', 'bmp': 'image/bmp',
+        'ico': 'image/x-icon', 'avif': 'image/avif', 'svg': 'image/svg+xml',
+        'mp3': 'audio/mpeg', 'wav': 'audio/wav', 'ogg': 'audio/ogg',
+        'flac': 'audio/flac', 'm4a': 'audio/mp4', 'aac': 'audio/aac',
+        'opus': 'audio/opus',
+        'mp4': 'video/mp4', 'm4v': 'video/mp4', 'webm': 'video/webm',
+        'ogv': 'video/ogg',
+    };
+    function mimeType(file) {
+        const n = ((file && file.name) || '').toLowerCase();
+        const ext = n.includes('.') ? n.split('.').pop() : '';
+        return MIME_TYPES[ext] || '';
+    }
+    function isVideo(file) {
+        const ext = (file.name || '').toLowerCase().split('.').pop();
+        // Natively-playable containers (see isVideoNative) plus everything
+        // else the ffmpeg->HLS transcode path (videoplayer.js) can take on.
+        // Deliberately NOT 'ts' (fix-round-2): a bare .ts is overwhelmingly
+        // TypeScript source in a file browser, not an MPEG transport stream —
+        // .m2ts/.mts still cover the AVCHD/transport-stream case.
+        return ['mp4','webm','ogv','mkv','mov',
+                'avi','wmv','flv','m4v','mpg','mpeg','m2ts','mts',
+                '3gp','ogm','divx','vob','asf','rm','rmvb'].includes(ext);
+    }
+    function isAudio(file) {
+        const ext = (file.name || '').toLowerCase().split('.').pop();
+        return ['mp3','wav','ogg','flac','m4a','aac','opus'].includes(ext);
+    }
+    function isMarkdown(file) {
+        const ext = (file && file.name || '').toLowerCase().split('.').pop();
+        return file && file.type === 'f' && ['md', 'markdown'].includes(ext);
+    }
+    function isHtml(file) {
+        const ext = (file && file.name || '').toLowerCase().split('.').pop();
+        return file && file.type === 'f' && ['html', 'htm'].includes(ext);
+    }
+    function isDocx(file) {
+        return file && file.type === 'f' && (file.name || '').toLowerCase().endsWith('.docx');
+    }
+    function isSpreadsheet(file) {
+        const ext = (file && file.name || '').toLowerCase().split('.').pop();
+        return file && file.type === 'f' && ['xlsx', 'xls', 'ods', 'csv', 'xlsb'].includes(ext);
+    }
+    // Browser <video> can decode these containers/codecs directly (no ffmpeg).
+    //
+    // 'ogv' was dropped in 3.1.6: an .ogv container almost always holds
+    // Theora video, and modern Chrome no longer ships a Theora decoder.
+    // canPlayType('video/ogg; codecs="theora"') correctly returns '' — but
+    // canPlayType('video/ogg') (the generic, codec-less check) returns
+    // 'maybe', which is the trap: the plugin has no codec-specific check at
+    // this layer, so a naive native-eligibility list lets the file through,
+    // the <video> element loads, shows controls, and plays the Vorbis audio
+    // track — with a permanently black picture, no error anywhere. Routing
+    // .ogv through the ffmpeg->HLS path (still true in isVideo()) transcodes
+    // it to something Chrome can actually decode. (.ogm was already excluded
+    // here for the same reason and needs no change.)
+    //
+    // mp4/m4v/webm were evaluated for the same failure mode and kept native:
+    // - mp4/m4v can (rarely) carry HEVC/H.265, which some Chrome builds
+    //   can't decode either — but the overwhelming majority of .mp4/.m4v
+    //   files in the wild are H.264, which is universally supported, and
+    //   there's no cheap way to know the codec without probing the file.
+    // - webm can in theory hold something exotic, but in practice is always
+    //   VP8/VP9/AV1, all natively decodable in Chrome.
+    // A codec-aware gate (probe with ffprobe before deciding native vs.
+    // ffmpeg) was considered but rejected for now: the only probe available
+    // at this point is _vpProbeFfmpeg's binary-existence check, not a real
+    // stream probe — adding one would mean spawning ffprobe on every single
+    // video preview (mp4 included) before the player can even start
+    // loading, which is latency on the overwhelmingly common, already-safe
+    // case to guard against a rare failure mode. If HEVC-in-mp4 turns out to
+    // be a real-world problem, the existing _vpProbeStreams/_vpProbeDecision
+    // machinery in videoplayer.js already knows how to read a codec name —
+    // it would just need to run before the native/ffmpeg fork instead of
+    // only after, which is future work, not this fix.
+    function isVideoNative(file) {
+        const ext = (file && file.name || '').toLowerCase().split('.').pop();
+        return file && file.type === 'f' && ['mp4', 'm4v', 'webm'].includes(ext);
+    }
+    // Anything the preview window can show.
+    function isPreviewable(file) {
+        if (!file || file.type !== 'f') return false;
+        return isTextLike(file) || isImage(file) || isPdf(file) || isVideo(file)
+            || isAudio(file) || isMarkdown(file) || isDocx(file) || isSpreadsheet(file);
+    }
+
+    function archiveFormat(name) {
+        const n = (name || '').toLowerCase();
+        if (n.endsWith('.tar.gz') || n.endsWith('.tgz')) return 'tar.gz';
+        if (n.endsWith('.tar.bz2') || n.endsWith('.tbz2') || n.endsWith('.tbz')) return 'tar.bz2';
+        if (n.endsWith('.tar.xz') || n.endsWith('.txz')) return 'tar.xz';
+        if (n.endsWith('.tar.zst') || n.endsWith('.tzst')) return 'tar.zst';
+        if (n.endsWith('.tar')) return 'tar';
+        if (n.endsWith('.zip')) return 'zip';
+        if (n.endsWith('.gz')) return 'gz';
+        if (n.endsWith('.bz2')) return 'bz2';
+        if (n.endsWith('.xz')) return 'xz';
+        if (n.endsWith('.7z')) return '7z';
+        if (n.endsWith('.rar')) return 'rar';
+        return null;
+    }
+
+    function isArchive(file) { return file && file.type === 'f' && archiveFormat(file.name) !== null; }
+
+    function fileIcon(file) {
+        if (!file) return '';
+        if (file.type === 'd') return '📁';
+        if (file.symlinkTarget) return '🔗';
+        if (file.type === 'l') return '🔗';
+        if (isImage(file)) return '🖼';
+        if (isPdf(file)) return '📕';
+        if (isVideo(file)) return '🎞';
+        if (isAudio(file)) return '🎵';
+        if (isArchive(file)) return '🗜';
+        if (isTextLike(file)) return '📄';
+        if (file.perms && file.perms.includes('x')) return '⚙';
+        return '📄';
+    }
+
+    function typeLabel(file) {
+        if (!file) return '';
+        if (file.type === 'd') return 'Directory';
+        if (file.symlinkTarget || file.type === 'l') return 'Symlink';
+        if (isArchive(file)) return 'Archive (' + archiveFormat(file.name) + ')';
+        if (isImage(file)) return 'Image';
+        if (isPdf(file)) return 'PDF';
+        if (isVideo(file)) return 'Video';
+        if (isAudio(file)) return 'Audio';
+        if (isTextLike(file)) return 'Text';
+        return 'File';
+    }
+
+    // UUID-ish unique id
+    function uid() {
+        return 'id-' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+    }
+
+    // Substitute placeholders for custom action commands.
+    function fillTemplate(tmpl, ctx) {
+        // ctx: { path, paths (array), dir, name, base, ext }
+        return tmpl.replace(/\{(\w+)\}/g, (m, key) => {
+            if (key === 'paths') return ctx.paths.map(shq).join(' ');
+            const v = ctx[key];
+            if (v == null) return m;
+            return shq(v);
+        });
+    }
+
+    // Like fillTemplate but for human-readable text (no shell quoting). Used
+    // for custom-action confirmation messages.
+    function fillText(tmpl, ctx) {
+        return (tmpl || '').replace(/\{(\w+)\}/g, (m, key) => {
+            if (key === 'paths') return (ctx.paths || []).join(' ');
+            const v = ctx[key];
+            return v == null ? m : String(v);
+        });
+    }
+
+    return {
+        humanSize, formatDate, joinPath, dirname, basename, normalizePath, shq, pathSegments,
+        langFromExt, isTextLike, looksBinary, isImage, isPdf, isVideo, isAudio, isArchive, archiveFormat,
+        isMarkdown, isHtml, isDocx, isSpreadsheet, isVideoNative, isPreviewable, mimeType,
+        fileIcon, typeLabel, uid, fillTemplate, fillText
+    };
+})();

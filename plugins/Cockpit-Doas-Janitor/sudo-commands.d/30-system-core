@@ -1,0 +1,23 @@
+# Managed by Cockpit Sudo Manager
+# System core services
+#
+# Scope:
+#   - Remote access
+#   - Authentication & identity glue
+#   - Box reachability
+
+# ==========================================================
+# Remote access
+# ==========================================================
+Cmnd_Alias SYSTEM_SSHD = \
+  /usr/bin/systemctl status sshd, \
+  /usr/bin/systemctl reload sshd, \
+  /usr/bin/systemctl restart sshd
+
+# ==========================================================
+# Identity services (if applicable)
+# ==========================================================
+Cmnd_Alias SYSTEM_IDENTITY = \
+  /usr/bin/systemctl status sssd, \
+  /usr/bin/systemctl restart sssd, \
+  /usr/bin/systemctl status realmd

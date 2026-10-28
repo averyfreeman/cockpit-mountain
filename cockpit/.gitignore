@@ -1,0 +1,97 @@
+# Please keep this file sorted (LC_COLLATE=C.UTF-8),
+# grouped into the 3 categories below:
+#  - general patterns (match in all directories)
+#  - patterns to match files at the toplevel
+#  - patterns to match files in subdirs
+
+# general patterns
+*~
+*.a
+*.gcda
+*.gcno
+*.log
+*.mo
+*.o
+*.pyc
+*.so
+*.trs
+*.swp
+.deps/
+.dirstamp
+.extra_dist
+Makefile
+Makefile.in
+
+# toplevel (/...)
+/*.list
+/.coverage
+/.tox
+/Coverage
+/aclocal.m4
+/autom4te.cache
+/bots
+/build/
+/cockpit
+/cockpit-*.tar*
+/cockpit-*.xz
+/cockpit-askpass
+/cockpit-bridge
+/cockpit-certificate-ensure
+/cockpit-pcp
+/cockpit-session
+/cockpit-tls
+/cockpit-ws
+/cockpit-wsinstance-factory
+/cockpit.lang
+/cockpit.pp
+/cockpit.pp.bz2
+/cockpit.spec
+/compile_commands.json
+/config.*
+/configure
+/dist/
+/frob-websocket
+/lcov/
+/metafile.json
+/mock-*
+/package-lock.json
+/qunit/
+/runtime-npm-modules.txt
+/socket-activation-helper
+/stamp-h1
+/tags
+/test-*
+/test_rsa_key
+/Test[A-Z]*
+/tmp-dist
+/tmp/
+/tsconfig.tsbuildinfo
+/version.m4
+/wsinstance-start
+
+# subdirs (/subdir/...)
+/containers/ws/rpms
+/containers/ws/overlay
+/doc/guide/html
+/doc/output
+/doc/version
+/src/appstream/*.metainfo.xml
+/po/*.pot
+/src/systemd/org.cockpit-project.cockpit-bridge.policy
+/src/cockpit.egg-info/
+/src/systemd/cockpit*.service
+/src/systemd/cockpit.socket
+/src/systemd/tmpfiles.d/cockpit-ws.conf
+/src/tls/cockpit-certificate-helper
+/src/ws/cockpit-desktop
+/src/ws/fail-html.c
+/src/ws/org.cockpit_project.cockpit.appdata.xml
+/src/ws/mock-dbus-tests.[ch]
+/test/images/
+/tools/compile
+/tools/debian/copyright
+/tools/depcomp
+/tools/install-sh
+/tools/missing
+/tools/py-compile
+/tools/test-driver

@@ -1,0 +1,104 @@
+#! /usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
+
+#
+# Copyright (C) 2013 Red Hat, Inc.
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
+
+import subprocess
+
+import testlib
+
+
+@testlib.nondestructive
+@testlib.skipBeiboot("no local overrides/config in beiboot mode")
+class TestEmbed(testlib.MachineCase):
+
+    def testBasic(self, allow_multi_host=True):
+        b = self.browser
+        m = self.machine
+
+        self.restore_dir("/home/admin")
+        m.execute("mkdir -p /home/admin/.local/share/cockpit/embed-cockpit")
+        m.upload(["verify/files/embed-cockpit/index.html",
+                  "verify/files/embed-cockpit/embed.js",
+                  "verify/files/embed-cockpit/embed.css",
+                  "verify/files/embed-cockpit/manifest.json"],
+                 "/home/admin/.local/share/cockpit/embed-cockpit/")
+
+        # replace the shell with our embedded page, this way we can avoid
+        # cross-origin errors when executing js in the iframe
+        m.write("/etc/cockpit/cockpit.conf", f"""
+[WebService]
+Shell=/embed-cockpit/index.html
+AllowMultiHost={"yes" if allow_multi_host else "no"}
+""")
+        m.start_cockpit()
+        self.login_and_go()
+
+        b.wait_visible("#embed-loaded")
+        b.wait_visible("#embed-address")
+        b.set_val("#embed-address", f"http://{m.web_address}:{m.web_port}")
+        b.click("#embed-full")
+        b.wait_visible("iframe[name='embed-full'][loaded]")
+        b.switch_to_frame("embed-full")
+        b.wait_visible("#system_information_os_text")
+
+        # Page should show automatically now that other frame logged in
+        b.switch_to_top()
+        b.click("#embed-terminal")
+        b.wait_visible("iframe[name='embed-terminal'][loaded]")
+        b.switch_to_frame("embed-terminal")
+        b.wait_visible("#terminal")
+
+        # Clicking on the link with separate auth, what happens
+        # depends on allow_multi_host
+        b.switch_to_top()
+        b.click("#embed-auth")
+        b.wait_visible("iframe[name='embed-auth'][loaded]")
+        b.switch_to_frame("embed-auth")
+        if allow_multi_host:
+            # When multiple connections are allowed, we get a fresh
+            # login page
+            b.wait_visible("#login-user-input")
+        else:
+            # When multiple connections are not allowed, we get
+            # redirected to "/" of the already open session. This
+            # loads the shell, which is /embed-cockpit/index.html in
+            # this test...
+            b.wait_visible("#embed-links")
+
+    def testNoMultiHost(self):
+        self.testBasic(allow_multi_host=False)
+
+    @testlib.skipBrowser("Chromium cannot inspect cross-origin frames", "chromium")
+    def testCrossOrigin(self):
+        b = self.browser
+        m = self.machine
+
+        pyhttpd = subprocess.Popen(['python3', '-m', 'http.server', '--bind=localhost',
+                                    '--directory=test/verify/files/embed-cockpit', '12346'])
+
+        def clean_pyhttpd():
+            pyhttpd.terminate()
+            pyhttpd.wait()
+
+        self.addCleanup(clean_pyhttpd)
+
+        # log in normally, to get the auth cookie into the browser and thus maximize possible cross-domain exposure
+        self.login_and_go()
+
+        b.open("http://localhost:12346/index.html")
+        b.set_val("#embed-address", f"http://{m.web_address}:{m.web_port}")
+        b.click("#embed-full")
+        b.wait_visible("iframe[name='embed-full'][loaded]")
+        b.switch_to_frame("embed-full")
+
+        # X-Frame-Options sameorigin blocks frame
+        if b.browser == "firefox":
+            b.wait_visible("body.felt-privacy-body")
+        self.assertFalse(b.is_present("#login"))
+
+
+if __name__ == '__main__':
+    testlib.test_main()

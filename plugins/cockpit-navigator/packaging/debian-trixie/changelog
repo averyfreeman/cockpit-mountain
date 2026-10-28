@@ -1,0 +1,66 @@
+cockpit-navigator (0.5.14-1trixie) trixie; urgency=medium
+
+  * fix: remove cockpit-system, cockpit-storaged, cockpit-packagekit from debian
+    dependencies to avoid pulling in network-manager
+
+ -- Rachit Hans <rhans@45drives.com>  Tue, 14 Jul 2026 14:45:45 -0300
+
+cockpit-navigator (0.5.13-2trixie) trixie; urgency=medium
+
+  * adding support for proxmox trixie
+
+ -- Rachit Hans <rhans@45drives.com>  Wed, 08 Jul 2026 07:13:04 -0300
+
+cockpit-navigator (0.5.13-1trixie) trixie; urgency=medium
+
+  * adding support for proxmox trixie
+
+ -- Rachit Hans <rhans@45drives.com>  Tue, 07 Jul 2026 15:10:54 -0300
+
+cockpit-navigator (0.5.12-1trixie) trixie; urgency=medium
+
+  * Building latest fixes
+
+ -- Jordan Keough <jkeough@45drives.com>  Tue, 16 Sep 2025 12:25:51 -0300
+
+cockpit-navigator (0.5.11-4trixie) trixie; urgency=medium
+
+  * build package
+
+ -- Rachit Hans <rhans@45drives.com>  Tue, 16 Sep 2025 11:58:45 -0300
+
+cockpit-navigator (0.5.11-3trixie) trixie; urgency=medium
+
+  * build package + fixed deletion method of tmp files
+
+ -- Rachit Hans <rhans@45drives.com>  Tue, 16 Sep 2025 11:10:19 -0300
+
+cockpit-navigator (0.5.11-2trixie) trixie; urgency=medium
+
+  * Building testing package for temp files/folder selection fixes
+
+ -- Jordan Keough <jkeough@45drives.com>  Tue, 16 Sep 2025 05:57:34 -0300
+
+cockpit-navigator (0.5.11-2trixie) trixie; urgency=medium
+
+  * build package
+
+ -- Rachit Hans <rhans@45drives.com>  Mon, 15 Sep 2025 14:49:10 -0300
+
+cockpit-navigator (0.5.11-1trixie) trixie; urgency=medium
+
+  * deleting tmp/navigotrs files and fixed auto  parent folder selection
+
+ -- Rachit Hans <rhans@45drives.com>  Mon, 15 Sep 2025 14:17:03 -0300
+
+cockpit-navigator (0.5.10-2trixie) trixie; urgency=medium
+
+  * update rocky dependencies
+
+ -- Josh Boudreau <jboudreau@45drives.com>  Tue, 13 May 2025 08:05:51 -0300
+
+cockpit-navigator (0.5.10-1trixie) trixie; urgency=medium
+
+  * build for trixie
+
+ -- Brett Kelly <bkelly@45drives.com>  Mon, 24 Feb 2025 14:40:50 -0300

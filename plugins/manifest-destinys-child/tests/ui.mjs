@@ -1,0 +1,697 @@
+// tests/ui.mjs — Playwright UI regression for Manifest, driving the plugin
+// through the live Cockpit shell. Exercises the front-end broadly: app shell,
+// Settings + all themes + accent buttons, the download table + percent-on-bar +
+// row context menu, the detail file-selection tree, Paste-to-Queue staging with
+// mixed-source detection + remove/clear, modal stacking, and the filter pills.
+// Table/detail/context-menu checks that need a live service are guarded by
+// svc.active and injected with synthetic data (no aria2 RPC calls), so the core
+// UI is always tested and the service-gated bits run when aria2 is up.
+//
+// Fails on ANY uncaught pageerror or risky console error.
+//   COCKPIT_PASS=<pass> npm run test:ui   (also honours COCKPIT_USER/URL)
+import { chromium } from 'playwright';
+import { CFG, openManifest } from './helpers/cockpit.mjs';
+
+const SHOT = process.env.UI_SHOT || '/home/ismet/manifest/tests/ui.png';
+const errors = [];
+const RISK = /is not a function|is not defined|Cannot read propert|Manifest[A-Z]|undefined is not/;
+const checks = [];
+function check(name, ok, detail) { checks.push({ name, ok: !!ok, detail: detail || '' }); }
+
+const browser = await chromium.launch({ channel: 'chrome', headless: true, args: ['--ignore-certificate-errors'] });
+const ctx = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1200, height: 760 } });
+const page = await ctx.newPage();
+page.on('pageerror', e => errors.push({ kind: 'pageerror', text: String(e.message || e) }));
+page.on('console', m => { if (m.type() === 'error') errors.push({ kind: 'console', text: m.text() }); });
+
+function finish(code, msg) {
+    console.log(msg);
+    for (const c of checks) console.log(`  ${c.ok ? 'PASS' : 'FAIL'}  ${c.name}${c.detail ? ' — ' + c.detail : ''}`);
+    const risky = errors.filter(e => e.kind === 'pageerror' || RISK.test(e.text));
+    if (risky.length) { console.log(`\n${risky.length} risky JS error(s):`); risky.forEach(e => console.log(`  [${e.kind}] ${e.text}`)); }
+    browser.close().then(() => process.exit(code));
+}
+const data = () => app.evaluate(() => window.Alpine.$data(document.querySelector('[x-data]')));
+let app;
+
+try {
+    if (!CFG.pass) {
+        await page.goto(CFG.url, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+        await page.screenshot({ path: SHOT }).catch(() => {});
+        finish(2, `Set COCKPIT_PASS to run the UI suite (skipped). Shot: ${SHOT}`);
+    }
+    app = await openManifest(page);
+    if (!app) finish(3, `Could not locate the Manifest plugin frame. Shot: ${SHOT}`);
+    await app.locator('.mf-topbar').first().waitFor({ timeout: 20000 });
+    check('shell renders', await app.locator('.mf-title').filter({ hasText: 'Manifest' }).count() > 0);
+    // IMPORTANT: keep this suite from ever writing to the real settings.yml.
+    // Column-drag/theme/destination checks below mutate settings and trigger
+    // saveSettings(), which dumps the WHOLE settings object — so a fake
+    // destination set for one check would otherwise clobber the user's real
+    // bookmarks on disk. Stub the disk write to a no-op; all mutations stay
+    // in-memory. (Actual disk persistence is covered by tests/theme-persist.)
+    await app.evaluate(() => { const d = window.Alpine.$data(document.querySelector('[x-data]')); d._writeSettingsYaml = () => Promise.resolve(); });
+    // Let the async service check (init → _refreshServiceState) settle before we
+    // decide whether to run the service-gated table/detail section.
+    await app.evaluate(async () => { const d = window.Alpine.$data(document.querySelector('[x-data]')); for (let i = 0; i < 40 && d.svc.state === 'unknown'; i++) await new Promise(r => setTimeout(r, 300)); });
+    const svcActive = await app.evaluate(() => window.Alpine.$data(document.querySelector('[x-data]')).svc.active);
+    // The docked detail panel must be HIDDEN on load (element display:none, not
+    // just detail.open false) — unless a real download is actively downloading
+    // (which legitimately auto-opens it). Checking actual visibility here is what
+    // catches the ":style string wiped x-show's display:none" bug.
+    const loadState = await app.evaluate(() => {
+        const d = window.Alpine.$data(document.querySelector('[x-data]'));
+        const downloading = Object.values(d.downloads).some((x) => x.status === 'active' && (Number(x.completedLength) || 0) < (Number(x.totalLength) || 0));
+        return { open: d.detail.open, downloading, panelDisplay: getComputedStyle(document.querySelector('#mfDetail')).display };
+    });
+    check('detail panel is hidden on load (no stale empty panel)', loadState.panelDisplay === 'none' || loadState.downloading, JSON.stringify(loadState));
+
+    // ---- Setup-log dismiss ----
+    await app.evaluate(() => { const d = window.Alpine.$data(document.querySelector('[x-data]')); d.svc.log = 'test setup log line'; });
+    await page.waitForTimeout(150);
+    check('setup log shows a dismiss button', await app.locator('.mf-setup-log-wrap .btn-close').count() > 0);
+    await app.locator('.mf-setup-log-wrap .btn-close').first().click({ timeout: 3000 }).catch(() => {});
+    await page.waitForTimeout(150);
+    check('dismiss clears the setup log', await app.evaluate(() => !window.Alpine.$data(document.querySelector('[x-data]')).svc.log));
+
+    // ---- Settings: swatches + tuning + ALL themes + accent buttons ----
+    await app.locator('button[title="Settings"]').first().click({ timeout: 5000 });
+    await app.locator('#mfSettings.show').waitFor({ timeout: 5000 });
+    const swatches = await app.locator('#mfSettings .mf-theme-swatch').count();
+    check('settings has all 13 theme swatches', swatches === 13, `found ${swatches}`);
+    const settingsText = await app.locator('#mfSettings').innerText().catch(() => '');
+    check('tuning section present (concurrency + per-server connections)',
+        /Max concurrent downloads/i.test(settingsText) && /Max connections per server/i.test(settingsText) && /aria2 caps at 16/i.test(settingsText));
+    // v2.0: notifications toggle + advanced aria2-options editor in Settings
+    check('settings has notifications toggle + advanced aria2-options editor',
+        await app.locator('#mfSettings #mfNotify').count() === 1
+        && /Desktop notification/i.test(settingsText) && /all aria2 options/i.test(settingsText));
+    // v2.0.2: RPC "listen on all interfaces" toggle
+    check('settings has the RPC listen-on-all-interfaces toggle',
+        await app.locator('#mfSettings #mfListenAll').count() === 1 && /Listen on all interfaces/i.test(settingsText));
+    // v2.1.0: disk-cache is a Settings → Limits field. It's a STARTUP option
+    // (aria2 ignores it live), so it's wired to applyDiskCache() — save + rewrite
+    // aria2.conf + offer to restart — not the live applyLimits() path.
+    const dcInput = app.locator('#mfSettings input[x-model\\.number="settings.limits.diskCacheMiB"]');
+    const dcHtml = await dcInput.evaluate((el) => el.outerHTML).catch(() => '');
+    check('settings has a Disk cache field wired to applyDiskCache (startup-only)',
+        await dcInput.count() === 1 && /applyDiskCache\(\)/.test(dcHtml)
+        && /Disk cache/i.test(settingsText) && /startup option|restart/i.test(settingsText));
+    const dcOpt = await app.evaluate(() =>
+        window.ManifestDefaults.toAria2GlobalOptions(window.ManifestDefaults.mergeSettings({ limits: { diskCacheMiB: 128 } }))['disk-cache']);
+    check('disk-cache flows into aria2.conf options as "<n>M"', dcOpt === '128M', dcOpt);
+    const dcFlow = await app.evaluate(async () => {
+        const d = window.Alpine.$data(document.querySelector('[x-data]'));
+        const calls = [];
+        const real = { save: d.saveSettings, persist: d._persistLimitsToConfig, confirm: d.confirmDialog, svc: d.svc };
+        d.saveSettings = () => { calls.push('save'); };
+        d._persistLimitsToConfig = () => { calls.push('persistConf'); return Promise.resolve(); };
+        d.confirmDialog = () => { calls.push('offerRestart'); return Promise.resolve(false); }; // decline → no restart
+        d.svc = { active: true };
+        await d.applyDiskCache();
+        d.saveSettings = real.save; d._persistLimitsToConfig = real.persist; d.confirmDialog = real.confirm; d.svc = real.svc;
+        return calls;
+    });
+    check('applyDiskCache saves + rewrites aria2.conf + offers a restart to apply',
+        JSON.stringify(dcFlow) === JSON.stringify(['save', 'persistConf', 'offerRestart']), JSON.stringify(dcFlow));
+
+    // v2.1.0: folder picker gains an editable path field + a search/filter box
+    check('folder picker has an editable path field + a search box',
+        await app.locator('#mfFolderPicker input[x-model="fsPicker.pathInput"]').count() === 1
+        && await app.locator('#mfFolderPicker input[x-model="fsPicker.filter"]').count() === 1);
+    const pick = await app.evaluate(async () => {
+        const d = window.Alpine.$data(document.querySelector('[x-data]'));
+        d.fsPicker.entries = ['Movies', 'Music', 'movies-2', 'Docs'];
+        d.fsPicker.filter = 'mov';                          // case-insensitive substring
+        const filtered = d._fpFilteredEntries();
+        d.fsPicker.filter = '';
+        const unfiltered = d._fpFilteredEntries().length;
+        let navTo = null; const realList = d._fpList;        // capture where a typed path navigates
+        d._fpList = (p) => { navTo = p; return Promise.resolve(); };
+        d.fsPicker.pathInput = '  /mnt/nas/films  ';
+        d._fpGoPath();
+        d._fpGoPath('   ');                                  // blank input must not navigate
+        const navToAfterBlank = navTo;
+        d._fpList = realList; d.fsPicker.entries = []; d.fsPicker.filter = '';
+        return { filtered, unfiltered, navTo, navToAfterBlank };
+    });
+    check('picker search filters the current folder case-insensitively',
+        JSON.stringify(pick.filtered) === JSON.stringify(['Movies', 'movies-2']) && pick.unfiltered === 4, JSON.stringify(pick));
+    check('picker path field navigates to the trimmed typed path (blank is ignored)',
+        pick.navTo === '/mnt/nas/films' && pick.navToAfterBlank === '/mnt/nas/films');
+    // v2.1.0 (review fix P1): a non-absolute value must never reach `find` — a
+    // value like "-delete" would otherwise be parsed as a find action.
+    const reject = await app.evaluate(() => {
+        const d = window.Alpine.$data(document.querySelector('[x-data]'));
+        let navTo = null; const realList = d._fpList;
+        d._fpList = (p) => { navTo = p; return Promise.resolve(); };
+        const trial = (v) => { navTo = null; d.fsPicker.error = ''; d.fsPicker.pathInput = v; d._fpGoPath(); return { navTo, error: d.fsPicker.error }; };
+        const rel = trial('relative/path');
+        const danger = trial('-delete');
+        const ok = trial('/mnt/nas');
+        d._fpList = realList; d.fsPicker.error = ''; d.fsPicker.pathInput = '';
+        return { rel, danger, ok };
+    });
+    check('picker rejects non-absolute / find-expression path input (only absolute navigates)',
+        reject.rel.navTo === null && !!reject.rel.error
+        && reject.danger.navTo === null && !!reject.danger.error
+        && reject.ok.navTo === '/mnt/nas', JSON.stringify(reject));
+    // v2.1.0 (review fix P2): a slow listing that resolves after a newer
+    // navigation must not clobber it (request-sequence guard in _fpList).
+    const race = await app.evaluate(async () => {
+        const d = window.Alpine.$data(document.querySelector('[x-data]'));
+        const realSpawn = window.FS.spawn;
+        window.FS.spawn = (argv) => {                 // /slow resolves AFTER /fast, though it started first
+            const path = argv[1];
+            const delay = path === '/slow' ? 60 : 5;
+            const out = path === '/fast' ? 'FA\nFB\n' : 'SA\n';
+            return new Promise((r) => setTimeout(() => r(out), delay));
+        };
+        const p1 = d._fpList('/slow');                // older navigation, slow find
+        const p2 = d._fpList('/fast');                // newer navigation, fast find
+        await Promise.all([p1, p2]);
+        const result = { cwd: d.fsPicker.cwd, entries: d.fsPicker.entries.slice() };
+        window.FS.spawn = realSpawn; d.fsPicker.entries = []; d.fsPicker.cwd = '/'; d.fsPicker.pathInput = '';
+        return result;
+    });
+    check('picker ignores a stale slow listing (newest navigation wins)',
+        race.cwd === '/fast' && JSON.stringify(race.entries) === JSON.stringify(['FA', 'FB']), JSON.stringify(race));
+
+    // Apply every theme; assert data-bs-theme + readable header contrast (light on dark, or dark on light)
+    const themeIds = await app.evaluate(() => (window.ManifestThemes ? window.ManifestThemes.THEMES.map(t => t.id) : []));
+    const lum = (rgb) => { const m = (rgb.match(/\d+/g) || [0, 0, 0]).map(Number); return 0.2126 * m[0] + 0.7152 * m[1] + 0.0722 * m[2]; };
+    let themeFails = 0, contrastFails = 0;
+    for (const id of themeIds) {
+        await app.evaluate((t) => { const d = window.Alpine.$data(document.querySelector('[x-data]')); d.settings.theme = t; d.applyTheme(); }, id);
+        await page.waitForTimeout(90);
+        const info = await app.evaluate(() => {
+            const attr = document.documentElement.getAttribute('data-bs-theme');
+            const hdr = document.querySelector('#mfSettings h6'), bg = document.querySelector('#mfSettings .modal-content');
+            return { attr, hdr: hdr ? getComputedStyle(hdr).color : '', bg: bg ? getComputedStyle(bg).backgroundColor : '' };
+        });
+        const attrOk = id === 'system' ? /^(light|dark)$/.test(info.attr) : info.attr === id;
+        if (!attrOk) themeFails++;
+        if (Math.abs(lum(info.hdr) - lum(info.bg)) < 40) contrastFails++;
+    }
+    check(`all ${themeIds.length} themes apply data-bs-theme`, themeFails === 0, `${themeFails} failed`);
+    check('section headers legible in every theme', contrastFails === 0, `${contrastFails} low-contrast`);
+
+    // Accent buttons: a custom theme's Save button uses its --bs-primary, not blue
+    await app.evaluate(() => { const d = window.Alpine.$data(document.querySelector('[x-data]')); d.settings.theme = 'gruvbox'; d.applyTheme(); });
+    await page.waitForTimeout(120);
+    const btn = await app.evaluate(() => { const b = [...document.querySelectorAll('#mfSettings .btn-primary')].pop(); const cs = getComputedStyle(b); return { bg: cs.backgroundColor }; });
+    check('primary button follows the theme accent (not Bootstrap blue)', !/13,\s*110,\s*253/.test(btn.bg), `Save bg=${btn.bg}`);
+
+    // Close (×) must be whitened on custom dark themes (Bootstrap only does this
+    // for data-bs-theme="dark"); gruvbox is applied from the accent check above.
+    const closeFilter = await app.evaluate(() => { const b = document.querySelector('#mfSettings .btn-close'); return b ? getComputedStyle(b).filter : 'none'; });
+    check('modal close (×) is whitened on custom dark themes (gruvbox)', /invert/.test(closeFilter), closeFilter);
+
+    // setTheme persists immediately (not via the 400ms debounce): spy on the
+    // write and assert setTheme triggers it synchronously.
+    const themeWrite = await app.evaluate(() => {
+        const d = window.Alpine.$data(document.querySelector('[x-data]'));
+        let writes = 0; const orig = d._writeSettingsYaml;
+        d._writeSettingsYaml = () => { writes++; return Promise.resolve(); };
+        const pendingBefore = !!d._saveTimer;
+        d.setTheme('nord');
+        const immediate = writes;                 // 1 right away if not debounced
+        d._writeSettingsYaml = orig;
+        return { immediate, pendingBefore, saveTimerAfter: !!d._saveTimer };
+    });
+    check('theme selection writes settings immediately (no debounce)', themeWrite.immediate === 1 && themeWrite.saveTimerAfter === false, JSON.stringify(themeWrite));
+
+    await app.evaluate(() => { const d = window.Alpine.$data(document.querySelector('[x-data]')); d.settings.theme = 'dark'; d.applyTheme(); });
+
+    // Modal stacking: folder picker over Settings
+    await app.locator('#mfSettings button', { hasText: /Browse/ }).first().click({ timeout: 4000 });
+    await app.locator('#mfFolderPicker.show').waitFor({ timeout: 8000 });
+    await page.waitForTimeout(450); // let the fade-in finish (hide() during it is a no-op)
+    const stack = await app.evaluate(() => {
+        const z = (el) => parseInt(getComputedStyle(el).zIndex) || 0;
+        const picker = document.querySelector('#mfFolderPicker'), settings = document.querySelector('#mfSettings');
+        const r = picker.querySelector('.modal-content').getBoundingClientRect();
+        return { pickerZ: z(picker), settingsZ: z(settings), topInPicker: picker.contains(document.elementFromPoint(r.left + r.width / 2, r.top + 8)) };
+    });
+    check('folder picker stacks above the modal that opened it', stack.pickerZ > stack.settingsZ && stack.topInPicker, JSON.stringify(stack));
+    await app.locator('#mfFolderPicker button', { hasText: /Cancel/ }).first().click({ timeout: 3000 }).catch(() => {});
+    await app.locator('#mfFolderPicker').waitFor({ state: 'hidden', timeout: 5000 }).catch(() => {});
+    // fallback: if the picker is somehow still up, force it closed so it can't
+    // intercept the Settings close click below
+    if (await app.locator('#mfFolderPicker.show').count()) {
+        await app.evaluate(() => bootstrap.Modal.getOrCreateInstance(document.querySelector('#mfFolderPicker')).hide());
+        await app.locator('#mfFolderPicker').waitFor({ state: 'hidden', timeout: 5000 }).catch(() => {});
+    }
+    await page.waitForTimeout(200);
+    await app.locator('#mfSettings [data-bs-dismiss="modal"]').first().click({ timeout: 4000 });
+    await app.locator('#mfSettings.show').waitFor({ state: 'hidden', timeout: 5000 });
+    check('settings modal closes', true);
+
+    // ---- Paste-to-Queue: mixed sources, per-line type, then remove + clear ----
+    await app.locator('header button', { hasText: 'Paste to Queue' }).first().click({ timeout: 5000 });
+    await app.locator('#mfPaste.show').waitFor({ timeout: 5000 });
+    await app.locator('#mfPaste textarea').first().fill('magnet:?xt=urn:btih:abc123\nhttps://example.com/ubuntu.iso\nftp://mirror/file.bin\nthis is not a link');
+    await page.waitForTimeout(300);
+    const previewTypes = (await app.locator('#mfPaste .badge').allInnerTexts().catch(() => [])).join(',');
+    check('paste preview classifies each line independently', /magnet/.test(previewTypes) && /http/.test(previewTypes) && /unknown/.test(previewTypes), previewTypes);
+    await app.locator('#mfPaste button', { hasText: 'Add to queue' }).first().click({ timeout: 4000 });
+    await app.locator('#mfPaste.show').waitFor({ state: 'hidden', timeout: 5000 }).catch(() => {});
+    await page.waitForTimeout(300);
+    const qcount = await app.evaluate(() => window.Alpine.$data(document.querySelector('[x-data]')).queue.items.length);
+    check('valid mixed sources staged (magnet+http+ftp, junk dropped)', qcount === 3, `queue length ${qcount}`);
+    // remove one, then clear all (via component methods — robust to markup)
+    await app.evaluate(() => { const d = window.Alpine.$data(document.querySelector('[x-data]')); d.removeItem(d.queue.items[0]); });
+    await page.waitForTimeout(150);
+    check('remove item drops one from the queue', (await app.evaluate(() => window.Alpine.$data(document.querySelector('[x-data]')).queue.items.length)) === 2);
+    // clearQueue() asks for confirmation first; drive the confirm dialog's OK.
+    // (Wait for the show transition before hiding, and for the hide to finish,
+    // or the modal backdrop lingers and intercepts later clicks.)
+    await app.evaluate(() => { window.Alpine.$data(document.querySelector('[x-data]')).clearQueue(); });
+    await app.locator('#mfConfirmModal.show').waitFor({ timeout: 4000 }).catch(() => {});
+    await page.waitForTimeout(450);
+    await app.locator('#mfConfirmModal button', { hasText: /^\s*OK\s*$/ }).first().click({ timeout: 4000 }).catch(() => {});
+    let cleared = false;
+    for (let i = 0; i < 20 && !cleared; i++) { await page.waitForTimeout(150); cleared = (await app.evaluate(() => window.Alpine.$data(document.querySelector('[x-data]')).queue.items.length)) === 0; }
+    await app.locator('#mfConfirmModal.show').waitFor({ state: 'hidden', timeout: 4000 }).catch(() => {});
+    check('clear empties the queue (via confirm dialog)', cleared);
+
+    // ---- Quick Add: destination split into Saved (bookmarks) + Recent (v1.1.3) ----
+    await app.evaluate(() => {
+        const d = window.Alpine.$data(document.querySelector('[x-data]'));
+        d.settings.destinations = {
+            default: '/mnt/media/downloads',
+            bookmarks: [{ id: 'b1', label: 'Films', path: '/mnt/media/films' }, { id: 'b2', label: 'ISOs', path: '/mnt/media/iso' }],
+            // '/mnt/media/films' is also a bookmark → must NOT appear under Recent
+            recents: ['/mnt/media/films', '/home/u/dl', '/tmp/x'],
+        };
+        d.openQuickAdd();
+    });
+    await app.locator('#mfQuickAdd.show').waitFor({ timeout: 5000 }).catch(() => {});
+    await page.waitForTimeout(500); // let the fade-in finish (hide() during it is a no-op)
+    const qaText = await app.locator('#mfQuickAdd').innerText().catch(() => '');
+    check('Quick Add destination has separate Saved and Recent groups', /\bSaved\b/.test(qaText) && /\bRecent\b/.test(qaText), '');
+    const savedChips = await app.evaluate(() => window.Alpine.$data(document.querySelector('[x-data]')).settings.destinations.bookmarks.map(b => b.label));
+    const recentChips = await app.evaluate(() => window.Alpine.$data(document.querySelector('[x-data]')).recentDests());
+    check('Saved shows bookmark labels; Recent excludes bookmarked paths',
+        savedChips.join(',') === 'Films,ISOs' && recentChips.join(',') === '/home/u/dl,/tmp/x', JSON.stringify({ savedChips, recentChips }));
+    await app.evaluate(() => { const d = window.Alpine.$data(document.querySelector('[x-data]')); bootstrap.Modal.getOrCreateInstance(d.quickAddModalEl).hide(); });
+    await app.locator('#mfQuickAdd').waitFor({ state: 'hidden', timeout: 5000 }).catch(() => {});
+    await page.waitForTimeout(300);
+
+    // ---- Download table + percent-on-bar + row context menu (needs svc.active) ----
+    if (svcActive) {
+        await app.evaluate(() => {
+            const d = window.Alpine.$data(document.querySelector('[x-data]'));
+            if (d.stopPolling) d.stopPolling();
+            // A real download may have auto-opened the docked panel earlier — close
+            // it, and neutralize auto-open for the injected rows below.
+            d.detail.open = false; d.minimizedDetails = [];
+            d._autoOpenPrimed = true; d._autoSeen = new Set();
+            d.deepLinks = { explorer: true, files: true };
+            const mk = (gid, name, total, done, spd, status, bt) => ({ gid, status, totalLength: String(total), completedLength: String(done), downloadSpeed: String(spd), uploadSpeed: '0', connections: status === 'active' ? '9' : '0', numSeeders: '3', dir: '/mnt/media', files: [{ path: '/mnt/media/' + name, selected: 'true' }], bittorrent: bt ? { info: { name } } : undefined, errorCode: '0' });
+            d.downloads = {
+                a: mk('a', 'ubuntu-24.04.iso', 6000000000, 2700000000, 8000000, 'active', false),
+                b: mk('b', 'Sintel.1080p.mkv', 1600000000, 200000000, 9000000, 'active', true),
+                c: mk('c', 'debian.iso', 659000000, 659000000, 0, 'complete', false),
+            };
+            d.activeFilter = 'all';
+        });
+        await page.waitForTimeout(300);
+        const rows = await app.locator('.mf-row').count();
+        check('table renders injected downloads', rows === 3, `rows=${rows}`);
+        const pctText = (await app.locator('.mf-row-pct').allInnerTexts().catch(() => [])).join(',');
+        check('percent shown inside the bar', /%/.test(pctText), pctText);
+        const badges = (await app.locator('.mf-row .badge').allInnerTexts().catch(() => [])).join(',');
+        check('status badges render (active/complete)', /active/i.test(badges) && /complete/i.test(badges), badges);
+
+        // ---- Sorting the download table on any column (not just name/size) ----
+        const dlSort = await app.evaluate(() => {
+            const d = window.Alpine.$data(document.querySelector('[x-data]'));
+            d.sortBy('down'); d.sortBy('down');                 // asc → desc: fastest first
+            const order = d.visibleDownloads.map(x => Number(x.downloadSpeed) || 0);
+            const ind = d.sortInd('down');
+            return { desc: d.sortDir === 'desc', order, ind, sortedDesc: order.slice().sort((a, b) => b - a) };
+        });
+        check('download table sorts by ↓ speed (desc) with an arrow indicator',
+            dlSort.desc && JSON.stringify(dlSort.order) === JSON.stringify(dlSort.sortedDesc) && /▼/.test(dlSort.ind), JSON.stringify(dlSort));
+        await app.evaluate(() => { const d = window.Alpine.$data(document.querySelector('[x-data]')); d.sortKey = 'name'; d.sortDir = 'asc'; });
+
+        // ---- Resizable columns: fixed layout (anti-shake) + grips + drag-persist ----
+        const layout = await app.evaluate(() => getComputedStyle(document.querySelector('.mf-table')).tableLayout);
+        check('download table uses fixed layout (anti-shake)', layout === 'fixed', `table-layout=${layout}`);
+        const grips = await app.locator('.mf-table thead .mf-col-grip').count();
+        check('every column boundary has a resize grip', grips === 9, `grips=${grips}`);
+        // No-shake proof: widen a speed value ("9 MiB/s" → "999.9 MiB/s") and assert
+        // the Size header does not move — with fixed layout, content can't shift columns.
+        const sizeXBefore = await app.evaluate(() => document.querySelectorAll('.mf-table thead th')[3].getBoundingClientRect().x);
+        await app.evaluate(() => { const d = window.Alpine.$data(document.querySelector('[x-data]')); d.downloads.b.downloadSpeed = '1048471142'; });
+        await page.waitForTimeout(200);
+        const sizeXAfter = await app.evaluate(() => document.querySelectorAll('.mf-table thead th')[3].getBoundingClientRect().x);
+        check('columns hold position when a speed value changes width (no row-shake)', Math.abs(sizeXBefore - sizeXAfter) < 1, `Δx=${(sizeXAfter - sizeXBefore).toFixed(2)}`);
+        // Drag the grip between Name(col 2) and Size(col 3): Name widens, Size shrinks, persists.
+        // Reset to known widths first so the test is hermetic (a prior run may have
+        // persisted a layout with Size already at the min, leaving no room to shrink).
+        await app.evaluate(() => { const d = window.Alpine.$data(document.querySelector('[x-data]')); d.settings.columns.widths = window.ManifestColumns.DEFAULT_WIDTHS.slice(); });
+        await page.waitForTimeout(80);
+        const before = await app.evaluate(() => window.Alpine.$data(document.querySelector('[x-data]')).colWidths.slice());
+        await app.evaluate(() => {
+            const grip = document.querySelectorAll('.mf-table thead .mf-col-grip')[2]; // boundary index 2 (Name|Size)
+            const r = grip.getBoundingClientRect();
+            const x0 = r.left + r.width / 2, y = r.top + r.height / 2;
+            const opts = (x) => ({ bubbles: true, cancelable: true, clientX: x, clientY: y });
+            grip.dispatchEvent(new MouseEvent('mousedown', opts(x0)));
+            document.dispatchEvent(new MouseEvent('mousemove', opts(x0 + 90)));
+            document.dispatchEvent(new MouseEvent('mouseup', opts(x0 + 90)));
+        });
+        await page.waitForTimeout(150);
+        const after = await app.evaluate(() => window.Alpine.$data(document.querySelector('[x-data]')).colWidths.slice());
+        check('dragging a grip resizes columns (Name grows, Size shrinks, total preserved)',
+            after[2] > before[2] && after[3] < before[3] && Math.abs((after[2] + after[3]) - (before[2] + before[3])) < 0.5,
+            `${JSON.stringify(before.slice(2, 4))} → ${JSON.stringify(after.slice(2, 4))}`);
+        const persisted = await app.evaluate(() => window.Alpine.$data(document.querySelector('[x-data]')).settings.columns.widths.slice());
+        check('resized widths land in settings (persisted to settings.yml)', JSON.stringify(persisted) === JSON.stringify(after), JSON.stringify(persisted));
+
+        // ---- Checkbox multi-select + bulk-action bar ----
+        await app.evaluate(() => window.Alpine.$data(document.querySelector('[x-data]')).clearSelection());
+        await page.waitForTimeout(80);
+        const rowChecks = await app.locator('.mf-row .mf-row-check input[type=checkbox]').count();
+        check('every row has a selection checkbox', rowChecks === 3, `checkboxes=${rowChecks}`);
+        check('header has a select-all checkbox', await app.locator('.mf-th-check input[type=checkbox]').count() === 1);
+        // bulk bar hidden with nothing selected
+        check('bulk bar hidden when no rows selected', !(await app.locator('.mf-bulkbar').isVisible().catch(() => false)));
+        // tick one row → selection grows, bulk bar appears with the right count
+        await app.locator('.mf-row .mf-row-check input[type=checkbox]').first().click();
+        await page.waitForTimeout(120);
+        check('ticking a row checkbox selects it', await app.evaluate(() => window.Alpine.$data(document.querySelector('[x-data]')).selection.size) === 1);
+        check('bulk bar appears when a row is selected', await app.locator('.mf-bulkbar').isVisible());
+        const barText = await app.locator('.mf-bulkbar').innerText().catch(() => '');
+        check('bulk bar shows count + Pause/Resume/Retry/Remove actions',
+            /1 selected/.test(barText) && /Pause/.test(barText) && /Resume/.test(barText) && /Retry/.test(barText) && /Remove/.test(barText), barText.replace(/\n/g, ' '));
+        // select-all header checkbox selects every visible row
+        await app.locator('.mf-th-check input[type=checkbox]').click();
+        await page.waitForTimeout(120);
+        check('header select-all selects all visible rows', await app.evaluate(() => window.Alpine.$data(document.querySelector('[x-data]')).selection.size) === 3);
+        // bulk remove: drive it through the confirm dialog, assert the rows go away.
+        // NOTE: no-return block — bulkRemove() awaits the confirm dialog, so returning
+        // its promise to evaluate() would deadlock (OK is clicked on the next line).
+        await app.evaluate(() => { window.Alpine.$data(document.querySelector('[x-data]')).bulkRemove(); });
+        await app.locator('#mfConfirmModal.show').waitFor({ timeout: 4000 }).catch(() => {});
+        await page.waitForTimeout(400);
+        await app.locator('#mfConfirmModal button', { hasText: /^\s*OK\s*$/ }).first().click({ timeout: 4000 }).catch(() => {});
+        // Generous poll window: _stopAndPurge retries removeDownloadResult up to
+        // 6×150ms per row, and here the injected gids aren't real so every retry
+        // is exhausted before the local delete — 3 rows can take a few seconds.
+        let emptied = false;
+        for (let i = 0; i < 60 && !emptied; i++) { await page.waitForTimeout(150); emptied = (await app.evaluate(() => Object.keys(window.Alpine.$data(document.querySelector('[x-data]')).downloads).length)) === 0; }
+        await app.locator('#mfConfirmModal.show').waitFor({ state: 'hidden', timeout: 4000 }).catch(() => {});
+        check('bulk remove (via confirm) clears the selected rows + selection', emptied && (await app.evaluate(() => window.Alpine.$data(document.querySelector('[x-data]')).selection.size)) === 0);
+        // re-inject the three rows so the later detail-tree section still has data
+        await app.evaluate(() => {
+            const d = window.Alpine.$data(document.querySelector('[x-data]'));
+            const mk = (gid, name, total, done, spd, status, bt) => ({ gid, status, totalLength: String(total), completedLength: String(done), downloadSpeed: String(spd), uploadSpeed: '0', connections: status === 'active' ? '9' : '0', numSeeders: '3', dir: '/mnt/media', files: [{ path: '/mnt/media/' + name, selected: 'true' }], bittorrent: bt ? { info: { name } } : undefined, errorCode: '0' });
+            d.downloads = { a: mk('a', 'ubuntu-24.04.iso', 6000000000, 2700000000, 8000000, 'active', false), b: mk('b', 'Sintel.1080p.mkv', 1600000000, 200000000, 9000000, 'active', true), c: mk('c', 'debian.iso', 659000000, 659000000, 0, 'complete', false) };
+        });
+        await page.waitForTimeout(200);
+
+        // row context menu: open on first row's ⋯, must be in viewport and show deep-link items
+        await app.locator('.mf-row button', { hasText: '⋯' }).first().click({ timeout: 4000 });
+        await page.waitForTimeout(200);
+        const menu = await app.evaluate(() => {
+            const el = document.querySelector('.mf-ctxmenu');
+            if (!el || !el.classList.contains('show')) return { open: false };
+            const b = el.getBoundingClientRect();
+            return { open: true, inViewport: b.left >= 0 && b.top >= 0 && b.right <= innerWidth + 1 && b.bottom <= innerHeight + 1, text: el.innerText };
+        });
+        check('row context menu opens inside the viewport', menu.open && menu.inViewport, JSON.stringify({ inViewport: menu.inViewport }));
+        check('context menu shows Open-in-Files and Open-in-Explorer (installed)', /Files/.test(menu.text || '') && /Explorer/.test(menu.text || ''));
+        await app.evaluate(() => window.Alpine.$data(document.querySelector('[x-data]')).closeContextMenu());
+
+        // ---- Detail file-selection tree: collapse, select none/all, tri-state ----
+        // The detail is now a docked panel driven by detail.open (x-show), not a
+        // Bootstrap modal — inject state directly and it renders.
+        await app.evaluate(() => {
+            const d = window.Alpine.$data(document.querySelector('[x-data]'));
+            const files = [{ index: '1', path: '/dl/Show/Sub/a.srt', length: '5', selected: 'true' }, { index: '2', path: '/dl/Show/Sub/b.srt', length: '5', selected: 'true' }, { index: '3', path: '/dl/Show/movie.mkv', length: '900', selected: 'true' }, { index: '4', path: '/dl/Show/junk.txt', length: '9', selected: 'false' }];
+            d.detail = { open: true, gid: 'b', tab: 'files', data: {}, peers: [], trackers: [], files: files.map(f => ({ index: Number(f.index), path: f.path, length: Number(f.length), completedLength: 0, selected: f.selected !== 'false' })), fileTree: window.ManifestFileTree.build(files).nodes, selectedIndices: new Set([1, 2, 3]), collapsed: new Set(), _selGid: 'b', loading: false, error: '', peerSort: null, trackerSort: null, opts: { maxConn: '', split: '', maxPeers: '', dlLimit: '', ulLimit: '' } };
+        });
+        await page.waitForTimeout(300);
+        check('detail panel is docked (not a centered modal)', await app.evaluate(() => document.querySelector('#mfDetail').classList.contains('mf-detailpanel')));
+        const treeRows = await app.locator('#mfDetail .mf-tree-row').count();
+        check('detail file tree renders (folder + files)', treeRows >= 4, `rows=${treeRows}`);
+        const guides = await app.locator('#mfDetail .mf-tree-guide').count();
+        check('tree has indent guide-lines (nested items)', guides >= 1, `guides=${guides}`);
+        await app.evaluate(() => window.Alpine.$data(document.querySelector('[x-data]')).detailToggleFolder('/Sub'));
+        await page.waitForTimeout(150);
+        const collapsed = await app.locator('#mfDetail .mf-tree-row').count();
+        check('collapsing a folder hides its children', collapsed < treeRows, `${treeRows}→${collapsed}`);
+        const tri = await app.evaluate(() => {
+            const d = window.Alpine.$data(document.querySelector('[x-data]'));
+            const sub = d.detail.fileTree.find(n => n.dir);
+            return { all: window.ManifestFileTree.folderState(sub, new Set(sub.indices)), some: window.ManifestFileTree.folderState(sub, new Set([sub.indices[0]])), none: window.ManifestFileTree.folderState(sub, new Set()) };
+        });
+        check('folder tri-state is all/some/none', tri.all === 'all' && tri.some === 'some' && tri.none === 'none', JSON.stringify(tri));
+
+        // ---- General tab: percent centered ON the progress bar ----
+        await app.evaluate(() => {
+            const d = window.Alpine.$data(document.querySelector('[x-data]'));
+            d.detail.gid = 'b';
+            d.detail.data = { gid: 'b', status: 'active', completedLength: '400000000', totalLength: '1000000000', downloadSpeed: '6500000', uploadSpeed: '0', bittorrent: { info: { name: 'Test Torrent 2160p' } }, files: [{ path: '/dl/Test Torrent 2160p/movie.mkv' }] };
+            d.detail.tab = 'general';
+        });
+        await page.waitForTimeout(150);
+        const genPct = await app.evaluate(() => { const b = document.querySelector('#mfDetail .progress'); const p = b && b.querySelector('.mf-row-pct'); return { onBar: !!p, text: p ? p.textContent.trim() : '' }; });
+        check('General tab shows percent ON the progress bar (not below it)', genPct.onBar && /40%/.test(genPct.text), JSON.stringify(genPct));
+
+        // ---- Tab switch shows a loading indicator (no frozen blank tab) ----
+        const switchLoading = await app.evaluate(() => {
+            const d = window.Alpine.$data(document.querySelector('[x-data]'));
+            d.detail.tab = 'general';
+            d.detailSwitchTab('trackers');   // switch → loading set synchronously
+            return { loadingNow: d.detail.loading, overlayInDom: !!document.querySelector('#mfDetail .mf-detail-loading') };
+        });
+        check('switching a detail tab shows a loading indicator', switchLoading.loadingNow === true && switchLoading.overlayInDom, JSON.stringify(switchLoading));
+        await page.waitForTimeout(200);
+        check('loading indicator clears after the tab fetch settles', await app.evaluate(() => window.Alpine.$data(document.querySelector('[x-data]')).detail.loading === false));
+        await app.evaluate(() => { window.Alpine.$data(document.querySelector('[x-data]')).detail.tab = 'general'; });
+
+        // ---- Peers tab: fixed layout (anti-shake) + sortable columns ----
+        await app.evaluate(() => {
+            const d = window.Alpine.$data(document.querySelector('[x-data]'));
+            d.detail.peers = [
+                { ip: '10.0.0.9', port: 1, client: 'qBittorrent 5.1', downloadSpeed: 500000, uploadSpeed: 0, seeder: true, progress: 100 },
+                { ip: '103.7.49.179', port: 2, client: 'Transmission', downloadSpeed: 9000000, uploadSpeed: 100, seeder: false, progress: 15 },
+                { ip: '9.9.9.9', port: 3, client: 'Deluge', downloadSpeed: 3000, uploadSpeed: 0, seeder: false, progress: 42 },
+            ];
+            d.detail.tab = 'peers';
+        });
+        await page.waitForTimeout(150);
+        check('Peers table uses fixed layout (anti-shake)', await app.evaluate(() => getComputedStyle(document.querySelector('#mfDetail .mf-fixed-table')).tableLayout) === 'fixed');
+        // sort by ↓ speed descending → fastest first
+        const peerSort = await app.evaluate(() => {
+            const d = window.Alpine.$data(document.querySelector('[x-data]'));
+            d.detailSortPeers('down'); d.detailSortPeers('down');   // asc → desc
+            return { dir: d.detail.peerSort.dir, order: d.detailPeersSorted.map(p => p.downloadSpeed) };
+        });
+        check('Peers sort by ↓ (desc) orders fastest-first', peerSort.dir === 'desc' && JSON.stringify(peerSort.order) === JSON.stringify([9000000, 500000, 3000]), JSON.stringify(peerSort));
+        // sort by address ascending → IPv4 numeric order (9.9.9.9 < 10.x < 103.x)
+        const ipSort = await app.evaluate(() => {
+            const d = window.Alpine.$data(document.querySelector('[x-data]'));
+            d.detailSortPeers('ip');   // asc
+            return d.detailPeersSorted.map(p => p.ip);
+        });
+        check('Peers sort by address is numeric (9 < 10 < 103)', JSON.stringify(ipSort) === JSON.stringify(['9.9.9.9', '10.0.0.9', '103.7.49.179']), JSON.stringify(ipSort));
+
+        // ---- Docked panel resize (drag the grip changes detailHeight) ----
+        const resize = await app.evaluate(() => {
+            const d = window.Alpine.$data(document.querySelector('[x-data]'));
+            const grip = document.querySelector('#mfDetail .mf-detail-grip');
+            const r = grip.getBoundingClientRect();
+            const startH = d.detailHeight;
+            const opts = (y) => ({ bubbles: true, cancelable: true, clientX: r.left + 5, clientY: y });
+            grip.dispatchEvent(new MouseEvent('mousedown', opts(r.top + 3)));
+            document.dispatchEvent(new MouseEvent('mousemove', opts(r.top - 120)));  // drag up → taller
+            document.dispatchEvent(new MouseEvent('mouseup', opts(r.top - 120)));
+            return { startH, endH: d.detailHeight, persisted: d.settings.detailHeight };
+        });
+        check('dragging the panel grip resizes it (taller) and persists', resize.endH > resize.startH && resize.persisted === resize.endH, JSON.stringify(resize));
+
+        // ---- Minimize → chip stays → restore (real openDetail session flow) ----
+        await app.evaluate(() => { const d = window.Alpine.$data(document.querySelector('[x-data]')); d.minimizedDetails = []; d.detail.open = false; d.openDetail(d.downloads['b']); });
+        await page.waitForTimeout(150);
+        await app.evaluate(() => window.Alpine.$data(document.querySelector('[x-data]')).minimizeDetail());
+        await page.waitForTimeout(150);
+        const min = await app.evaluate(() => { const d = window.Alpine.$data(document.querySelector('[x-data]')); return { open: d.detail.open, chips: d.minimizedDetails.map(m => m.gid), name: (d.minimizedDetails[0] || {}).name, panelVisible: getComputedStyle(document.querySelector('#mfDetail')).display !== 'none' }; });
+        check('minimize collapses the panel but keeps the taskbar chip', min.open === false && JSON.stringify(min.chips) === JSON.stringify(['b']) && !min.panelVisible, JSON.stringify(min));
+        check('taskbar is permanent and shows the chip with the download name', await app.locator('.mf-taskbar .mf-taskbar-item').isVisible() && /Sintel/.test(min.name || ''), min.name);
+        check('minimized chip persisted to settings (survives re-login)', JSON.stringify(await app.evaluate(() => window.Alpine.$data(document.querySelector('[x-data]')).settings.minimizedDetails.map(m => m.gid))) === JSON.stringify(['b']));
+        // restore by clicking the chip
+        await app.locator('.mf-taskbar .mf-taskbar-item').first().click();
+        await page.waitForTimeout(150);
+        check('clicking the chip re-opens the panel', await app.evaluate(() => window.Alpine.$data(document.querySelector('[x-data]')).detail.open === true));
+
+        // ---- Stale chip (download removed) pruned + de-persisted on next merge ----
+        const stalePrune = await app.evaluate(() => {
+            const d = window.Alpine.$data(document.querySelector('[x-data]'));
+            // seed the auto-open "seen" set so the merge below doesn't also
+            // auto-open the injected active rows (that path is tested separately)
+            d._autoOpenPrimed = true; d._autoSeen = new Set(Object.keys(d.downloads));
+            d.minimizedDetails = [{ gid: 'GONE', name: 'Removed directly' }, { gid: 'b', name: 'Kept' }];
+            d.settings.minimizedDetails = d.minimizedDetails.map(m => ({ gid: m.gid, name: m.name }));
+            d._mergeDownloads(Object.values(d.downloads));
+            return { chips: d.minimizedDetails.map(m => m.gid), persisted: d.settings.minimizedDetails.map(m => m.gid) };
+        });
+        check('stale minimized chip (download removed) is pruned + de-persisted', JSON.stringify(stalePrune.chips) === JSON.stringify(['b']) && JSON.stringify(stalePrune.persisted) === JSON.stringify(['b']), JSON.stringify(stalePrune));
+
+        // ---- Auto-open: a newly-started download opens the panel + adds a chip ----
+        const autoOpen = await app.evaluate(() => {
+            const d = window.Alpine.$data(document.querySelector('[x-data]'));
+            d._autoOpenPrimed = true; d._autoSeen = new Set(Object.keys(d.downloads)); d._dismissedDetails = new Set();
+            d.minimizedDetails = []; d.detail.open = false;
+            d.downloads = Object.assign({}, d.downloads, { NEWDL: { gid: 'NEWDL', status: 'active', totalLength: '100', completedLength: '1', downloadSpeed: '5', uploadSpeed: '0', files: [{ path: '/dl/new.iso' }] } });
+            d._autoOpenActive();
+            return { open: d.detail.open, gid: d.detail.gid, chips: d.minimizedDetails.map(m => m.gid) };
+        });
+        check('a newly-started download auto-opens the panel + adds a chip', autoOpen.open === true && autoOpen.gid === 'NEWDL' && autoOpen.chips.includes('NEWDL'), JSON.stringify(autoOpen));
+
+        // ---- Panel auto-closes when the download it shows disappears (no stuck empty panel) ----
+        const stalePanel = await app.evaluate(() => {
+            const d = window.Alpine.$data(document.querySelector('[x-data]'));
+            d._autoOpenPrimed = true; d._autoSeen = new Set(Object.keys(d.downloads)); d._dismissedDetails = new Set();
+            d.openDetail(d.downloads['NEWDL']);          // panel open on NEWDL
+            const openedOn = { open: d.detail.open, gid: d.detail.gid };
+            delete d.downloads['NEWDL'];                 // NEWDL removed / gid changed
+            d._mergeDownloads(Object.values(d.downloads));
+            return { openedOn, afterOpen: d.detail.open };
+        });
+        check('docked panel auto-closes when its download disappears (no stuck empty panel)',
+            stalePanel.openedOn.open === true && stalePanel.afterOpen === false, JSON.stringify(stalePanel));
+
+        await app.evaluate(() => { const d = window.Alpine.$data(document.querySelector('[x-data]')); d.detail.open = false; d.minimizedDetails = []; delete d.downloads['NEWDL']; });
+        await page.waitForTimeout(200);
+
+        // ---- Details button in the selection bar when exactly one row is selected (item 2) ----
+        await app.evaluate(() => { const d = window.Alpine.$data(document.querySelector('[x-data]')); d.selection = new Set(['b']); });
+        await page.waitForTimeout(150);
+        check('selection bar shows a Details button for a single selection', await app.locator('.mf-bulkbar button', { hasText: /^Details$/ }).isVisible());
+        await app.evaluate(() => { const d = window.Alpine.$data(document.querySelector('[x-data]')); d.selection = new Set(['b', 'c']); });
+        await page.waitForTimeout(150);
+        check('Details button hidden when multiple rows are selected', !(await app.locator('.mf-bulkbar button', { hasText: /^Details$/ }).isVisible().catch(() => false)));
+        await app.evaluate(() => window.Alpine.$data(document.querySelector('[x-data]')).clearSelection());
+
+        // ---- Removing an ACTIVE download force-removes then purges in one pass (v1.1.2 fix) ----
+        const purgeCalls = await app.evaluate(async () => {
+            const d = window.Alpine.$data(document.querySelector('[x-data]'));
+            const calls = [];
+            const realRpc = d.rpc;
+            d.rpc = {
+                forceRemove: (g) => { calls.push('forceRemove'); return Promise.resolve(g); },
+                remove: (g) => { calls.push('remove'); return Promise.resolve(g); },
+                removeDownloadResult: (g) => { calls.push('removeDownloadResult'); return Promise.resolve('OK'); },
+            };
+            try { await d._stopAndPurge({ gid: 'zz', status: 'active' }); } finally { d.rpc = realRpc; }
+            return calls;
+        });
+        check('active download is force-removed then purged in one pass (no second click)',
+            JSON.stringify(purgeCalls) === JSON.stringify(['forceRemove', 'removeDownloadResult']), JSON.stringify(purgeCalls));
+
+        // ---- v2.0: global one-click actions (Pause all / Resume all / Clear) ----
+        check('toolbar has Pause all / Resume all / Clear finished',
+            await app.locator('.mf-pills button', { hasText: /Pause all/ }).count() === 1
+            && await app.locator('.mf-pills button', { hasText: /Resume all/ }).count() === 1
+            && await app.locator('.mf-pills button', { hasText: /Clear finished/ }).count() === 1);
+        const globalCalls = await app.evaluate(async () => {
+            const d = window.Alpine.$data(document.querySelector('[x-data]'));
+            const calls = []; const real = d.rpc;
+            d.rpc = { pauseAll: () => { calls.push('pauseAll'); return Promise.resolve('OK'); }, unpauseAll: () => { calls.push('unpauseAll'); return Promise.resolve('OK'); } };
+            await d.pauseAll(); await d.resumeAll();
+            d.rpc = real; return calls;
+        });
+        check('Pause all / Resume all call aria2 pauseAll/unpauseAll', JSON.stringify(globalCalls) === JSON.stringify(['pauseAll', 'unpauseAll']), JSON.stringify(globalCalls));
+
+        // ---- v2.0: per-download Options tab applies changeOption ----
+        const optCall = await app.evaluate(async () => {
+            const d = window.Alpine.$data(document.querySelector('[x-data]'));
+            let captured = null; const real = d.rpc;
+            d.rpc = { changeOption: (gid, opts) => { captured = { gid, opts }; return Promise.resolve('OK'); } };
+            d.detail = Object.assign(d.detail, { open: true, gid: 'b', opts: { maxConn: '8', split: '', maxPeers: '60', dlLimit: '500', ulLimit: '0' } });
+            await d.detailApplyOptions();
+            d.rpc = real; return captured;
+        });
+        check('per-download Options apply changeOption with the right keys', optCall && optCall.gid === 'b'
+            && optCall.opts['max-connection-per-server'] === '8' && optCall.opts['bt-max-peers'] === '60'
+            && optCall.opts['max-download-limit'] === '500K' && optCall.opts['max-upload-limit'] === '0'
+            && !('split' in optCall.opts), JSON.stringify(optCall));
+        check('detail has an Options tab', await app.locator('#mfDetail .nav-link', { hasText: /^Options$/ }).count() === 1);
+
+        // ---- v2.0.3: confirming a magnet's file selection clears pause-metadata
+        // so aria2.session doesn't re-pause the download on every daemon restart ----
+        const pmClear = await app.evaluate(async () => {
+            const d = window.Alpine.$data(document.querySelector('[x-data]'));
+            const realRpc = d.rpc, realFinish = d._cfgFinish;
+            d._cfgFinish = () => {};                 // isolate: skip modal/queue teardown
+            const run = async (type) => {
+                const calls = [];
+                d.rpc = {
+                    changeOption: (gid, opts) => { calls.push('changeOption:' + Object.keys(opts).join(',') + '=' + Object.values(opts).join(',')); return Promise.resolve('OK'); },
+                    unpause: (gid) => { calls.push('unpause'); return Promise.resolve('OK'); },
+                };
+                d.queue.configuring = {
+                    stage: 'files', busy: false, gid: 'MAG', item: { type, id: 'x', value: 'magnet:?xt=urn:btih:abc' },
+                    files: [{ index: 1, path: 'movie.mkv', length: 10, selected: true }], fileTree: [], selectedIndices: new Set([1]),
+                };
+                await d.cfgConfirmFiles();
+                return calls;
+            };
+            const magnet = await run('magnet');
+            const torrent = await run('torrent');
+            d.rpc = realRpc; d._cfgFinish = realFinish; d.queue.configuring = null;
+            return { magnet, torrent };
+        });
+        check('confirming a magnet clears pause-metadata after unpause (no restart re-pause)',
+            JSON.stringify(pmClear.magnet) === JSON.stringify(['unpause', 'changeOption:pause-metadata=false'])
+            && JSON.stringify(pmClear.torrent) === JSON.stringify(['unpause']), JSON.stringify(pmClear));
+
+        // ---- v2.0: advanced global-options editor (Settings) ----
+        const adv = await app.evaluate(async () => {
+            const d = window.Alpine.$data(document.querySelector('[x-data]'));
+            let changed = null; const real = d.rpc;
+            d.rpc = { getGlobalOption: () => Promise.resolve({ split: '5', 'max-overall-download-limit': '0' }), changeGlobalOption: (o) => { changed = o; return Promise.resolve('OK'); } };
+            await d.loadAdvOptions();
+            const opened = d.advOpen && d.advKeys.length === 2;
+            d.advOptions.split = '10';                 // edit one
+            await d.applyAdvOptions();
+            d.rpc = real; return { opened, changed };
+        });
+        check('advanced editor loads all aria2 options and applies only changed', adv.opened && JSON.stringify(adv.changed) === JSON.stringify({ split: '10' }), JSON.stringify(adv));
+
+        // ---- v2.0: notifications setting + fire-on-completion path ----
+        const notif = await app.evaluate(() => {
+            const d = window.Alpine.$data(document.querySelector('[x-data]'));
+            let fired = 0; d._notify = () => { fired++; };
+            d.settings.notifications = true;
+            d._notifySnapshot = { g1: { status: 'active', name: 'X' } };
+            d.downloads = { g1: { gid: 'g1', status: 'complete', totalLength: '1', completedLength: '1', files: [{ path: '/x' }] } };
+            d._mergeDownloads(Object.values(d.downloads));   // g1 active→complete → should fire once
+            return { fired };
+        });
+        check('completing a download fires a notification when enabled', notif.fired === 1, JSON.stringify(notif));
+    } else {
+        check('table/context-menu/detail checks (skipped — aria2 not running)', true, 'set up aria2 to exercise these');
+    }
+
+    // ---- Filter pills sweep ----
+    for (const pill of ['All', 'Active', 'Waiting', 'Paused', 'Complete', 'Error', 'Queue']) {
+        await app.locator('.mf-pills button', { hasText: new RegExp(pill) }).first().click({ timeout: 3000 }).catch(() => {});
+        await page.waitForTimeout(50);
+    }
+    check('filter pills clickable without error', true);
+
+    await page.screenshot({ path: SHOT }).catch(() => {});
+    const failed = checks.filter(c => !c.ok);
+    const risky = errors.filter(e => e.kind === 'pageerror' || RISK.test(e.text));
+    if (failed.length || risky.length) finish(1, `FAIL — ${failed.length} check(s) failed, ${risky.length} risky JS error(s). Shot: ${SHOT}`);
+    else finish(0, `OK — ${checks.length} UI checks passed, no risky JS errors. Shot: ${SHOT}`);
+} catch (e) {
+    await page.screenshot({ path: SHOT }).catch(() => {});
+    finish(3, `ERROR driving the UI: ${e.message}. Shot: ${SHOT}`);
+}

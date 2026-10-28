@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Hangar</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="css/bootstrap.min.css">
+    <link rel="stylesheet" href="css/themes.css">
+    <link rel="stylesheet" href="css/hangar.css">
+    <script src="../base1/cockpit.js"></script>
+</head>
+<body>
+
+<!-- No x-init="init()" here: Alpine 3 calls init() by itself when the x-data
+     object defines one, so writing it out ran init TWICE — two listeners for
+     every event, and a dialog that received its own open event twice. The
+     second delivery resolved the caller's promise with null, so pressing Save
+     on a job closed the dialog and wrote nothing, in silence. -->
+<div class="hangar-shell" x-data="hangarApp()" x-cloak>
+
+    <!-- Header ---------------------------------------------------------- -->
+    <div class="hangar-header d-flex align-items-center gap-3">
+        <strong class="me-2">Hangar</strong>
+
+        <ul class="nav nav-pills nav-sm flex-grow-1">
+            <template x-for="t in tabs" :key="t.id">
+                <li class="nav-item">
+                    <button class="nav-link py-1 px-3"
+                            :class="{ active: tab === t.id }"
+                            @click="tab = t.id"
+                            x-text="t.label"></button>
+                </li>
+            </template>
+        </ul>
+
+        <span x-show="!ready" class="text-secondary small">Checking prerequisites…</span>
+        <span x-show="ready && missing.length" class="badge text-bg-warning"
+              x-text="missing.length + ' tool(s) missing'"></span>
+
+        <!-- One control with two jobs, like explorer's: it checks for an update when
+             there is nothing to install, and opens the installer when there is. A
+             separate "check" button would sit unused almost always.
+             A real <button>, not a clickable <span>, so it is keyboard-reachable. -->
+        <button type="button"
+                :class="badgeClass()"
+                x-show="installedVersion || update.checking || update.error"
+                :disabled="update.checking"
+                @click="onBadgeClick(settings)"
+                :title="badgeTitle()"
+                :aria-label="badgeTitle()"
+                x-text="updateBadgeLabel()"></button>
+    </div>
+
+    <!-- Body ------------------------------------------------------------ -->
+    <div class="hangar-body">
+
+        <!-- Prerequisites gate: hangar installs what it needs rather than telling
+             the user to run a package manager. Shown until restic is present. -->
+        <div x-show="ready && missing.length" class="alert alert-warning">
+            <div class="d-flex align-items-center gap-3">
+                <div class="flex-grow-1">
+                    <strong>Some tools are not installed yet.</strong>
+                    <div class="small" x-text="missingSummary()"></div>
+                </div>
+                <button class="btn btn-sm btn-primary" @click="openProvision()">Install</button>
+            </div>
+        </div>
+
+        <!-- Cockpit starts every session with limited access, and hangar cannot
+             read a single thing it owns without administrative access. Stated
+             once, at the top, because the alternative is six screens each
+             reporting that nothing is configured. -->
+        <div x-show="adminRequired" class="alert alert-warning">
+            <div class="d-flex align-items-center gap-3">
+                <div class="flex-grow-1">
+                    <strong>hangar needs administrative access.</strong>
+                    <div class="small">
+                        Its configuration lives in <span class="hangar-mono">/etc/hangar</span>, which
+                        only root can read, so repositories and jobs cannot be listed and nothing can
+                        be saved. Choose <strong>Limited access</strong> at the top right of Cockpit
+                        and turn on administrative access, then press Check again.
+                    </div>
+                </div>
+                <button class="btn btn-sm btn-primary" :disabled="adminChecking"
+                        @click="recheckAdminAccess()">Check again</button>
+            </div>
+        </div>
+
+        <div x-show="tab === 'overview'"   id="hangar-overview"></div>
+        <div x-show="tab === 'repos'"      id="hangar-repos"></div>
+        <div x-show="tab === 'jobs'"       id="hangar-jobs"></div>
+        <div x-show="tab === 'logbook'"    id="hangar-logbook"></div>
+        <div x-show="tab === 'recovery'"   id="hangar-recovery"></div>
+        <div x-show="tab === 'settings'"   id="hangar-settings"></div>
+
+    </div>
+
+    <!-- Modal partials are injected here by boot.js before Alpine starts. -->
+    <div id="hangar-partials"></div>
+
+</div>
+
+<!-- Vendor ------------------------------------------------------------- -->
+<script src="js/bootstrap.bundle.min.js"></script>
+
+<!-- Core: order matters — errors.js first, everything depends on it. ----- -->
+<script src="js/core/errors.js"></script>
+<script src="js/core/secrets.js"></script>
+<script src="js/core/repos.js"></script>
+<!-- Creates rclone remotes. After repos.js: it completes the rclone repository
+     kind that repos.js already knows how to address. -->
+<script src="js/core/rclone.js"></script>
+<script src="js/core/sources.js"></script>
+<!-- v2 source kinds. These call HangarSources.registerKind() at load, so they must
+     come after sources.js and before anything that enumerates the kinds. -->
+<script src="js/core/sources-container.js"></script>
+<script src="js/core/sources-libvirt.js"></script>
+<script src="js/core/retention.js"></script>
+<!-- The size cap. After retention.js: it is the same thinning decision expressed
+     as bytes rather than as counts and durations. -->
+<script src="js/core/sizeguard.js"></script>
+<script src="js/core/schedule.js"></script>
+<script src="js/core/provision.js"></script>
+<script src="js/core/dr.js"></script>
+<script src="js/core/logbook.js"></script>
+<script src="js/core/fspicker.js"></script>
+<script src="js/core/themes.js"></script>
+<script src="js/core/wordlist.js"></script>
+<script src="js/core/passgen.js"></script>
+<script src="js/core/semver.js"></script>
+<script src="js/core/config.js"></script>
+<!-- AFTER config.js: reposize.js reads and writes under the state directory, and
+     it is core/config.js that owns that path. -->
+<script src="js/core/reposize.js"></script>
+
+<!-- Engine -------------------------------------------------------------- -->
+<script src="js/engine/restic.js"></script>
+
+<!-- Features ------------------------------------------------------------ -->
+<!-- The shared Browse dialog. Before the screens that open it. -->
+<script src="js/features/fspicker-ui.js"></script>
+<script src="js/features/overview.js"></script>
+<script src="js/features/repos-ui.js"></script>
+<!-- The cloud-destination wizard. After repos-ui.js, which opens it. -->
+<script src="js/features/rclone-ui.js"></script>
+<script src="js/features/jobs-ui.js"></script>
+<script src="js/features/logbook-ui.js"></script>
+<script src="js/features/recovery-ui.js"></script>
+<script src="js/features/provision-ui.js"></script>
+<script src="js/features/settings-ui.js"></script>
+<script src="js/features/update.js"></script>
+
+<script src="js/app.js"></script>
+
+<!-- boot.js injects the modal partials and THEN loads Alpine, so Alpine walks a
+     complete DOM. Order is the whole trick — same as manifest/explorer. -->
+<script src="js/boot.js"></script>
+
+</body>
+</html>

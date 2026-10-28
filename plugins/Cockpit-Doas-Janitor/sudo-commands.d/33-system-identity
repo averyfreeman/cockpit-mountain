@@ -1,0 +1,31 @@
+# Managed by Cockpit Sudo Manager
+# System identity management sudo policy
+#
+# Scope:
+#   - Local user and group lifecycle
+#   - Account locking/unlocking
+#   - No shell escalation
+#   - No auth policy modification
+
+# ==========================================================
+# User lifecycle (local accounts only)
+# ==========================================================
+Cmnd_Alias IDENTITY_USER_MGMT = \
+  /usr/sbin/useradd *, \
+  /usr/sbin/userdel *, \
+  /usr/sbin/usermod *
+
+# ==========================================================
+# Group management
+# ==========================================================
+Cmnd_Alias IDENTITY_GROUP_MGMT = \
+  /usr/sbin/groupadd *, \
+  /usr/sbin/groupdel *, \
+  /usr/sbin/groupmod *
+
+# ==========================================================
+# Account control
+# ==========================================================
+Cmnd_Alias IDENTITY_ACCOUNT_CTRL = \
+  /usr/bin/passwd *, \
+  /usr/sbin/chage *

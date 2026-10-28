@@ -1,0 +1,115 @@
+# Hacking on Cockpit Machines
+
+The commands here assume you're in the top level of the Cockpit Machines git
+repository checkout.
+
+## Running out of git checkout
+
+For development, you usually want to run your module straight out of the git
+tree. To do that, run `make devel-install`, which links your checkout to the
+location where `cockpit-bridge` looks for packages. If you prefer to do this
+manually:
+
+```
+mkdir -p ~/.local/share/cockpit
+ln -s `pwd`/dist ~/.local/share/cockpit/machines
+```
+
+After changing the code and running `make` again, reload the Cockpit page in
+your browser.
+
+You can also use
+[watch mode](https://esbuild.github.io/api/#watch) to
+automatically update the bundle on every code change with
+
+    $ make watch
+
+When developing against a virtual machine, watch mode can also automatically upload
+the code changes by setting the `RSYNC` environment variable to
+the remote hostname.
+
+    $ RSYNC=c make watch
+
+When developing against a remote host as a normal user, `RSYNC_DEVEL` can be
+set to upload code changes to `~/.local/share/cockpit/` instead of
+`/usr/local`.
+
+    $ RSYNC_DEVEL=example.com make watch
+
+## Running Oxlint
+
+Cockpit Machines uses [Oxlint](https://oxc.rs/docs/guide/usage/linter/) to check
+JavaScript and TypeScript code in `.jsx`, `.js`, `.tsx`, and `.ts` files.
+
+Oxlint is executed as part of `test/common/static-code`, aka. `make codecheck`.
+
+For developer convenience, Oxlint can be started explicitly by:
+
+    $ npm run lint
+
+Some violations can be fixed automatically by:
+
+    $ npm run lint:fix
+
+Rules configuration can be found in the `.oxlintrc.json` file.
+
+## Running stylelint
+
+Cockpit uses [Stylelint](https://stylelint.io/) to automatically check CSS code
+style in `.css` and `scss` files.
+
+stylelint is executed as part of `test/common/static-code`, aka. `make codecheck`.
+
+For developer convenience, the Stylelint can be started explicitly by:
+
+    $ npm run stylelint
+
+Violations of some rules can be fixed automatically by:
+
+    $ npm run stylelint:fix
+
+Rules configuration can be found in the `.stylelintrc.json` file.
+
+# Running tests locally
+
+Run `make vm` to build an RPM and install it into a standard Cockpit test VM.
+This will be `fedora-40` by default. You can set `$TEST_OS` to use a different
+image, for example
+
+    TEST_OS=centos-9-stream make vm
+
+Then run
+
+    make test/common
+
+to pull in [Cockpit's shared test API](https://github.com/cockpit-project/cockpit/tree/main/test/common)
+for running Chrome DevTools Protocol based browser tests.
+
+With this preparation, you can manually run a single test without
+rebuilding the VM, possibly with extra options for tracing and halting on test
+failures (for interactive debugging):
+
+    TEST_OS=... test/check-machines-create TestMachinesCreate.testCreatePXE -stv
+
+You can also run all of the tests:
+
+    TEST_OS=... make check
+
+However, this is rather expensive, and most of the time it's better to let the
+CI machinery do this on a draft pull request.
+
+Please see [Cockpit's test documentation](https://github.com/cockpit-project/cockpit/blob/main/test/README.md)
+for details how to run against existing VMs, interactive browser window,
+interacting with the test VM, and more.
+
+# Debugging tips
+
+Snippet collection for interactive testing or writing libvirt/upstream bug reproducers.
+
+ * Create a test libvirt VM:
+
+   This is useful for exercising the libvirt API/CLI without taking much resources, and without needing any other setup:
+
+   ```sh
+   virt-install --memory 50 --pxe --virt-type qemu --os-variant alpinelinux3.8 --disk none --wait 0 --name test1
+   ```

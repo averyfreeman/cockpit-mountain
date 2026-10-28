@@ -1,0 +1,23 @@
+{
+  "name": "cockpit-mountain",
+  "private": true,
+  "description": "A pnpm monorepo for Cockpit core and its plugin ecosystem.",
+  "packageManager": "pnpm@12.9.1",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "list:projects": "node tools/list-projects.mjs",
+    "lint": "pnpm --recursive --if-present --filter '!@45drives/*' run lint",
+    "build": "pnpm --filter @45drives/houston-common-css run build:css && pnpm --filter @45drives/houston-common-lib run build && pnpm --filter @45drives/houston-common-ui run build && pnpm --recursive --workspace-concurrency=1 --if-present --filter '!@45drives/*' run build",
+    "test": "pnpm --recursive --if-present run test",
+    "check:cockpit": "make -C cockpit codecheck",
+    "check": "pnpm run lint && pnpm run test && pnpm run build && pnpm run check:cockpit"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "catalog:",
+    "@vitejs/plugin-vue": "catalog:",
+    "oxlint": "catalog:",
+    "vite": "catalog:"
+  }
+}

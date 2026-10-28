@@ -1,0 +1,444 @@
+Name: {{ name }}
+Version: {{ version }}
+Release: {{ build_number }}%{?dist}
+Summary: {{ description }}
+License: {{ license }}
+URL: {{ git_url }}
+Source0: %{name}-%{version}.tar.gz
+BuildArch: {{ architecture.rocky }}
+Requires: {{ dependencies.rocky_common | join(',') }}
+
+
+BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root
+
+%description
+{{ title }}
+{{ description }}
+
+%prep
+%setup -q
+
+%build
+make OS_PACKAGE_RELEASE=el8
+
+%install
+make DESTDIR=%{buildroot} OS_PACKAGE_RELEASE=el8 install
+
+
+
+
+%files
+/usr/share/cockpit/file-sharing/*
+
+%changelog
+* Fri Sep 18 2026 Rachit Hans <rhans@45drives.com> 4.6.3-1
+- resized RBD/LVM devices now show their new capacity to connected initiators immediately,
+  without requiring a failover
+* Tue Sep 01 2026 Rachit Hans <rhans@45drives.com> 4.6.2-3
+- building release package: fixed device resizing and ordering of portblocks and
+  vips
+* Mon Aug 31 2026 Rachit Hans <rhans@45drives.com> 4.6.2-2
+- building test package
+* Mon Aug 31 2026 Rachit Hans <rhans@45drives.com> 4.6.2-1
+- fixing the rbd/vg resize issue
+* Thu Jul 23 2026 Joshua Boudreau <jboudreau@45drives.com> 4.6.1-2
+- Repackage with correct houston-common submodule commit
+* Wed Jul 08 2026 Rachit Hans <rhans@45drives.com> 4.6.1-1
+- fix: add debian-trixie packaging support
+* Tue Jun 09 2026 Joshua Boudreau <jboudreau@45drives.com> 4.6.0-1
+- Ensure NFS service continues running after removing Ceph remount
+- Add systemd service monitoring and management for NFS and Samba
+- Samba: Fix net command option injection from advanced options
+- Improve Ceph option handling
+- NFS: Ensure exports files are in sync across PCS cluster nodes with option to merge
+  when out-of-sync
+- Fix tooltip width
+- Support toggling dark mode on Cockpit version < 281
+- Improve clarity of error message when cluster host is down
+* Mon Jun 08 2026 Joshua Boudreau <jboudreau@45drives.com> 4.6.0-0rc2
+- Ensure NFS service continues running after removing Ceph remount
+- Add systemd service monitoring and management for NFS and Samba
+- Samba: Fix net command option injection from advanced options
+- Improve Ceph option handling
+- NFS: Ensure exports files are in sync across PCS cluster nodes with option to merge
+  when out-of-sync
+- Fix tooltip width
+- Support toggling dark mode on Cockpit version < 281
+* Fri Jun 05 2026 Joshua Boudreau <jboudreau@45drives.com> 4.6.0-0rc1
+- Ensure NFS service continues running after removing Ceph remount
+- Add systemd service monitoring and management for NFS and Samba
+- Samba: Fix net command option injection from advanced options
+- Improve Ceph option handling
+- NFS: Ensure exports files are in sync across PCS cluster nodes with option to merge
+  when out-of-sync
+* Wed May 27 2026 Joshua Boudreau <jboudreau@45drives.com> 4.5.9-1
+- Ensure NFS service continues running after removing Ceph remount
+- Add systemd service monitoring and management for NFS and Samba
+* Mon May 25 2026 Rachit Hans <rhans@45drives.com> 4.5.8-1
+- fix: prevent .rgw.root pool creation on clusters without RGW through s3 module
+* Thu May 14 2026 Rachit Hans <rhans@45drives.com> 4.5.7-2
+- added python3-venv dependency for ubuntu in manifest.
+* Thu May 14 2026 Rachit Hans <rhans@45drives.com> 4.5.7-1
+- added python3-venv dependency in manifest.json
+* Mon Apr 20 2026 Rachit Hans <rhans@45drives.com> 4.5.6-1
+- allowed non root user with esclated priviliges to modify iscsi resources +  building
+  pacakge
+* Mon Mar 23 2026 Joshua Boudreau <jboudreau@45drives.com> 4.5.5-1
+- Allow quoted values in imported smb.conf
+* Fri Mar 06 2026 Rachit Hans <rhans@45drives.com> 4.5.4-8
+- fixed build  yml file + making relase package
+* Thu Mar 05 2026 Rachit Hans <rhans@45drives.com> 4.5.4-7
+- building release  pacakage
+* Thu Mar 05 2026 Rachit Hans <rhans@45drives.com> 4.5.4-6
+- building test pacakage
+* Thu Mar 05 2026 Rachit Hans <rhans@45drives.com> 4.5.4-5
+- building test pacakage
+* Thu Feb 26 2026 Rachit Hans <rhans@45drives.com> 4.5.4-4
+- building test pacakge for rust fs + ui improvements
+* Thu Feb 26 2026 Rachit Hans <rhans@45drives.com> 4.5.4-3
+- building test pacakge for rust fs + ui improvements
+* Thu Feb 26 2026 Rachit Hans <rhans@45drives.com> 4.5.4-2
+- building test pacakge for rust fs wit installing awscurl
+* Thu Feb 26 2026 Rachit Hans <rhans@45drives.com> 4.5.4-1
+- building test pacakge for rust fs
+* Wed Feb 11 2026 Rachit Hans <rhans@45drives.com> 4.5.3-4
+- fixed tab visibilty logic for s3 management + building package
+* Tue Feb 10 2026 Rachit Hans <rhans@45drives.com> 4.5.3-3
+- building package with s3 management tab
+* Wed Feb 04 2026 Rachit Hans <rhans@45drives.com> 4.5.3-2
+- fixed light mode view + added view mode for minio service accounts + building
+  test package
+* Tue Feb 03 2026 Rachit Hans <rhans@45drives.com> 4.5.3-1
+- added service account creation for minio users + building test pacakge
+* Wed Jan 21 2026 Joshua Boudreau <jboudreau@45drives.com> 4.5.2-1
+- Fix Windows ACLs toggle switch in Samba share editor - now stays on when extra
+  vfs objects are added
+* Mon Jan 12 2026 Rachit Hans <rhans@45drives.com> 4.5.2-1
+- building test package for s3 management
+* Tue Jan 06 2026 Rachit Hans <rhans@45drives.com> 4.5.1-4
+- build package
+* Tue Jan 06 2026 Rachit Hans <rhans@45drives.com> 4.5.1-1
+- building pacakge with iscsi cluster changes and single server UI changes
+* Tue Dec 30 2025 Rachit Hans <rhans@45drives.com> 4.5.1-2
+- building pacakge for s3 testing
+* Wed Dec 24 2025 Rachit Hans <rhans@45drives.com> 4.4.1-10
+- building package internal for repo
+* Wed Dec 24 2025 Rachit Hans <rhans@45drives.com> 4.5.1-1
+- added S3 management
+* Fri Dec 12 2025 Joshua Boudreau <jboudreau@45drives.com> 4.4.0-1
+- Added smbpasswd management
+* Tue Dec 02 2025 Rachit Hans <rhans@45drives.com> 4.4.1-9
+- fixed table long name bug + hiding unwanted vgs + changed ocf directory name
+* Thu Nov 13 2025 Rachit Hans <rhans@45drives.com> 4.4.1-8
+- fixed edge case of targetname having colon
+* Mon Nov 10 2025 Rachit Hans <rhans@45drives.com> 4.4.1-7
+- fixed deletion race condition causiong issue for multiple lun deletion
+- updated ip of lun added to group
+* Mon Nov 10 2025 Rachit Hans <rhans@45drives.com> 4.4.1-6
+- fixed deletion race condition causiong issue for multiple lun deletion
+* Thu Nov 06 2025 Rachit Hans <rhans@45drives.com> 4.4.1-5
+- shell escaping colons
+* Wed Nov 05 2025 Rachit Hans <rhans@45drives.com> 4.4.1-4
+- fixed deletion of incrorect lun
+* Tue Nov 04 2025 Rachit Hans <rhans@45drives.com> 4.4.1-3
+- removed reference to heartbeat1
+* Thu Oct 30 2025 Rachit Hans <rhans@45drives.com> 4.4.1-2
+- changed the commands of addition groups
+* Fri Sep 26 2025 Rachit Hans <rhans@45drives.com> 4.4.1-1
+- improved speed of iscsi module + added functionality f adding multiple groups to
+  target + build package
+* Fri Sep 19 2025 Joshua Boudreau <jboudreau@45drives.com> 4.3.2-2
+- Fix bug causing nfs server crash during export removal with ceph by removing ceph
+  remount after removing share instead of before
+- Fix bug causing NFS hooks to be run multiple times for clustered environments
+* Mon Sep 08 2025 Joshua Boudreau <jboudreau@45drives.com> 4.3.2-1
+- Fix bug causing nfs server crash during export removal with ceph by removing ceph
+  remount after removing share instead of before
+  * Tue Aug 26 2025 Rachit Hans <rhans@45drives.com> 4.2.14-15
+- building package fetching data from all servrs of cluster
+* Mon Aug 25 2025 Joshua Boudreau <jboudreau@45drives.com> 4.3.1-2
+- Fix os release display in app info popup on EL8/EL9
+- Enable AD accounts what's new popup for v4.3.1
+* Fri Aug 22 2025 Joshua Boudreau <jboudreau@45drives.com> 4.3.1-1
+- Fix build issue causing edit permissions popup to be blank
+* Tue Aug 19 2025 Joshua Boudreau <jboudreau@45drives.com> 4.3.0-1
+- Add option for Active Directory/Domain users and groups to appear in dropdown lists
+  while editing path permissions
+- Improvements to SelectMenu UX
+- Samba - make 'Inherit Permissions' and 'Windows ACLs' options mutually-exclusive
+- Prompt to kick all users from share while deleting
+- Clarify warning messages while deleting shares that files and folders will not
+  be deleted
+- Fix importing smb.conf
+* Fri Aug 15 2025 Rachit Hans <rhans@45drives.com> 4.2.13-4
+- build package
+* Tue Aug 12 2025 Rachit Hans <rhans@45drives.com> 4.2.13-3
+- build package
+* Mon Aug 11 2025 Rachit Hans <rhans@45drives.com> 4.2.13-2
+- fixing dropdown values getting hidden
+* Wed Aug 06 2025 Rachit Hans <rhans@45drives.com> 4.2.14-14
+- getting first unstandby node evrytime 
+* Tue Aug 05 2025 Rachit Hans <rhans@45drives.com> 4.2.14-13
+- createRadosBlockDevice updated to update cachedRBDS
+* Tue Aug 05 2025 Rachit Hans <rhans@45drives.com> 4.2.14-12
+- cached rbds for improving spped in iscsi cluter
+* Mon Aug 04 2025 Rachit Hans <rhans@45drives.com> 4.2.14-10
+- building package
+* Fri Aug 01 2025 Rachit Hans <rhans@45drives.com> 4.2.14-9
+- package build + fix selectmenu options
+* Thu Jul 31 2025 Rachit Hans <rhans@45drives.com> 4.2.14-8
+- package build + fix rbdreactivity bug
+* Thu Jul 31 2025 Rachit Hans <rhans@45drives.com> 4.2.14-6
+- build package + fixed deletion
+* Wed Jul 30 2025 Rachit Hans <rhans@45drives.com> 4.2.14-5
+- fixed rbd's removal
+* Wed Jul 30 2025 Rachit Hans <rhans@45drives.com> 4.2.14-4
+- build package
+* Tue Jul 29 2025 Rachit Hans <rhans@45drives.com> 4.2.14-3
+- build package
+- [200~added logic to add LVM's to pcs target even after page refresh
+- added logic to add LVM's to pcs target even after page refresh
+* Fri Jul 25 2025 Rachit Hans <rhans@45drives.com> 4.2.14-2
+- building
+- package
+* Thu Jul 24 2025 Rachit Hans <rhans@45drives.com> 4.2.14-1
+- building package
+* Tue Jul 08 2025 Jordan Keough <jkeough@45drives.com> 4.2.13-1
+- Removes conditional flag on group add/delete for iscsi initiator groups
+* Thu May 29 2025 Jordan Keough <jkeough@45drives.com> 4.2.12-1
+- ISCSI - Shows all virtual devices and whether in use or not
+* Thu May 29 2025 Jordan Keough <jkeough@45drives.com> 4.2.11-1
+- remove acl_xattr:ignore
+- system
+- acls
+- =
+- yes option from windowsACLsOptions
+* Fri Apr 04 2025 Jordan Keough <jkeough@45drives.com> 4.2.10-4
+- Updates houston-common commit, fixes isDomainJoined function
+* Wed Apr 02 2025 Jordan Keough <jkeough@45drives.com> 4.2.10-3
+- Merges prerelease packages into stable
+* Tue Apr 01 2025 Jordan Keough <jkeough@45drives.com> 4.2.10-2
+- Removes unused Windows ACL option and adds conditional check to only show desired
+  ACL toggle if server is Domain Joined
+* Tue Mar 04 2025 Jordan Keough <jkeough@45drives.com> 4.2.9-8
+- build
+* Tue Mar 04 2025 Jordan Keough <jkeough@45drives.com> 4.2.9-7
+- made some type checking changes trying to build again
+* Tue Mar 04 2025 Jordan Keough <jkeough@45drives.com> 4.2.9-6
+- Removes module test from makefile to see if debian builds successfully
+* Tue Mar 04 2025 Jordan Keough <jkeough@45drives.com> 4.2.9-5
+- Updates Vue version to 3.5
+* Tue Mar 04 2025 Jordan Keough <jkeough@45drives.com> 4.2.9-4
+- updates dependencies and houston-common
+* Tue Mar 04 2025 Jordan Keough <jkeough@45drives.com> 4.2.9-3
+- Removes unneccesary force config loading, config loading done via ansible playbook/service
+  file now
+* Tue Mar 04 2025 Jordan Keough <jkeough@45drives.com> 4.2.10-1
+- Changes scst default config path in one other spot that was initially missed, and
+  adds check to see if file exists and replaces old config path with new config path
+  if applicable. Should fix bug where scst config not auto-loading on boot.
+* Wed Feb 26 2025 Joshua Boudreau <jboudreau@45drives.com> 4.2.10-1
+- Defer applying Ceph options until apply button is clicked
+- Add shadow:localtime = yes to default shadow-copy share options
+- Auto hide tabs that aren't configured
+- Allow overriding tab visibility in user settings menu
+- Get PCS cluster nodes from corosync.conf since Ubuntu 20.04 pcs version does not
+  have JSON output
+- Migrate samba management code to houston-common-lib
+* Tue Feb 25 2025 Jordan Keough <jkeough@45drives.com> 4.2.9-2
+- Updates Build Number + Changes user-defined iscsi config path to a static/default
+  path, adds enable + config commands after saving targets to ensure config loads
+  on reboot
+* Tue Feb 25 2025 Jordan Keough <jkeough@45drives.com> 4.2.9-1
+- Changes user-defined iscsi config path to a static/default path, adds enable +
+  config commands after saving targets to ensure config loads on reboot
+* Tue Nov 26 2024 Joshua Boudreau <jboudreau@45drives.com> 4.2.8-1
+- Merge AutoAddRBDs_MinorFixes
+* Mon Nov 25 2024 Joshua Boudreau <jboudreau@45drives.com> 4.2.7-1
+- Fix missing global configuration when [global] missing from net conf registry
+* Fri Nov 15 2024 Joshua Boudreau <jboudreau@45drives.com> 4.2.6-1
+- Fix bug where only first instance of "include = " was inspected while looking for "include = registry"
+- Harden getting list of clustered servers
+* Thu Oct 31 2024 Josh Boudreau <jboudreau@45drives.com> 4.2.5-2
+- iscsi release
+* Mon Oct 28 2024 Brandon Kelly <brkelly@45drives.com> 4.2.5-1
+- iSCSI Release
+* Mon Sep 23 2024 Brandon Kelly <brkelly@45drives.com> 4.2.4-1
+- Removed standalone RBD creation to use LVs instead
+* Thu Sep 19 2024 Brandon Kelly <brkelly@45drives.com> 4.2.3-1
+- Added more validations
+* Wed Sep 18 2024 Brandon Kelly <brkelly@45drives.com> 4.2.2-1
+- Refactored iSCSI Clustered integration
+* Thu Jul 25 2024 Brandon Kelly <brkelly@45drives.com> 4.2.1-1
+- Fixes to iSCSI Tab
+* Thu Jul 25 2024 Brandon Kelly <brkelly@45drives.com> 4.2.0-1
+- Fixes to iSCSI Tab
+* Mon Jun 24 2024 Joshua Boudreau <jboudreau@45drives.com> 4.1.0-1
+- Add iSCSI tab
+* Fri Jun 14 2024 Joshua Boudreau <jboudreau@45drives.com> 4.0.3-1
+- New Samba shares now default to read only = no
+* Tue Jun 11 2024 Joshua Boudreau <jboudreau@45drives.com> 4.0.2-1
+- Fixed error spamming when path does not exist for Ceph path settings
+* Tue Jun 11 2024 Joshua Boudreau <jboudreau@45drives.com> 4.0.1-1
+- Assign UUID FSID option for new NFS exports
+- Add input validation for NFS exports
+* Mon Jun 10 2024 Joshua Boudreau <jboudreau@45drives.com> 4.0.0-2
+- fix table corners
+* Mon Jun 10 2024 Joshua Boudreau <jboudreau@45drives.com> 4.0.0-1
+- Complete rewrite for better maintainability and expansion
+* Tue Apr 23 2024 Joshua Boudreau <jboudreau@45drives.com> 3.3.7-1
+- Samba - fix saving global advanced settings with '=' in their value
+- NFS - better whitespace handling while parsing exports file
+* Wed Apr 03 2024 Joshua Boudreau <jboudreau@45drives.com> 3.3.6-1
+- Fix import smb.conf modal overflow
+* Tue Mar 12 2024 Joshua Boudreau <jboudreau@45drives.com> 3.3.5-1
+- Workaround for Safari < 15.4 missing String.prototype.at()
+* Fri Jun 02 2023 Dawson Della Valle <ddellavalle@45drives.com> 3.3.4-1
+- Remove AD users from Edit Permissions modal
+- Update Samba Audit parameters to conform with SnapShield requirements
+* Fri Mar 24 2023 Dawson Della Valle <ddellavalle@45drives.com> 3.3.2-1
+- Add Ceph + NFS support
+- Add NFS config propagation aligning with corosync cluster hosts
+* Fri Jan 06 2023 Josh Boudreau <jboudreau@45drives.com> 3.3.0-1
+- Add Ceph settings to the NFS tab
+- Propagate remount units across corosync cluster
+* Fri Oct 28 2022 Joshua Boudreau <jboudreau@45drives.com> 3.2.9-2
+- add gawk as dependency
+* Thu Oct 27 2022 Joshua Boudreau <jboudreau@45drives.com> 3.2.9-1
+- Optimize getting users and groups from AD/domain
+- Add second Windows ACLs option for Linux/Mac clients
+* Mon Sep 12 2022 Joshua Boudreau <jboudreau@45drives.com> 3.2.8-1
+- Handle case where NFS exports.d directory does not exist.
+* Wed Aug 24 2022 Joshua Boudreau <jboudreau@45drives.com> 3.2.7-1
+- Fix scrolling in Safari
+* Wed Aug 24 2022 Joshua Boudreau <jboudreau@45drives.com> 3.2.6-1
+- Support Safari by removing regex lookbehinds
+* Fri Aug 19 2022 Joshua Boudreau <jboudreau@45drives.com> 3.2.5-1
+- Added ability to create ZFS datasets when path DNE and is within ZFS mountpoint
+- Fixed CSS styling of directory permission editor
+* Thu Aug 18 2022 Joshua Boudreau <jboudreau@45drives.com> 3.2.4-1
+- Add settings menu for configuring smb.conf and exports file locations
+- Fix parsing "valid users" field for Samba shares
+* Thu Aug 04 2022 Joshua Boudreau <jboudreau@45drives.com> 3.2.3-1
+- Fixed issue saving NFS exports file when /etc/exports.d DNE
+* Wed Jul 27 2022 Joshua Boudreau <jboudreau@45drives.com> 3.2.2-1
+- Remove end of line comment in automatically inserted content of smb.conf
+- Optimize getting users and groups from domain
+* Wed Jul 20 2022 Joshua Boudreau <jboudreau@45drives.com> 3.2.1-1
+- Fix bug where cockpit-ws kills session while querying too many groups with getent
+* Wed Jul 06 2022 Joshua Boudreau <jboudreau@45drives.com> 3.2.0-1
+- Add button to import configuration from /etc/samba/smb.conf, backup original smb.conf,
+  and replace it to just include registry
+* Mon Jun 27 2022 Joshua Boudreau <jboudreau@45drives.com> 3.1.12-1
+- Try to get ceph layout pools with /etc/ceph/ceph.client.samba.keyring first
+* Fri Jun 24 2022 Joshua Boudreau <jboudreau@45drives.com> 3.1.11-1
+- Use fileDownload() and processOutputDownload() from cockpit-helpers for exporting
+  configs
+* Thu Jun 23 2022 Joshua Boudreau <jboudreau@45drives.com> 3.1.10-1
+- Watch for newly added users, groups, and CTDB hosts and refresh lists automatically
+  in NFS tab too
+- Set cursor to `cursor: wait` while processing for user feedback
+* Wed Jun 22 2022 Joshua Boudreau <jboudreau@45drives.com> 3.1.9-1
+- Fixed getting users and groups from system and domain
+* Mon Jun 20 2022 Joshua Boudreau <jboudreau@45drives.com> 3.1.8-1
+- Remove realm and wbinfo dependencies by getting users and groups with `getent -s
+  winbind -s sss -s ldap`
+- Handle directory permissions by numeric ID rather than user/group name
+- Fixed yet another regex bug in validating smb.conf
+* Wed Jun 08 2022 Joshua Boudreau <jboudreau@45drives.com> 3.1.7-1
+- Use systemdUnitEscape() from cockpit-helpers to escape mount unit name instead
+  of unreliable regex replace
+- Fix regular expressions used to check for and insert 'include = registry' in smb.conf
+* Fri Jun 03 2022 Joshua Boudreau <jboudreau@45drives.com> 3.1.6-1
+- Fixed bug where regex would crash from too much recursion while parsing Ubuntu
+  default smb.conf
+- Watch for newly added users, groups, and CTDB hosts and refresh lists automatically
+* Wed Jun 01 2022 Joshua Boudreau <jboudreau@45drives.com> 3.1.5-1
+- Tweak input width to be full width for mobile
+* Wed Jun 01 2022 Joshua Boudreau <jboudreau@45drives.com> 3.1.4-1
+- Tweak styling of components
+- Fix bug where Ceph remount tries to apply when directory DNE
+* Thu May 19 2022 Joshua Boudreau <jboudreau@45drives.com> 3.1.3-2
+- Add dependencies for packaging
+* Thu May 19 2022 Joshua Boudreau <jboudreau@45drives.com> 3.1.3-1
+- fix typo in acl_xattr setting
+* Tue May 10 2022 Joshua Boudreau <jboudreau@45drives.com> 3.1.2-1
+- Fixed canonicalizing Samba share path to fix bug with Ceph remount unit file name
+- Canonicalize NFS share path
+* Fri May 06 2022 Joshua Boudreau <jboudreau@45drives.com> 3.1.1-1
+- Fix info button positioning
+* Wed May 04 2022 Joshua Boudreau <jboudreau@45drives.com> 3.1.0-1
+- Fix bugs with ceph remounting
+- Add fix button for missing ceph remounts
+- Clean up tab navigation
+- Allow for disabling ceph remount
+- Add plugin info button
+- Automatically canonicalize share path on input change
+* Thu Mar 24 2022 Joshua Boudreau <jboudreau@45drives.com> 3.0.1-1
+- Fix some placeholder text, add tooltip for valid users
+- Fix shadow copy settings for Ceph shares
+- Clean up systemd mount files after deleting a Ceph share
+* Wed Mar 23 2022 Joshua Boudreau <jboudreau@45drives.com> 3.0.0-1
+- Overhaul Plugin with Vue.js and Tailwind CSS
+* Tue Mar 08 2022 Brett Kelly <bkelly@45drives.com> 2.4.5-1
+- add support for using samba varibles in path names
+* Tue Mar 08 2022 Brett Kelly <bkelly@45drives.com> 2.4.5-1
+- add support for using samba varibles in path names
+* Mon Feb 14 2022 Brett Kelly <bkelly@45drives.com> 2.4.4-1
+- added support for setting per share pool layout when using cephfs
+* Mon Feb 14 2022 Brett Kelly <bkelly@45drives.com> 2.4.4-1
+- added support for setting per share pool layout when using cephfs
+* Mon Dec 13 2021 Joshua Boudreau <jboudreau@45drives.com> 2.4.3-1
+- Use optional chaining operator while checking output on error in isCephSubDir()
+* Mon Dec 13 2021 Joshua Boudreau <jboudreau@45drives.com> 2.4.3-1
+- Use optional chaining operator while checking output on error in isCephSubDir()
+* Fri Dec 10 2021 Joshua Boudreau <jboudreau@45drives.com> 2.4.2-1
+- Use optional chaining operator while checking output on error in isCephFS()
+* Fri Dec 10 2021 Joshua Boudreau <jboudreau@45drives.com> 2.4.2-1
+- Use optional chaining operator while checking output on error in isCephFS()
+* Mon Sep 27 2021 Brett Kelly <bkelly@45drives.com> 2.4.1-1
+- change cephfs quotas after share creation
+* Mon Sep 27 2021 Brett Kelly <bkelly@45drives.com> 2.4.1-1
+- change cephfs quotas after share creation
+* Tue Sep 21 2021 Brett Kelly <bkelly@45drives.com> 2.4.0-2
+- improved error handling
+* Tue Sep 21 2021 Brett Kelly <bkelly@45drives.com> 2.4.0-2
+- improved error handling
+* Mon Sep 20 2021 Brett Kelly <bkelly@45drives.com> 2.4.0-1
+- rework cephfs mounts
+* Mon Sep 20 2021 Brett Kelly <bkelly@45drives.com> 2.4.0-1
+- rework cephfs mounts
+* Mon Aug 23 2021 Sam Silver <ssilver@45drives.com> 2.3.1-1
+- Fixed a bug where the 'set samba password' loader would not clear.
+* Mon Aug 23 2021 Sam Silver <ssilver@45drives.com> 2.3.1-1
+- Fixed a bug where the 'set samba password' loader would not clear.
+* Wed Aug 18 2021 Sam Silver <ssilver@45drives.com> 2.3.0-1
+- Changed how users are filtered
+* Wed Aug 18 2021 Sam Silver <ssilver@45drives.com> 2.3.0-1
+- Changed how users are filtered
+* Tue Aug 17 2021 Sam Silver <ssilver@45drives.com> 2.2.1-1
+- Added 'populate macos share' to single share settings as well as global settings
+* Tue Aug 17 2021 Sam Silver <ssilver@45drives.com> 2.2.1-1
+- Added 'populate macos share' to single share settings as well as global settings
+* Tue Aug 17 2021 Sam Silver <ssilver@45drives.com> 2.2.0-1
+- Added a 'populate macOS shares' setting in the Samba global config.
+* Tue Aug 17 2021 Sam Silver <ssilver@45drives.com> 2.2.0-1
+- Added a 'populate macOS shares' setting in the Samba global config.
+* Wed Aug 11 2021 Sam Silver <ssilver@45drives.com> 2.1.0-1
+- Added more error catching and better descriptions
+* Wed Aug 11 2021 Sam Silver <ssilver@45drives.com> 2.1.0-1
+- Added more error catching and better descriptions
+* Wed Aug 11 2021 Sam Silver <ssilver@45drives.com> 2.0.2-1
+- Fixed small bugs
+* Wed Aug 11 2021 Sam Silver <ssilver@45drives.com> 2.0.2-1
+- Fixed small bugs
+* Wed Aug 11 2021 Sam Silver <ssilver@45drives.com> 2.0.1-1
+- Fixed small bugs and typos.
+* Wed Aug 11 2021 Sam Silver <ssilver@45drives.com> 2.0.1-1
+- Fixed small bugs and typos.
+* Wed Aug 11 2021 Sam Silver <ssilver@45drives.com> 2.0.0-1
+- A code refactor and UI redesign of NFS Manager.
+* Wed Aug 11 2021 Sam Silver <ssilver@45drives.com> 2.0.0-1
+- A code refactor and UI redesign of NFS Manager.
+* Mon Jul 05 2021 Sam Silver <ssilver@45drives.com> 1.0.0-1
+- Initial packaging

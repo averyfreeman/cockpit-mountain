@@ -1,0 +1,222 @@
+/*
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ *
+ * Copyright (C) 2017 Red Hat, Inc.
+ */
+
+import cockpit from 'cockpit';
+import React from 'react';
+
+import type { VM, VMDisk } from '../../types';
+
+import type { Dialogs } from 'dialogs';
+
+import { Button } from "@patternfly/react-core/dist/esm/components/Button";
+import { DataList, DataListCell, DataListCheck, DataListItem, DataListItemCells, DataListItemRow } from "@patternfly/react-core/dist/esm/components/DataList";
+import { Form, FormGroup } from "@patternfly/react-core/dist/esm/components/Form";
+import {
+    Modal, ModalBody, ModalFooter, ModalHeader
+} from '@patternfly/react-core/dist/esm/components/Modal';
+import { DialogsContext } from 'dialogs.jsx';
+
+import { vmId } from '../../helpers.js';
+import { domainDelete, StorageDeleteInfo, getStorageDeleteInfoForDisk, deleteStorage } from '../../libvirtApi/domain.js';
+import { snapshotDelete } from '../../libvirtApi/snapshot.js';
+import { ModalError } from 'cockpit-components-inline-notification.jsx';
+import { appState } from '../../state';
+
+import './deleteDialog.css';
+
+const _ = cockpit.gettext;
+
+interface UIDisk extends VMDisk {
+    deleteInfo: StorageDeleteInfo;
+    checked: boolean;
+}
+
+const DeleteDialogBody = ({
+    disks,
+    vmName,
+    destroy,
+    onChange
+} : {
+    disks: UIDisk[],
+    vmName: string,
+    destroy: boolean,
+    onChange: (index: number, val: boolean) => void;
+}) => {
+    function disk_row(disk: UIDisk, index: number) {
+        return (
+            <DataListItem key={disk.target}
+                          aria-labelledby={disk.target}>
+                <DataListItemRow>
+                    <DataListCheck
+                            aria-labelledby={disk.target}
+                            name={"check-action-" + disk.target}
+                            onChange={(_event, checked) => {
+                                onChange(index, checked);
+                            }}
+                            isChecked={!!disk.checked} />
+                    <DataListItemCells
+                        dataListCells={[
+                            <DataListCell id={disk.target} className="pf-v6-u-mr-2xl" key="target name" isFilled={false}>
+                                <strong>{disk.target}</strong>
+                            </DataListCell>,
+                            <DataListCell key="target source" alignRight>
+                                {disk.type == 'file' &&
+                                <div className='disk-source'>
+                                    <span> {_("Path")} </span>
+                                    <strong className='disk-source-file'> {disk.source.file} </strong>
+                                </div>}
+                                {disk.type == 'block' &&
+                                <div className='disk-source'>
+                                    <span> {_("Block device")} </span>
+                                    <strong className='disk-source-dev'> {disk.source.dev} </strong>
+                                </div>}
+                                {disk.type == 'volume' &&
+                                <div className='disk-source'>
+                                    <span> {_("Volume")} </span>
+                                    <strong className='disk-source-volume'> {disk.source.volume} </strong>
+
+                                    <span> {_("Pool")} </span>
+                                    <strong className='disk-source-pool'> {disk.source.pool} </strong>
+                                </div>}
+                            </DataListCell>,
+                        ]}
+                    />
+                </DataListItemRow>
+            </DataListItem>
+        );
+    }
+
+    return (
+        <Form onSubmit={e => e.preventDefault()}>
+            <FormGroup>
+                {destroy && <p>{cockpit.format(_("The VM $0 is running and will be forced off before deletion."), vmName)}</p>}
+                {disks.length > 0 && <>
+                    <p className="pf-v6-u-mb-sm">{_("Delete associated storage files:")}</p>
+                    <DataList
+                        aria-label={_("Associated storage files")}
+                        isCompact
+                    >
+                        { disks.map(disk_row) }
+                    </DataList>
+                </>}
+            </FormGroup>
+        </Form>
+    );
+};
+
+interface DeleteDialogProps {
+    vm: VM,
+}
+
+interface DeleteDialogState {
+    dialogError?: string;
+    dialogErrorDetail?: string;
+    disks: UIDisk[],
+    disksReady: boolean,
+}
+
+export class DeleteDialog extends React.Component<DeleteDialogProps, DeleteDialogState> {
+    static contextType = DialogsContext;
+    declare context: Dialogs;
+
+    constructor(props: DeleteDialogProps) {
+        super(props);
+        this.delete = this.delete.bind(this);
+        this.onDiskCheckedChanged = this.onDiskCheckedChanged.bind(this);
+        this.dialogErrorSet = this.dialogErrorSet.bind(this);
+
+        this.state = { disks: [], disksReady: false };
+    }
+
+    async componentDidMount() {
+        const vm = this.props.vm;
+        const disks: UIDisk[] = [];
+
+        for (const t of Object.keys(vm.disks).sort()) {
+            const d = vm.disks[t];
+            const info = await getStorageDeleteInfoForDisk(vm, d);
+
+            if (info)
+                disks.push(Object.assign(d, {
+                    deleteInfo: info,
+                    checked: !d.readonly,
+                }));
+        }
+
+        this.setState({ disks, disksReady: true });
+    }
+
+    dialogErrorSet(text: string, detail: string) {
+        this.setState({ dialogError: text, dialogErrorDetail: detail });
+    }
+
+    onDiskCheckedChanged(index: number, value: boolean) {
+        const disks = this.state.disks.slice();
+
+        disks[index].checked = value;
+        this.setState({ disks });
+    }
+
+    delete() {
+        const Dialogs = this.context;
+        const storage = this.state.disks.filter(d => d.checked);
+        const { vm } = this.props;
+
+        Promise.all(
+            (Array.isArray(vm.snapshots) ? vm.snapshots : [])
+                    .map(snapshot => snapshotDelete({ connectionName: vm.connectionName, domainPath: vm.id, snapshotName: snapshot.name }))
+        )
+                .then(() => {
+                    return domainDelete({
+                        id: vm.id,
+                        connectionName: vm.connectionName,
+                        live: this.props.vm.state != 'shut off',
+                    })
+                            .then(() => {
+                                Dialogs.close();
+                                cockpit.location.go(["vms"]);
+                            });
+                })
+                .then(() => { // Cleanup operations
+                    return deleteStorage(vm, storage.map(s => s.deleteInfo))
+                            .catch(exc => appState.addNotification({
+                                text: cockpit.format(_("Could not delete all storage for $0"), vm.name),
+                                detail: exc,
+                                type: "warning"
+                            }));
+                })
+                .catch(exc => this.dialogErrorSet(cockpit.format(_("Could not delete $0"), vm.name), exc.message));
+    }
+
+    render() {
+        const Dialogs = this.context;
+        const id = vmId(this.props.vm.name);
+        return (
+            <Modal position="top" variant="medium" id={`${id}-delete-modal-dialog`} isOpen onClose={Dialogs.close}>
+                <ModalHeader title={cockpit.format(_("Delete $0 VM?"), this.props.vm.name)}
+                    titleIconVariant="warning"
+                />
+                <ModalBody>
+                    {this.state.dialogError &&
+                        <ModalError
+                            dialogError={this.state.dialogError}
+                            {...this.state.dialogErrorDetail && { dialogErrorDetail: this.state.dialogErrorDetail } }
+                        />
+                    }
+                    <DeleteDialogBody disks={this.state.disks} vmName={this.props.vm.name} destroy={this.props.vm.state != 'shut off'} onChange={this.onDiskCheckedChanged} />
+                </ModalBody>
+                <ModalFooter>
+                    <Button variant='danger' onClick={this.delete} isDisabled={!this.state.disksReady}>
+                        {_("Delete")}
+                    </Button>
+                    <Button variant='link' onClick={Dialogs.close}>
+                        {_("Cancel")}
+                    </Button>
+                </ModalFooter>
+            </Modal>
+        );
+    }
+}

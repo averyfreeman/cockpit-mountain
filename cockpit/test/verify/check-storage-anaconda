@@ -1,0 +1,703 @@
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
+
+#
+# Copyright (C) 2023 Red Hat, Inc.
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
+
+import json
+import os
+
+import storagelib
+import testlib
+
+
+@testlib.nondestructive
+@testlib.skipOstree("No /sysroot and directory cannot be created on read-only filesystem")
+@testlib.skipImage("Not relevant for Anaconda", "debian-*", "ubuntu-*", "arch", "rhel-8-10", "rhel-9-*", "rhel-10-*", "centos-9-*", "centos-10")
+class TestStorageAnaconda(storagelib.StorageCase):
+
+    def expectExportedDevice(self, device, value):
+        mpm = json.loads(self.browser.call_js_func("window.sessionStorage.getItem", "cockpit_mount_points"))
+        self.assertIn(device, mpm)
+        self.assertEqual(mpm[device], value)
+
+    def expectExportedDevicePassphrase(self, device, value):
+        pp = json.loads(self.browser.call_js_func("window.sessionStorage.getItem", "cockpit_passphrases"))
+        self.assertIn(device, pp)
+        self.assertEqual(pp[device], value)
+
+    def testBasic(self):
+        m = self.machine
+        b = self.browser
+
+        disk = self.add_ram_disk()
+
+        anaconda_config = {
+            "mount_point_prefix": "/sysroot",
+            "available_devices": [disk],
+        }
+
+        self.login_and_go("/storage")
+        self.enterAnacondaMode(anaconda_config, "/storage")
+
+        # There should be only one row, for our disk
+        b.wait_count(self.card("Storage") + " tbody tr", 1)
+        b.wait_text(self.card_row_col("Storage", 1, 3), "Unformatted data")
+        b.wait_not_present(self.card_row("Storage", location="/"))
+
+        # Create a volume group with a logical volume
+        self.click_devices_dropdown("Create LVM2 volume group")
+        self.dialog_wait_open()
+        b.wait_count("#dialog .select-space-name", 1)
+        self.dialog_set_val("disks", {disk: True})
+        self.dialog_apply()
+        self.dialog_wait_close()
+        self.click_dropdown(self.card_row("Storage", name="vgroup0"), "Create new logical volume")
+        self.dialog({})
+
+        # Create an encrypted filesystem
+        self.click_dropdown(self.card_row("Storage", name="lvol0"), "Format")
+        self.dialog_wait_open()
+        b.wait_not_present(self.dialog_field("at_boot"))
+        b.wait_not_present(self.dialog_field("mount_options"))
+        self.dialog_set_val("type", "ext4")
+        self.dialog_set_val("mount_point", "/")
+        self.dialog_set_val("crypto", self.default_crypto_type)
+        self.dialog_set_val("passphrase", "vainu-reku-toma-rolle-kaja")
+        self.dialog_set_val("passphrase2", "vainu-reku-toma-rolle-kaja")
+        self.dialog_apply()
+        self.dialog_wait_close()
+
+        self.assertIn("noauto", m.execute("findmnt --fstab -n -o OPTIONS /sysroot"))
+        self.assertNotIn("nofail", m.execute("findmnt --fstab -n -o OPTIONS /sysroot"))
+
+        self.click_card_row("Storage", name="lvol0")
+        b.click(self.card_parent_link())
+        b.click(self.card_parent_link())
+        b.wait_visible(self.card("Storage"))
+
+        b.assert_pixels("body", "page")
+
+        # Edit mount point
+        self.click_dropdown(self.card_row("Storage", name="lvol0"), "Edit mount point")
+        self.dialog_wait_open()
+        self.dialog_wait_val("mount_point", "/")
+        self.dialog_set_val("mount_point", "/var")
+        self.dialog_apply()
+        self.dialog_wait_close()
+        self.assertIn("noauto", m.execute("findmnt --fstab -n -o OPTIONS /sysroot/var"))
+
+        # Mount/Unmount the filesystem
+        self.click_card_row("Storage", location="/var")
+        b.wait_visible(self.card("Encryption"))
+        # LUKS should be open
+        b.wait_in_text(self.card_desc("Encryption", "Cleartext device"), "/dev/mapper")
+        b.wait_in_text(self.card_desc("ext4 filesystem", "Mount point"), "/var")
+
+        # Cockpit hides its "Mount" action in Anaconda mode...
+        b.wait_not_present(self.card_button("ext4 filesystem", "Mount"))
+        m.execute("mkdir -p /sysroot/var; mount /sysroot/var")
+
+        # ...but unmounting is still there.
+        b.click(self.card_button("ext4 filesystem", "Unmount"))
+        self.dialog_wait_open()
+        b.wait_text("#dialog .pf-v6-c-modal-box__title-text", "Unmount filesystem /var")
+        self.dialog_apply()
+        self.dialog_wait_close()
+        self.assertIn("noauto", m.execute("findmnt --fstab -n -o OPTIONS /sysroot/var"))
+
+        # LUKS should still be open, close it so that we can deactivate the LV
+        cleartext = b.text(self.card_desc("Encryption", "Cleartext device"))
+        m.execute(f"cryptsetup close {cleartext}")
+        b.wait_text(self.card_desc("Encryption", "Cleartext device"), "-")
+
+        # Deactivate
+        b.click(self.card_button("LVM2 logical volume", "Deactivate"))
+        self.confirm()
+        testlib.wait(lambda: m.execute("if ! test -e /dev/vgroup0/lvol0; then echo gone; fi").strip() == "gone")
+
+        # Check exported information.
+        self.expectExportedDevicePassphrase("/dev/vgroup0/lvol0", "vainu-reku-toma-rolle-kaja")
+        self.expectExportedDevice("/dev/vgroup0/lvol0",
+                                  {
+                                      "type": "crypto",
+                                      "content": {
+                                          "type": "filesystem",
+                                          "dir": "/var"
+                                      }
+                                  })
+
+        # Activate
+        b.click(self.card_button("Inactive logical volume", "Activate"))
+
+        # Crypto is locked.  Unlock and mount via the "Reuse existing
+        # encryption" mode of the Format dialog
+        self.click_card_dropdown("Filesystem", "Format")
+        self.dialog_wait_open()
+        self.dialog_wait_val("crypto", " keep")
+        self.dialog_set_val("old_passphrase", "vainu-reku-toma-rolle-kaja")
+        b.set_checked("#dialog-confirm", val=True)
+        self.dialog_apply()
+        self.dialog_wait_close()
+
+        # Passphrase should still be remembered
+        self.expectExportedDevicePassphrase("/dev/vgroup0/lvol0", "vainu-reku-toma-rolle-kaja")
+
+        # Check and delete volume group
+        b.click(self.card_parent_link())
+        b.wait_visible(self.card_row("LVM2 volume group", name=disk))
+        self.click_card_dropdown("LVM2 volume group", "Delete group")
+        self.confirm()
+        m.execute("! findmnt --fstab -n /sysroot/var")
+
+        # Back to the beginning
+        b.wait_visible(self.card("Storage"))
+        b.wait_count(self.card("Storage") + " tbody tr", 1)
+        b.wait_not_present(self.card_row("Storage", location="/var"))
+
+    @testlib.skipImage("No Stratis", "debian-*", "ubuntu-*", "arch")
+    @testlib.skipImage("commit 817c957899a4 removed Stratis 2 support", "rhel-8-*")
+    @testlib.skipImage("Stratis v1 pools are unsupported", "rhel-9-*")
+    def testStratis(self):
+        m = self.machine
+        b = self.browser
+
+        m.execute("systemctl start stratisd")
+        self.addCleanup(m.execute, "systemctl stop stratisd")
+
+        # Forcefully remove all Stratis pools. This also gets rid of partially constructed pools.
+        self.addCleanup(m.execute,
+                        "dmsetup ls | cut -f1 | grep ^stratis | xargs  -n1 --no-run-if-empty dmsetup remove --force")
+
+        PV_SIZE = 4000  # 4 GB in MB
+
+        disk = self.add_loopback_disk(PV_SIZE, name="loop10")
+
+        anaconda_config = {
+            "mount_point_prefix": "/sysroot",
+            "available_devices": [disk],
+        }
+
+        self.login_and_go("/storage")
+        self.enterAnacondaMode(anaconda_config, "/storage")
+
+        # Create an encrypted Stratis pool
+        self.click_devices_dropdown("Create Stratis pool")
+        self.dialog_wait_open()
+        b.wait_count("#dialog .select-space-name", 1)
+        # Passphrase encryption is available, but Tang/clevis is hidden in Anaconda mode
+        b.wait_visible(self.dialog_field("encrypt_pass.on"))
+        b.wait_not_present(self.dialog_field("encrypt_tang.on"))
+        self.dialog_set_val("disks", {disk: True})
+        self.dialog_set_val("encrypt_pass.on", val=True)
+        self.dialog_set_val("passphrase", "vainu-reku-toma-rolle-kaja")
+        self.dialog_set_val("passphrase2", "vainu-reku-toma-rolle-kaja")
+        self.dialog_apply()
+        self.dialog_wait_close()
+
+        self.click_dropdown(self.card_row("Storage", name="pool0"), "Create new filesystem")
+        self.dialog_wait_open()
+        b.wait_not_present(self.dialog_field("at_boot"))
+        b.wait_not_present(self.dialog_field("mount_options"))
+        self.dialog_set_val("name", "root")
+        self.dialog_set_val("mount_point", "/")
+        self.dialog_apply()
+        self.dialog_wait_close()
+
+        self.assertIn("noauto", m.execute("findmnt --fstab -n -o OPTIONS /sysroot"))
+        self.assertNotIn("nofail", m.execute("findmnt --fstab -n -o OPTIONS /sysroot"))
+
+        b.wait_visible(self.card_row_col("Storage", 3, 5) + " .usage-bar[role=progressbar]")
+
+        # Edit mount point
+        self.click_dropdown(self.card_row("Storage", name="root"), "Edit mount point")
+        self.dialog_wait_open()
+        self.dialog_wait_val("mount_point", "/")
+        self.dialog_set_val("mount_point", "/var")
+        self.dialog_apply()
+        self.dialog_wait_close()
+        self.assertIn("noauto", m.execute("findmnt --fstab -n -o OPTIONS /sysroot/var"))
+
+        # Mount/Unmount the filesystem
+        self.click_card_row("Storage", location="/var")
+        b.wait_in_text(self.card_desc("Stratis filesystem", "Mount point"), "/var")
+        # Cockpit hides its "Mount" action in Anaconda mode...
+        b.wait_not_present(self.card_button("Stratis filesystem", "Mount"))
+        m.execute("mkdir -p /sysroot/var; mount /sysroot/var")
+
+        b.click(self.card_button("Stratis filesystem", "Unmount"))
+        self.dialog_wait_open()
+        b.wait_text("#dialog .pf-v6-c-modal-box__title-text", "Unmount filesystem /var")
+        self.dialog_apply()
+        self.dialog_wait_close()
+        self.assertIn("noauto", m.execute("findmnt --fstab -n -o OPTIONS /sysroot/var"))
+
+        # Check exported mount point and passphrase information.
+        self.expectExportedDevicePassphrase(disk, "vainu-reku-toma-rolle-kaja")
+
+        self.expectExportedDevice("/dev/stratis/pool0/root",
+                                  {
+                                      "type": "filesystem",
+                                      "dir": "/var"
+                                  })
+
+        # Mount again, to check location in tear down information
+        m.execute("mount /sysroot/var")
+
+        # Check and delete pool
+        b.click(self.card_parent_link())
+        b.wait_visible(self.card_row("Encrypted Stratis pool", name=disk))
+        # Managing passphrases is allowed, but adding a Tang keyserver is hidden in Anaconda mode
+        b.wait_visible(self.card("Encryption tokens"))
+        self.assertNotIn("keyserver", b.text(self.card("Encryption tokens")).lower())
+        self.click_card_dropdown("Encrypted Stratis pool", "Delete")
+        self.confirm()
+        m.execute("! findmnt --fstab -n /sysroot/var")
+
+    @testlib.skipImage('no btrfs support', 'rhel-*', 'centos-*', 'fedora-eln')
+    def testBtrfs(self):
+        b = self.browser
+
+        disk = self.add_ram_disk(128)
+
+        anaconda_config = {
+            "mount_point_prefix": "/sysroot",
+            "available_devices": [disk],
+        }
+
+        self.login_and_go("/storage")
+        self.enterAnacondaMode(anaconda_config, "/storage")
+
+        # Create a encrypted Btrfs filesystem
+
+        b.wait_text(self.card_row_col("Storage", 1, 3), "Unformatted data")
+        self.click_dropdown(self.card_row("Storage", 1), "Format")
+        self.dialog_wait_open()
+        b.wait_not_present(self.dialog_field("at_boot"))
+        b.wait_not_present(self.dialog_field("mount_options"))
+        self.dialog_set_val("name", "butter")
+        self.dialog_set_val("type", "btrfs")
+        self.dialog_set_val("mount_point", f"{self.mnt_dir}/butter")
+        self.dialog_set_val("crypto", self.default_crypto_type)
+        self.dialog_set_val("passphrase", "vainu-reku-toma-rolle-kaja")
+        self.dialog_set_val("passphrase2", "vainu-reku-toma-rolle-kaja")
+        self.dialog_set_val("crypto", "luks1")
+        self.dialog_apply()
+        self.dialog_wait_close()
+
+        # Create two subvolumes
+        self.click_dropdown(self.card_row("Storage", location=f"{self.mnt_dir}/butter"), "Create subvolume")
+        self.dialog_wait_open()
+        b.wait_not_present(self.dialog_field("at_boot"))
+        b.wait_not_present(self.dialog_field("mount_options"))
+        self.dialog_set_val("name", "root")
+        self.dialog_set_val("mount_point", "/")
+        b.wait_count("#dialog button.apply", 1)
+        self.dialog_apply()
+        self.dialog_wait_close()
+
+        self.click_dropdown(self.card_row("Storage", location=f"{self.mnt_dir}/butter"), "Create subvolume")
+        self.dialog_wait_open()
+        self.dialog_set_val("name", "home")
+        self.dialog_set_val("mount_point", "/home")
+        self.dialog_apply()
+        self.dialog_wait_close()
+
+        # Popular subvolume names starting with @ are allowed.
+        self.click_dropdown(self.card_row("Storage", location=f"{self.mnt_dir}/butter"), "Create subvolume")
+        self.dialog_wait_open()
+        self.dialog_set_val("name", "@data")
+        self.dialog_set_val("mount_point", "/data")
+        self.dialog_apply()
+        self.dialog_wait_close()
+
+        # Lock, mount point exporting should still work
+
+        self.click_dropdown(self.card_row("Storage", name=disk), "Lock")
+        self.confirm()
+        b.wait_text(self.card_row_col("Storage", 1, 3), "Locked data (encrypted)")
+
+        self.expectExportedDevice(disk,
+                                  {
+                                      "type": "crypto",
+                                      "content": {
+                                          "type": "filesystem",
+                                          "subvolumes": {
+                                              "/": {
+                                                  "dir": f"{self.mnt_dir}/butter"
+                                              },
+                                              "root": {
+                                                  "dir": "/"
+                                              },
+                                              "home": {
+                                                  "dir": "/home"
+                                              },
+                                              "@data": {
+                                                  "dir": "/data"
+                                              },
+                                          }
+                                      }
+                                  })
+
+    @testlib.skipImage('no btrfs support', 'rhel-*', 'centos-*', 'fedora-eln')
+    def testDegradedBtrfs(self):
+        b = self.browser
+        m = self.machine
+
+        disk1 = self.add_ram_disk(size=140)
+        disk2 = self.add_loopback_disk(size=140)
+
+        anaconda_config = {
+            "mount_point_prefix": "/sysroot",
+            "available_devices": [disk1, disk2],
+        }
+
+        # Create a two-device btrfs and then degrade it by wiping the second device.
+        # Cockpit used to crash when such a filesystem is present in Anaconda mode.
+
+        m.execute(f"mkfs.btrfs -L butter {disk1} {disk2}")
+        m.execute(f"wipefs -a {disk2}")
+
+        self.login_and_go("/storage")
+        self.enterAnacondaMode(anaconda_config, "/storage")
+
+        b.wait_visible(self.card_row("Storage", name="butter"))
+
+    def testBiosboot(self):
+        b = self.browser
+
+        disk = self.add_ram_disk()
+
+        anaconda_config = {
+            "mount_point_prefix": "/sysroot",
+            "available_devices": [disk],
+            "efi": False,
+        }
+
+        self.login_and_go("/storage")
+        self.enterAnacondaMode(anaconda_config, "/storage")
+
+        # Create a biosboot partition on GPT
+        b.wait_text(self.card_row_col("Storage", 1, 3), "Unformatted data")
+        self.click_dropdown(self.card_row("Storage", 1), "Create partition table")
+        self.confirm()
+        b.wait_text(self.card_row_col("Storage", 2, 2), "Free space")
+        self.click_dropdown(self.card_row("Storage", 2), "Create partition")
+        self.dialog({"type": "biosboot"})
+
+        # Check the type and set it to something else
+        b.wait_text(self.card_row_col("Storage", 2, 3), "Unformatted data (BIOS boot partition)")
+        self.click_card_row("Storage", 2)
+        b.wait_text(self.card_desc("Partition", "Type"), "BIOS boot partition")
+        b.click(self.card_desc_action("Partition", "Type"))
+        self.dialog({"type": "0fc63daf-8483-4772-8e79-3d69d8477de4"})
+        b.wait_text(self.card_desc("Partition", "Type"), "Linux filesystem data")
+
+        # Correct it by reformatting as "biosboot"
+        self.click_card_dropdown("Unformatted data", "Format")
+        self.dialog({"type": "biosboot"})
+        b.wait_text(self.card_desc("Partition", "Type"), "BIOS boot partition")
+
+    def testEfiSystemPartition(self):
+        b = self.browser
+
+        disk = self.add_ram_disk()
+
+        anaconda_config = {
+            "mount_point_prefix": "/sysroot",
+            "available_devices": [disk],
+            "efi": True,
+        }
+
+        self.login_and_go("/storage")
+        self.enterAnacondaMode(anaconda_config, "/storage")
+
+        # Create a EFI system partition on GPT
+        b.wait_text(self.card_row_col("Storage", 1, 3), "Unformatted data")
+        self.click_dropdown(self.card_row("Storage", 1), "Create partition table")
+        self.confirm()
+        b.wait_text(self.card_row_col("Storage", 2, 2), "Free space")
+        self.click_dropdown(self.card_row("Storage", 2), "Create partition")
+        self.dialog({"type": "efi"})
+
+        # Check the type and set it to something else
+        b.wait_text(self.card_row_col("Storage", 2, 3), "vfat filesystem (EFI system partition)")
+        b.wait_text(self.card_row_col("Storage", 2, 4), "/boot/efi")
+        self.click_card_row("Storage", 2)
+        b.wait_visible(self.card("vfat filesystem"))
+        b.wait_text(self.card_desc("Partition", "Type"), "EFI system partition")
+        b.click(self.card_desc_action("Partition", "Type"))
+        self.dialog({"type": "0fc63daf-8483-4772-8e79-3d69d8477de4"})
+        b.wait_text(self.card_desc("Partition", "Type"), "Linux filesystem data")
+
+        # Correct it by reformatting as "efi"
+        self.click_card_dropdown("vfat filesystem", "Format")
+        self.dialog({"type": "efi"})
+        b.wait_text(self.card_desc("Partition", "Type"), "EFI system partition")
+
+    def testFormat(self):
+        m = self.machine
+        b = self.browser
+
+        disk = self.add_ram_disk()
+
+        anaconda_config = {
+            "mount_point_prefix": "/sysroot",
+            "available_devices": [disk],
+            "default_fsys_type": "vfat",
+        }
+
+        self.login_and_go("/storage")
+        self.enterAnacondaMode(anaconda_config, "/storage")
+
+        b.wait_text(self.card_row_col("Storage", 1, 3), "Unformatted data")
+        self.click_dropdown(self.card_row("Storage", 1), "Create partition table")
+        self.confirm()
+        b.wait_text(self.card_row_col("Storage", 2, 2), "Free space")
+
+        # Only one apply button in the Create Partition dialog,
+        # default filesystem type should be "vfat".
+        self.click_dropdown(self.card_row("Storage", 2), "Create partition")
+        self.dialog_wait_open()
+        self.dialog_wait_val("type", "vfat")
+        self.dialog_set_val("type", "ext4")
+        self.dialog_set_val("size", "30")
+        b.wait_count("#dialog button.apply", 1)
+        b.wait_text("#dialog button.apply", "Create")
+        self.dialog_apply()
+        self.dialog_wait_close()
+
+        # Page talks about assigned mount points instead of "not mounted".
+        b.wait_text(self.card_row_col("Storage", 2, 4), "(no assigned mount point)")
+
+        # Format it again and make it the root filesystem.  It should
+        # keep ext4 as the type.
+        self.click_dropdown(self.card_row("Storage", 2), "Format")
+        self.dialog_wait_open()
+        self.dialog_set_val("mount_point", "/")
+        self.dialog_wait_val("type", "ext4")
+        b.wait_count("#dialog button.apply", 1)
+        b.wait_text("#dialog button.apply", "Format")
+        self.dialog_apply()
+        self.dialog_wait_close()
+
+        # Filesystem is not mounted but page doesn't mention "not mounted".
+        m.execute(f"! findmnt {disk}")
+        b.wait_text(self.card_row_col("Storage", 2, 4), "/")
+
+        # Create another partition, it should inherit ext4
+        # from the root
+        b.wait_text(self.card_row_col("Storage", 3, 2), "Free space")
+        self.click_dropdown(self.card_row("Storage", 3), "Create partition")
+        self.dialog_wait_open()
+        self.dialog_wait_val("type", "ext4")
+        self.dialog_apply()
+        self.dialog_wait_close()
+
+    def testSwap(self):
+        b = self.browser
+
+        disk = self.add_ram_disk()
+
+        anaconda_config = {
+            "mount_point_prefix": "/sysroot",
+            "available_devices": [disk],
+        }
+
+        self.login_and_go("/storage")
+        self.enterAnacondaMode(anaconda_config, "/storage")
+
+        b.wait_text(self.card_row_col("Storage", 1, 3), "Unformatted data")
+        self.click_dropdown(self.card_row("Storage", 1), "Format")
+        self.dialog({"type": "swap"})
+
+        self.expectExportedDevice(disk, {"type": "swap"})
+
+    def testMDRaid(self):
+        b = self.browser
+
+        disk1 = self.add_loopback_disk(name="loop10")
+        disk2 = self.add_loopback_disk(name="loop11")
+
+        anaconda_config = {
+            "mount_point_prefix": "/sysroot",
+            "available_devices": [disk1, disk2],
+        }
+
+        self.login_and_go("/storage")
+        self.enterAnacondaMode(anaconda_config, "/storage")
+
+        # Create a mirrored MDRAID
+        self.click_devices_dropdown("Create MDRAID device")
+        self.dialog_wait_open()
+        b.wait_count("#dialog .select-space-name", 2)
+        self.dialog_wait_val("name", "raid0")
+        self.dialog_set_val("level", "raid1")
+        self.dialog_set_val("disks", {disk1: True, disk2: True})
+        self.dialog_apply()
+        self.dialog_wait_close()
+        # Stop the raid array in case the test fails otherwise losetup can't release the devices
+        self.addCleanup(self.machine.execute, "if [ -b /dev/md/raid0 ]; then mdadm --stop /dev/md/raid0; fi;")
+
+        # Create a partition with a filesystem on it
+        self.click_dropdown(self.card_row("Storage", name="md/raid0"), "Create partition table")
+        self.confirm()
+        b.wait_text(self.card_row_col("Storage", 4, 2), "Free space")
+        self.click_dropdown(self.card_row("Storage", 4), "Create partition")
+        self.dialog({})
+
+        # Stop the MDRAID, it should still be shown
+        self.click_card_row("Storage", name="md/raid0")
+        b.wait_visible(self.card("GPT partitions"))
+        b.click(self.card_button("MDRAID device", "Stop"))
+        self.confirm()
+        b.wait_not_present(self.card("GPT partitions"))
+        b.wait_visible(self.card("MDRAID device"))
+
+        b.click(self.card_parent_link())
+        b.wait_visible(self.card_row("Storage", name="raid0"))
+
+        # Now remove disk2 from "available_devices". This should hide the mdraid.
+
+        anaconda_config = {
+            "mount_point_prefix": "/sysroot",
+            "available_devices": [disk1],
+        }
+
+        self.enterAnacondaMode(anaconda_config, "/storage")
+
+        b.wait_visible(self.card("Storage"))
+        b.wait_not_present(self.card_row("Storage", name="raid0"))
+        b.wait_not_present(self.card_row("Storage", name="md/raid0"))
+
+        # But it is still reachable via disk1.  This leads to a "Not
+        # found" page.
+
+        self.click_card_row("Storage", name=disk1)
+        b.click(self.card_desc("MDRAID disk", "MDRAID device") + " button")
+        b.wait_in_text("body", "Not found")
+
+    def testNonEmpty(self):
+        b = self.browser
+        m = self.machine
+
+        disk = self.add_loopback_disk(name="loop10")
+
+        anaconda_config = {
+            "mount_point_prefix": "/sysroot",
+            "available_devices": [disk],
+        }
+
+        # Create some content on the disk
+        m.execute(f"echo einszweidrei | cryptsetup luksFormat --pbkdf-memory 32768 {disk}")
+        m.execute(f"echo einszweidrei | cryptsetup luksOpen {disk} dm-test")
+        m.execute(f"mkfs.ext4 /dev/mapper/dm-test; mount /dev/mapper/dm-test {self.mnt_dir}; echo Hi >{self.mnt_dir}/hello; umount {self.mnt_dir}")
+        m.execute("cryptsetup close dm-test")
+
+        self.login_and_go("/storage")
+        self.enterAnacondaMode(anaconda_config, "/storage")
+
+        # Attempt to wipe it. This requires a extra confirmation
+        # because it is locked.
+        b.wait_text(self.card_row_col("Storage", 1, 3), "Locked data (encrypted)")
+        self.click_dropdown(self.card_row("Storage", 1), "Create partition table")
+        self.dialog_wait_open()
+        self.dialog_set_val("type", "empty")
+        b.wait_in_text("#dialog", "Locked encrypted device might contain data")
+        self.dialog_wait_apply_disabled()
+        b.assert_pixels('#dialog', "wipe")
+        b.set_checked("#dialog-confirm", val=True)
+        self.dialog_wait_apply_enabled()
+        self.dialog_cancel()
+        self.dialog_wait_close()
+
+        # Unlock and confirm the extra warning, and actually wipe it
+        self.click_dropdown(self.card_row("Storage", 1), "Unlock")
+        self.dialog({"passphrase": "einszweidrei"})
+        b.wait_text(self.card_row_col("Storage", 1, 3), "ext4 filesystem (encrypted)")
+        self.click_dropdown(self.card_row("Storage", 1), "Create partition table")
+        self.dialog_wait_open()
+        self.dialog_set_val("type", "empty")
+        b.wait_in_text("#dialog", "Important data might be deleted")
+        b.wait_in_text("#dialog", os.path.basename(disk))
+        b.wait_in_text("#dialog", "kB used")
+        b.wait_in_text("#dialog", "MB total")
+        b.set_checked("#dialog-confirm", val=True)
+        self.dialog_wait_apply_enabled()
+        self.dialog_apply()
+        self.dialog_wait_close()
+
+        # Put some unrecognized data on it
+
+        # This is the superblock of a legacy VDO device. Cockpit does
+        # not recognize it.
+
+        data = """
+ZG12ZG8wMDEFAAAABAAAAAAAAABdAAAAAAAAAJQJAgCGsH0mrQgGAC4WnB4G50Fzu20jY6J1rfwA
+AAAAAQAAAAAAAAABAAAA2FwKAAAAAAAA////AAAAAAA7tw9zAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+"""
+        m.execute(f"base64 -d >{disk}", input=data)
+        # Wait for udev to settle and re-trigger, udisks sometimes misses udev events on ubuntu 2204.
+        m.execute(f"udevadm settle; udevadm trigger {disk}")
+
+        b.wait_text(self.card_row_col("Storage", 1, 3), "Unrecognized data")
+        self.click_dropdown(self.card_row("Storage", 1), "Create partition table")
+        self.dialog_wait_open()
+        self.dialog_set_val("type", "empty")
+        b.wait_in_text("#dialog", "Device contains unrecognized data")
+        b.set_checked("#dialog-confirm", val=True)
+        self.dialog_wait_apply_enabled()
+        self.dialog_apply()
+        self.dialog_wait_close()
+
+        # A filesystem with just directories should not show the
+        # warning.
+
+        m.execute(f"mkfs.ext4 {disk}; mount {disk} {self.mnt_dir}; mkdir -p {self.mnt_dir}/dir/ect/ory")
+        m.execute(f"while mountpoint -q {self.mnt_dir} && ! umount {self.mnt_dir}; do sleep 0.2; done;")
+        b.wait_text(self.card_row_col("Storage", 1, 3), "ext4 filesystem")
+
+        self.dialog_open_with_retry(lambda: self.click_dropdown(self.card_row("Storage", 1), "Create partition table"),
+                                    lambda: "Initialize" in b.text("#dialog"))
+        self.dialog_set_val("type", "empty")
+        self.dialog_apply()
+        self.dialog_wait_close()
+        b.wait_text(self.card_row_col("Storage", 1, 3), "Unformatted data")
+
+    @testlib.skipImage("No Stratis", "debian-*", "ubuntu-*")
+    @testlib.skipImage("No Anaconda", "arch")
+    @testlib.destructive
+    def testNoOndemandPackages(self):
+        b = self.browser
+        m = self.machine
+
+        disk = self.add_loopback_disk(name="loop10")
+
+        m.execute("systemctl stop stratisd; dnf remove -y stratisd stratis")
+
+        anaconda_config = {
+            "mount_point_prefix": "/sysroot",
+            "available_devices": [disk],
+        }
+
+        self.login_and_go("/storage")
+        self.enterAnacondaMode(anaconda_config, "/storage")
+
+        dropdown_toggle = self.dropdown_toggle(self.card_header("Storage"))
+        raid_action = self.dropdown_action("Create MDRAID device")
+        stratis_action = self.dropdown_action("Create Stratis pool")
+        b.click(dropdown_toggle)
+        b.wait_visible(raid_action)
+        b.wait_not_present(stratis_action)
+
+
+if __name__ == '__main__':
+    testlib.test_main()

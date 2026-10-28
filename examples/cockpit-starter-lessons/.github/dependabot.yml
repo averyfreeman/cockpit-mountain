@@ -1,0 +1,57 @@
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      # run these when most of our developers don't work
+      day: "sunday"
+      timezone: "Europe/Berlin"
+    open-pull-requests-limit: 3
+    labels:
+      - "bot"
+      - "node_modules"
+    groups:
+      oxlint:
+        patterns:
+          - "oxlint"
+      esbuild:
+        patterns:
+          - "esbuild*"
+      patternfly:
+        patterns:
+          - "@patternfly*"
+      react:
+        patterns:
+          - "react*"
+      stylelint:
+        patterns:
+          - "stylelint*"
+      types:
+        patterns:
+          - "@types*"
+          - "types*"
+
+    ignore:
+      # needs to be done in Cockpit first
+      - dependency-name: "@patternfly/*"
+        update-types: ["version-update:semver-major"]
+
+
+
+      # Keep this migration on TypeScript major 6 until the codebase is ready for 7.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    open-pull-requests-limit: 3
+    labels:
+      - "bot"
+      - "no-test"
+    schedule:
+      interval: "monthly"
+    groups:
+      actions:
+        patterns:
+          - "*"

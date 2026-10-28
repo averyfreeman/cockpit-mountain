@@ -1,0 +1,58 @@
+%global debug_package %{nil}
+
+Name: {{ name }}
+Version: {{ version }}
+Release: {{ build_number }}%{?dist}
+Summary: {{ description }}
+License: {{ license }}
+URL: {{ git_url }}
+Source0: %{name}-%{version}.tar.gz
+BuildArch: {{ architecture.rocky }}
+Requires: {{ dependencies.rocky_common | join(',') }}
+
+BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root
+
+%description
+{{ title }}
+{{ description }}
+
+
+%prep
+%setup -q
+
+%build
+# empty
+
+%install
+make DESTDIR=%{buildroot} DIST=%{dist} NAV_VERS="%{version}-%{release}" install
+
+%clean
+rm -rf %{buildroot}
+
+%files
+/usr/share/cockpit/navigator/*
+
+%changelog
+* Tue Jul 14 2026 Rachit Hans <rhans@45drives.com> 0.5.14-1
+- fix: remove cockpit-system, cockpit-storaged, cockpit-packagekit from debian dependencies
+  to avoid pulling in network-manager
+* Wed Jul 08 2026 Rachit Hans <rhans@45drives.com> 0.5.13-2
+- adding support for proxmox trixie
+* Tue Jul 07 2026 Rachit Hans <rhans@45drives.com> 0.5.13-1
+- adding support for proxmox trixie
+* Tue Sep 16 2025 Jordan Keough <jkeough@45drives.com> 0.5.12-1
+- Building latest fixes
+* Tue Sep 16 2025 Rachit Hans <rhans@45drives.com> 0.5.11-4
+- build package
+* Tue Sep 16 2025 Rachit Hans <rhans@45drives.com> 0.5.11-3
+- build package + fixed deletion method of tmp files
+* Tue Sep 16 2025 Jordan Keough <jkeough@45drives.com> 0.5.11-2
+- Building testing package for temp files/folder selection fixes
+* Mon Sep 15 2025 Rachit Hans <rhans@45drives.com> 0.5.11-2
+- build package
+* Mon Sep 15 2025 Rachit Hans <rhans@45drives.com> 0.5.11-1
+- deleting tmp/navigotrs files and fixed auto  parent folder selection
+* Tue May 13 2025 Josh Boudreau <jboudreau@45drives.com> 0.5.10-2
+- update rocky dependencies
+* Mon Feb 24 2025 Brett Kelly <bkelly@45drives.com> 0.5.10-1
+- build for el9

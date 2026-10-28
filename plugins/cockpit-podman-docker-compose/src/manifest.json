@@ -1,0 +1,15 @@
+{
+    "version": 0,
+    "name": "cockpit-compose",
+    "require": {
+        "cockpit": "300"
+    },
+    "menu": {
+        "compose": {
+            "label": "Docker Compose",
+            "path": "index.html",
+            "order": 121
+        }
+    },
+    "content-security-policy": "script-src 'self' 'unsafe-inline' 'unsafe-eval'; script-src-elem 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' 'unsafe-hashes'; style-src-elem 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'"
+}

@@ -1,0 +1,164 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
+@use "page.scss";
+
+.sensors-adapter {
+    color: var(--pf-t--global--text--color--subtle);
+    margin-block: var(--pf-t--global--spacer--md);
+}
+
+.sensors-card td.sensors-value-critical {
+    color: var(--pf-t--global--text--color--status--danger--default);
+    font-weight: var(--pf-t--global--font--weight--body--bold);
+}
+
+.sensors-card td.sensors-value-warning {
+    color: var(--pf-t--global--text--color--status--warning--default);
+    font-weight: var(--pf-t--global--font--weight--body--bold);
+}
+
+.sensors-history {
+    display: flex;
+    flex-direction: column;
+    gap: var(--pf-t--global--spacer--md);
+}
+
+.sensors-history-summary {
+    color: var(--pf-t--global--text--color--subtle);
+}
+
+.sensors-chart {
+    position: relative;
+    inline-size: 100%;
+
+    svg {
+        display: block;
+        overflow: visible;
+    }
+}
+
+.sensors-chart-grid {
+    stroke: var(--pf-t--global--border--color--default);
+    stroke-width: 1;
+}
+
+.sensors-chart-axis {
+    fill: var(--pf-t--global--text--color--subtle);
+    font-size: var(--pf-t--global--font--size--xs);
+}
+
+.sensors-chart-line {
+    fill: none;
+    stroke: var(--pf-t--global--color--brand--default);
+    stroke-width: 2;
+    stroke-linejoin: round;
+}
+
+.sensors-chart-threshold {
+    line {
+        stroke-dasharray: 6 4;
+        stroke-width: 1.5;
+    }
+
+    text {
+        font-size: var(--pf-t--global--font--size--xs);
+    }
+}
+
+.sensors-chart-threshold-warning {
+    line { stroke: var(--pf-t--global--color--status--warning--default); }
+    text { fill: var(--pf-t--global--text--color--status--warning--default); }
+}
+
+.sensors-chart-threshold-danger {
+    line { stroke: var(--pf-t--global--color--status--danger--default); }
+    text { fill: var(--pf-t--global--text--color--status--danger--default); }
+}
+
+.sensors-chart-hover {
+    line {
+        stroke: var(--pf-t--global--border--color--hover);
+        stroke-dasharray: 2 2;
+    }
+
+    circle {
+        fill: var(--pf-t--global--color--brand--default);
+        stroke: var(--pf-t--global--background--color--primary--default);
+        stroke-width: 2;
+    }
+}
+
+.sensors-chart-tooltip {
+    position: absolute;
+    pointer-events: none;
+    padding-block: var(--pf-t--global--spacer--xs);
+    padding-inline: var(--pf-t--global--spacer--sm);
+    border-radius: var(--pf-t--global--border--radius--small);
+    background: var(--pf-t--global--background--color--inverse--default);
+    color: var(--pf-t--global--text--color--inverse);
+    font-size: var(--pf-t--global--font--size--sm);
+    white-space: nowrap;
+}
+
+.sensors-status-icon-critical {
+    color: var(--pf-t--global--icon--color--status--danger--default);
+}
+
+.sensors-status-icon-warning {
+    color: var(--pf-t--global--icon--color--status--warning--default);
+}
+
+.sensors-status-icon-ok {
+    color: var(--pf-t--global--icon--color--status--success--default);
+}
+
+.sensors-toolbar {
+    padding-block-end: 0;
+}
+
+.sensors-loading {
+    display: block;
+    margin-inline: auto;
+}
+
+.sensors-tab-body {
+    margin-block-start: var(--pf-t--global--spacer--md);
+}
+
+.sensors-original-name {
+    color: var(--pf-t--global--text--color--subtle);
+    font-size: var(--pf-t--global--font--size--sm);
+}
+
+.sensors-row-hidden td {
+    opacity: 0.6;
+}
+
+.sensors-sparkline {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--pf-t--global--spacer--sm);
+    white-space: nowrap;
+
+    polyline {
+        fill: none;
+        stroke: var(--pf-t--global--color--brand--default);
+        stroke-width: 1.5;
+        stroke-linejoin: round;
+    }
+}
+
+.sensors-sparkline-range {
+    color: var(--pf-t--global--text--color--subtle);
+    font-size: var(--pf-t--global--font--size--sm);
+}
+
+.sensors-overview-summary {
+    margin-block-end: var(--pf-t--global--spacer--md);
+}
+
+.sensors-overview-problems {
+    margin-block-start: var(--pf-t--global--spacer--sm);
+    padding: 0;
+    list-style: none;
+    font-size: var(--pf-t--global--font--size--sm);
+}

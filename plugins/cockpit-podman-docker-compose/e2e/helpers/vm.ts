@@ -1,0 +1,98 @@
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const run = promisify(execFile);
+
+// Mirrors ALL_VMS / SSH_BASE in scripts/test-vm.config.sh — SSH port is
+// SSH_BASE + index in this list. Kept here (not imported from the shell
+// script) since specs need it as plain data, not a shell variable.
+const ALL_VMS = [
+  'arch-podman', 'arch-docker', 'arch-both',
+  'debian-podman', 'debian-docker', 'debian-both',
+  'fedora-podman', 'fedora-docker', 'fedora-both',
+  'fedora-podman-rootful',
+  'fedora-full',
+] as const;
+const SSH_BASE = 2220;
+
+function sshPortFor(projectName: string): number {
+  const idx = ALL_VMS.indexOf(projectName as typeof ALL_VMS[number]);
+  if (idx === -1) throw new Error(`No known SSH port mapping for VM project "${projectName}" — see scripts/test-vm.config.sh`);
+  return SSH_BASE + idx;
+}
+
+/**
+ * Runs a command on the test VM over SSH, out-of-band from the app under
+ * test — for specs that need to mutate real container/host state from
+ * "another terminal" (e.g. restarting a container to produce real events)
+ * rather than through the UI, matching how a human would exercise the same
+ * scenario per docs/testing.md's manual scenarios.
+ *
+ * Uses execFile (argv array), NOT a shell string — `command` is passed to
+ * ssh as a single argv element, so any `$(...)`/quoting inside it is
+ * evaluated remotely by the VM's shell, never locally on the host. Building
+ * this as one big interpolated shell string (the first version of this
+ * helper) silently ran `$(podman ps -q ...)` against the *host's own*
+ * podman/docker before ssh was ever invoked — command substitution isn't
+ * blocked by double quotes, so the "remote" command never actually reached
+ * the VM, and failed every time with the host's (usually empty/absent)
+ * result instead of the guest's.
+ */
+export async function sshExec(projectName: string, command: string): Promise<string> {
+  const port = sshPortFor(projectName);
+  const { stdout } = await run(
+    'ssh',
+    [
+      '-p', String(port),
+      '-o', 'StrictHostKeyChecking=no',
+      '-o', 'UserKnownHostsFile=/dev/null',
+      '-o', 'ConnectTimeout=5',
+      '-o', 'BatchMode=yes',
+      'test@localhost',
+      command,
+    ],
+    // A hung SSH connection would otherwise silently eat the whole test's
+    // budget (no output, no error, just running out the clock) — fail fast
+    // instead so it reads as a real, diagnosable error.
+    { timeout: 15000 },
+  );
+  return stdout;
+}
+
+/**
+ * The container CLI to use for out-of-band state checks on a given VM project,
+ * matching the runtime the app itself ends up on there.
+ *
+ * The app defaults to Docker and only switches to Podman when Docker is absent
+ * (RuntimeToggle's startup suggestion, dismissed as "Continue" by baseData()). So
+ * podman-only VMs use podman; docker-only, "-both" and "fedora-full" VMs keep
+ * Docker. fedora-podman-rootful runs its engine as root, so its CLI needs sudo to
+ * see the same containers the app manages.
+ *
+ * Returns a command prefix, e.g. `${engineCli(vm)} ps -a`.
+ */
+export function engineCli(projectName: string): string {
+  if (projectName === 'fedora-podman-rootful') return 'sudo podman';
+  if (/-podman$/.test(projectName)) return 'podman';
+  return 'docker';
+}
+
+/**
+ * The separator the active runtime puts between project, service and index when it
+ * names a container: Docker Compose v2 builds `project-service-1`, podman-compose
+ * builds `project_service_1`.
+ *
+ * Derive expected container names from this rather than hardcoding one runtime's
+ * spelling — a hardcoded name silently passes on the runtime it was written against
+ * and fails everywhere else, and a separator-agnostic regex would also accept the
+ * app producing the *wrong* separator for the runtime in use.
+ */
+export function composeSep(projectName: string): '-' | '_' {
+  return engineCli(projectName).includes('podman') ? '_' : '-';
+}
+
+/** Container name as the active runtime spells it, e.g. `volumes-test-db-1`. */
+export function containerName(projectName: string, project: string, service: string, index = 1): string {
+  const sep = composeSep(projectName);
+  return `${project}${sep}${service}${sep}${index}`;
+}

@@ -1,0 +1,623 @@
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
+
+#
+# Copyright (C) 2020 Red Hat, Inc.
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
+
+import time
+
+import testlib
+
+
+@testlib.nondestructive
+class TestSuperuser(testlib.MachineCase):
+    def setUp(self):
+        super().setUp()
+        if self.has_sudo_rs:
+            self.sudo_prompt = "Password:"
+        else:
+            user = self.get_sudo_user()
+            self.sudo_prompt = f"Password for {user}:"
+
+    def testBasic(self):
+        b = self.browser
+        m = self.machine
+
+        # Log in with all defaults
+        self.login_and_go()
+        b.check_superuser_indicator("Administrative access")
+
+        b.assert_pixels("#topnav", "topnav-privileged")
+
+        # Drop privileges
+        b.open_superuser_dialog()
+        b.wait_text(".pf-v6-c-modal-box__title-text", "Switch to limited access")
+        b.click(".pf-v6-c-modal-box button:contains('Limit access')")
+        b.wait_not_present(".pf-v6-c-modal-box")
+        b.check_superuser_indicator("Limited access")
+
+        b.assert_pixels("#topnav", "topnav-unprivileged")
+
+        # Check they are still gone after logout
+        b.relogin()
+        b.leave_page()
+        b.check_superuser_indicator("Limited access")
+
+        # A reload should not lose privileges
+        b.become_superuser()
+        b.reload()
+        b.check_superuser_indicator("Administrative access")
+
+        # Drop privileges
+        b.drop_superuser()
+
+        # We want to be lectured again
+        self.restore_dir("/var/db/sudo/lectured")
+
+        m.execute("rm -rf /var/{db,lib}/sudo/lectured/admin")
+        # Sudo since 1.9.15 uses a UID not a username https://www.sudo.ws/releases/stable/#1.9.15
+        uid = m.execute("id -u admin").strip()
+        m.execute(f"rm -rf /var/{{db,lib}}/sudo/lectured/{uid}")
+
+        # Get the privileges back, this time in the mobile layout
+        b.set_layout("mobile")
+        b.open_superuser_dialog()
+        b.wait_text(".pf-v6-c-modal-box__title-text", "Switch to administrative access")
+        if "ubuntu" not in m.image and "debian" not in m.image:
+            b.wait_in_text(".pf-v6-c-modal-box", "We trust you have received the usual lecture")
+        b.wait_in_text(".pf-v6-c-modal-box", self.sudo_prompt)
+        b.set_input_text(".pf-v6-c-modal-box input", "foobar")
+        b.focus(".pf-v6-c-modal-box button:contains('Cancel')")
+        b.assert_pixels(".pf-v6-c-modal-box", "superuser-modal",
+                        chrome_hack_double_shots=True)
+        b.click(".pf-v6-c-modal-box button:contains('Authenticate')")
+        b.wait_not_present(".pf-v6-c-modal-box")
+        b.check_superuser_indicator("Administrative access")
+        b.set_layout("desktop")
+
+        # Check we still have them after logout
+        b.relogin()
+        b.leave_page()
+        b.check_superuser_indicator("Administrative access")
+
+        # Test that closing instead of cancelling the dialog keeps the "switch
+        # to administrative button"
+        b.open_superuser_dialog()
+        b.wait_text(".pf-v6-c-modal-box__title-text", "Switch to limited access")
+        b.click(".pf-v6-c-modal-box button:contains('Limit access')")
+        b.wait_not_present(".pf-v6-c-modal-box")
+        b.check_superuser_indicator("Limited access")
+
+        b.open_superuser_dialog()
+        b.click(".pf-v6-c-modal-box__close button")
+        b.check_superuser_indicator("Limited access")
+
+    @testlib.skipImage("sudo-rs does not support IO logging", "ubuntu-2604")
+    def testSudoIOLogging(self):
+        b = self.browser
+        m = self.machine
+
+        self.write_file("/etc/sudoers.d/log", "Defaults log_output\n")
+
+        # with explicitly becoming superuser
+        self.login_and_go(superuser=False)
+        b.check_superuser_indicator("Limited access")
+        b.become_superuser()
+        self.assertIn("00\n", m.execute("ls /var/log/sudo-io"))
+        b.logout()
+
+        # with immediate superuser at login
+        b.login_and_go()
+        b.check_superuser_indicator("Administrative access")
+        b.logout()
+
+    def testNoPasswd(self):
+        b = self.browser
+
+        # Log in with limited access
+        self.login_and_go(superuser=False)
+        b.check_superuser_indicator("Limited access")
+
+        # Give us password-less sudo and use it
+        self.write_file("/etc/sudoers.d/admin", "admin ALL=(ALL) NOPASSWD:ALL")
+        b.become_superuser(passwordless=True)
+
+    @testlib.skipBeiboot("no local PAM config in beiboot mode")
+    @testlib.skipOstree("mock-pam-conv not installed")
+    def testTwoPasswds(self):
+        b = self.browser
+        m = self.machine
+
+        # Log in with limited access
+        self.login_and_go(superuser=False)
+        b.check_superuser_indicator("Limited access")
+
+        # Configure the sudo PAM stack to make two prompts
+        if "debian" in m.image or "ubuntu" in m.image:
+            self.write_file("/etc/pam.d/sudo", """
+auth required pam_unix.so
+auth required mock-pam-conv-mod.so
+@include common-account
+@include common-session-noninteractive
+""")
+        else:
+            self.write_file("/etc/pam.d/sudo", """
+auth required pam_unix.so
+auth required mock-pam-conv-mod.so
+account include system-auth
+password include system-auth
+session include system-auth
+""")
+
+        b.open_superuser_dialog()
+        b.wait_text(".pf-v6-c-modal-box__title-text", "Switch to administrative access")
+        b.wait_in_text(".pf-v6-c-modal-box", self.sudo_prompt)
+        # Let the dialog sit there for 45 seconds, to test that this doesn't trigger a D-Bus timeout.
+        time.sleep(45)
+        b.set_input_text(".pf-v6-c-modal-box input", "foobar")
+        b.click(".pf-v6-c-modal-box button:contains('Authenticate')")
+        b.wait_in_text(".pf-v6-c-modal-box", "universe and everything")
+        b.set_input_text(".pf-v6-c-modal-box input", "42")
+        b.click(".pf-v6-c-modal-box button:contains('Authenticate')")
+        b.wait_not_present(".pf-v6-c-modal-box")
+        b.check_superuser_indicator("Administrative access")
+
+    def testWrongPasswd(self):
+        b = self.browser
+
+        fail_text = "Authentication failed, try again." if self.has_sudo_rs else "Sorry, try again"
+
+        # Log in with limited access
+        self.login_and_go(superuser=False)
+        b.check_superuser_indicator("Limited access")
+        b.open_superuser_dialog()
+        b.wait_text(".pf-v6-c-modal-box__title-text", "Switch to administrative access")
+        b.wait_in_text(".pf-v6-c-modal-box", self.sudo_prompt)
+        b.set_input_text(".pf-v6-c-modal-box input", "wrong")
+        b.click(".pf-v6-c-modal-box button:contains('Authenticate')")
+        b.wait_in_text(".pf-v6-c-modal-box", self.sudo_prompt)
+        b.set_input_text(".pf-v6-c-modal-box input", "wrong")
+        b.wait_in_text(".pf-v6-c-modal-box", fail_text)
+        b.set_input_text(".pf-v6-c-modal-box input", "wronger")
+        b.click(".pf-v6-c-modal-box button:contains('Authenticate')")
+        b.wait_in_text(".pf-v6-c-modal-box", self.sudo_prompt)
+        b.wait_in_text(".pf-v6-c-modal-box", fail_text)
+        b.set_input_text(".pf-v6-c-modal-box input", "wrongest")
+        b.click(".pf-v6-c-modal-box button:contains('Authenticate')")
+        b.wait_text(".pf-v6-c-modal-box__title-text", "Problem becoming administrator")
+        b.wait_text_matches(".pf-v6-c-modal-box", r".*3 incorrect (password|authentication) attempts.*")
+        b.click(".pf-v6-c-modal-box button:contains('Close')")
+        b.wait_not_present(".pf-v6-c-modal-box")
+        b.check_superuser_indicator("Limited access")
+
+    def testNotAdmin(self):
+        b = self.browser
+        m = self.machine
+
+        # Remove special treatment of the "admin" group on Ubuntu.
+        # Our main test user is unfortunately called "admin" and has
+        # "admin" as its primary group.
+        #
+        if "ubuntu" in m.image:
+            self.sed_file("/^%admin/d", "/etc/sudoers")
+
+        m.execute(f"gpasswd -d admin {m.get_admin_group()}")
+
+        self.login_and_go()
+        b.check_superuser_indicator("Limited access")
+
+        b.open_superuser_dialog()
+        if not self.has_sudo_rs:
+            # sudo-ws always asks for password, sudo-rs rejects immediately
+            b.wait_text(".pf-v6-c-modal-box__title-text", "Switch to administrative access")
+            b.set_input_text(".pf-v6-c-modal-box input", "foobar")
+            b.click(".pf-v6-c-modal-box button:contains('Authenticate')")
+        b.wait_text(".pf-v6-c-modal-box__title-text", "Problem becoming administrator")
+        b.wait_in_text(".pf-v6-c-modal-box__body",
+                       "I'm sorry admin. I'm afraid I can't do that" if self.has_sudo_rs
+                       else "Admin is not in the sudoers file.")
+        b.click(".pf-v6-c-modal-box button.btn-cancel")
+        b.wait_not_present(".pf-v6-c-modal-box")
+
+        # no stray/hanging sudo process
+        testlib.wait(lambda: "sudo" not in m.execute("loginctl --lines=0 user-status admin"), tries=5)
+        # cancelling auth dialog stops sudo (you can't do that without a prompt)
+        b.open_superuser_dialog()
+        if self.has_sudo_rs:
+            b.click(".pf-v6-c-modal-box button:contains('Close')")
+        else:
+            b.wait_in_text(".pf-v6-c-modal-box", "Switch to administrative access")
+            b.wait_in_text(".pf-v6-c-modal-box", self.sudo_prompt)
+            status = m.execute("loginctl --lines=0 user-status admin")
+            self.assertIn("sudo", status)
+            if not m.ws_container:
+                self.assertIn("cockpit-askpass", status)
+            b.click(".pf-v6-c-modal-box button:contains('Cancel')")
+        b.wait_not_present(".pf-v6-c-modal-box")
+
+        testlib.wait(lambda: "sudo" not in m.execute("loginctl --lines=0 user-status admin"), tries=5)
+
+        # logging out cleans up pending sudo auth; user should either go to "State: closing" or disappear completely
+        b.open_superuser_dialog()
+        if self.has_sudo_rs:
+            b.click(".pf-v6-c-modal-box button:contains('Close')")
+        else:
+            b.wait_in_text(".pf-v6-c-modal-box", self.sudo_prompt)
+            if not m.ws_container:
+                self.assertIn("cockpit-askpass", m.execute("loginctl --lines=0 user-status admin"))
+            b.click(".pf-v6-c-modal-box button:contains('Cancel')")
+        b.wait_not_present(".pf-v6-c-modal-box")
+        b.logout()
+        testlib.wait(lambda: "sudo" not in m.execute("loginctl --lines=0 user-status admin || true"), tries=10)
+        self.assertNotIn("cockpit", m.execute("loginctl --lines=0 user-status admin || true"))
+
+    @testlib.skipBeiboot("no local overrides/PAM config in beiboot mode")
+    def testBrokenBridgeConfig(self):
+        b = self.browser
+        m = self.machine
+
+        self.write_file("/etc/cockpit/shell.override.json", """
+{
+  "bridges": [
+    {
+      "privileged": true,
+      "spawn": [
+        "sudo",
+        "-k",
+        "-A",
+        "cockpit-bridge",
+        "--privileged"
+      ]
+    }
+  ]
+}
+""")
+
+        # We don't want to be lectured in this test just to control
+        # the content of the dialog better.
+        m.execute("touch /var/{db,lib}/sudo/lectured/admin 2>/dev/null || true")
+
+        self.login_and_go(superuser=False)
+        b.check_superuser_indicator("Limited access")
+
+        b.open_superuser_dialog()
+        b.wait_text(".pf-v6-c-modal-box__title-text", "Problem becoming administrator")
+        b.wait_text_matches(".pf-v6-c-modal-box__body", "Sudo: [nN]o askpass program specified.*SUDO_ASKPASS")
+        b.click(".pf-v6-c-modal-box button.btn-cancel")
+        b.wait_not_present(".pf-v6-c-modal-box")
+        b.check_superuser_indicator("Limited access")
+
+    @testlib.skipBeiboot("no local overrides/PAM config in beiboot mode")
+    def testRemoveBridgeConfig(self):
+        m = self.machine
+        b = self.browser
+
+        self.login_and_go("/playground/pkgs", superuser=True)
+        b.leave_page()
+        b.check_superuser_indicator("Administrative access")
+        # superuser bridge is running
+        m.execute("pgrep -u root -a cockpit-bridge")
+
+        self.write_file("/etc/cockpit/shell.override.json", """
+{
+  "bridges": [ ]
+}
+""")
+
+        b.enter_page("/playground/pkgs")
+        b.click("#reload")
+        b.leave_page()
+        b.check_superuser_indicator("Limited access")
+        # superuser bridge goes away
+        m.execute("while pgrep -u root -a cockpit-bridge; do sleep 1; done", timeout=5)
+
+        # Try to become superuser - should show error about no methods available
+        b.open_superuser_dialog()
+        b.wait_in_text(".pf-v6-c-modal-box:contains('Problem becoming administrator')",
+                       "No methods to gain administrative access are available")
+        b.click(".pf-v6-c-modal-box button:contains('Close')")
+        b.wait_not_present(".pf-v6-c-modal-box:contains('Problem becoming administrator')")
+        b.check_superuser_indicator("Limited access")
+
+        # no banner for "running in limited access mode", there are no bridge configs
+        b.go("/system")
+        b.enter_page("/system")
+        b.wait_visible("#system_information_os_text")
+        b.wait_not_present(".pf-v6-c-alert:contains('Web console is running in limited access mode')")
+
+    @testlib.skipBeiboot("no local overrides/PAM config in beiboot mode")
+    def testSingleLabelBridgeConfig(self):
+        b = self.browser
+
+        # When there is a single labeled privileged bridge, Cockit will start it automatically.
+
+        self.write_file("/etc/cockpit/shell.override.json", """
+{
+  "bridges": [
+    {
+      "privileged": true,
+      "label": "Always fails",
+      "spawn": [
+        "/bin/bash", "-c", "echo >&2 'Hello from the bash method'; exit 1"
+      ]
+    }
+  ]
+}
+""")
+
+        self.login_and_go("/playground/pkgs", superuser=False)
+        b.leave_page()
+        b.check_superuser_indicator("Limited access")
+        b.open_superuser_dialog()
+        b.wait_text(".pf-v6-c-modal-box__title-text", "Problem becoming administrator")
+        b.wait_in_text(".pf-v6-c-modal-box__body", "Hello from the bash method")
+        b.click(".pf-v6-c-modal-box button.btn-cancel")
+        b.wait_not_present(".pf-v6-c-modal-box")
+        b.check_superuser_indicator("Limited access")
+
+    @testlib.skipBeiboot("no local overrides/PAM config in beiboot mode")
+    def testMultipleBridgeConfig(self):
+        b = self.browser
+        m = self.machine
+
+        self.write_file("/etc/cockpit/shell.override.json", """
+{
+  "bridges": [
+    {
+      "privileged": true,
+      "label": "Sudo",
+      "environ": [
+        "SUDO_ASKPASS=${libexecdir}/cockpit-askpass"
+      ],
+      "spawn": [
+        "sudo",
+        "-k",
+        "-A",
+        "cockpit-bridge",
+        "--privileged"
+      ]
+    },
+    {
+        "privileged": true,
+        "label": "Polkit",
+        "spawn": [
+            "pkexec",
+            "--disable-internal-agent",
+            "cockpit-bridge",
+            "--privileged"
+        ]
+    }
+  ]
+}
+""")
+
+        self.login_and_go("/playground/pkgs", superuser=False)
+        b.leave_page()
+        b.check_superuser_indicator("Limited access")
+
+        # Get admin rights with Polkit method
+        b.open_superuser_dialog()
+        b.wait_text(".pf-v6-c-modal-box__title-text", "Switch to administrative access")
+        b.set_val(".pf-v6-c-modal-box select", "Polkit")
+        b.wait_in_text(".pf-v6-c-modal-box select", "Polkit")
+        b.click(".pf-v6-c-modal-box button:contains('Authenticate')")
+        b.wait_in_text(".pf-v6-c-modal-box", "Please authenticate")
+        # wrong password
+        b.set_input_text(".pf-v6-c-modal-box input", "wrong")
+        b.click(".pf-v6-c-modal-box button:contains('Authenticate')")
+
+        # polkit only prompts once, so we expect Permission denied
+        b.wait_text(".pf-v6-c-modal-box__title-text", "Problem becoming administrator")
+        b.wait_in_text(".pf-v6-c-modal-box", "Not authorized")
+        b.click(".pf-v6-c-modal-box button:contains('Close')")
+
+        # try again with correct password
+        b.open_superuser_dialog()
+        b.wait_text(".pf-v6-c-modal-box__title-text", "Switch to administrative access")
+        b.set_val(".pf-v6-c-modal-box select", "Polkit")
+        b.wait_in_text(".pf-v6-c-modal-box select", "Polkit")
+        b.click(".pf-v6-c-modal-box button:contains('Authenticate')")
+        b.wait_in_text(".pf-v6-c-modal-box", "Please authenticate")
+        b.set_input_text(".pf-v6-c-modal-box input", "foobar")
+        b.click(".pf-v6-c-modal-box button:contains('Authenticate')")
+        b.wait_not_present(".pf-v6-c-modal-box")
+        b.check_superuser_indicator("Administrative access")
+
+        # Verify that sudo is not being used
+        self.assertEqual(m.execute(["pgrep", "-a", "sudo"], check=False).strip(), "")
+
+        # Drop them
+        b.open_superuser_dialog()
+        b.wait_text(".pf-v6-c-modal-box__title-text", "Switch to limited access")
+        b.click(".pf-v6-c-modal-box button:contains('Limit access')")
+        b.wait_not_present(".pf-v6-c-modal-box")
+        b.check_superuser_indicator("Limited access")
+
+        # On "new" OSes we expect the socket-based agent helper
+        if m.image == "debian-testing":
+            m.execute("test -S /run/polkit/agent-helper.socket")
+            # not suid
+            self.assertEqual(m.execute("stat -c %A /usr/lib/polkit-1/polkit-agent-helper-1").strip(),
+                             "-rwxr-xr-x")
+        # reminder for ourselves in the distant future to remove the legacy path in the bridge
+        elif m.image.startswith("rhel-10"):
+            m.execute("! test -e /run/polkit/agent-helper.socket")
+            # suid root helper
+            self.assertEqual(m.execute("stat -c %A /usr/lib/polkit-1/polkit-agent-helper-1").strip(),
+                             "-rwsr-xr-x")
+
+        # Run the regular sudo method, which should work as always
+        b.open_superuser_dialog()
+        b.wait_text(".pf-v6-c-modal-box__title-text", "Switch to administrative access")
+        b.set_val(".pf-v6-c-modal-box select", "Sudo")
+        b.wait_in_text(".pf-v6-c-modal-box select", "Sudo")
+        b.click(".pf-v6-c-modal-box button:contains('Authenticate')")
+        b.wait_in_text(".pf-v6-c-modal-box", self.sudo_prompt)
+        b.set_input_text(".pf-v6-c-modal-box input", "foobar")
+        b.click(".pf-v6-c-modal-box button:contains('Authenticate')")
+        b.wait_not_present(".pf-v6-c-modal-box")
+        b.check_superuser_indicator("Administrative access")
+
+    def testOverview(self):
+        b = self.browser
+
+        self.login_and_go("/system", superuser=False)
+        b.wait_in_text(".ct-limited-access-alert", "Web console is running in limited access mode.")
+        b.click(".ct-limited-access-alert button")
+        b.wait_text(".pf-v6-c-modal-box__title-text", "Switch to administrative access")
+        b.wait_in_text(".pf-v6-c-modal-box", self.sudo_prompt)
+        b.set_input_text(".pf-v6-c-modal-box input", "foobar")
+        b.click(".pf-v6-c-modal-box button:contains('Authenticate')")
+        b.wait_not_present(".pf-v6-c-modal-box")
+        b.wait_not_present(".ct-limited-access-alert")
+
+    def start_transient_unit_common(self):
+        b = self.browser
+        m = self.machine
+
+        # Log in with limited access
+        self.login_and_go(superuser=False)
+        b.check_superuser_indicator("Limited access")
+
+        if m.image.startswith('rhel-8-'):  # SELINUX-5411
+            self.addCleanup(m.execute, ("setenforce", "1"))
+            m.execute(("setenforce", "0"))
+
+        # Open the superuser dialog and enter wrong password
+        b.open_superuser_dialog()
+        b.wait_text(".pf-v6-c-modal-box__title-text", "Switch to administrative access")
+        b.wait_in_text(".pf-v6-c-modal-box", "Please authenticate to gain administrative access")
+        b.set_input_text(".pf-v6-c-modal-box input", "wrong")
+        b.click(".pf-v6-c-modal-box button:contains('Authenticate')")
+
+        # StartTransientUnit only prompts once, so we expect Permission denied
+        # after one wrong attempt
+        b.wait_text(".pf-v6-c-modal-box__title-text", "Problem becoming administrator")
+        b.wait_in_text(".pf-v6-c-modal-box", "Permission denied")
+        b.click(".pf-v6-c-modal-box button:contains('Close')")
+
+        # There is a strange issue with AsyncExitStack in the polkit agent code
+        # in the bridge that seems to only impact Python 3.6, resulting in the
+        # agent not being unregistered after the first attempt.  We're planning
+        # to move to Python 3.9 on RHEL 8 soon, but until we do that, we can
+        # workaround by logging out and logging back in.
+        if m.image.startswith('rhel-8-'):
+            b.logout()
+            b.login_and_go(superuser=False)
+
+        # Open the superuser dialog and use the right password this time
+        b.open_superuser_dialog()
+        b.wait_text(".pf-v6-c-modal-box__title-text", "Switch to administrative access")
+        b.wait_in_text(".pf-v6-c-modal-box", "Please authenticate to gain administrative access")
+        b.set_input_text(".pf-v6-c-modal-box input", "foobar")
+        b.click(".pf-v6-c-modal-box button:contains('Authenticate')")
+        b.wait_not_present(".pf-v6-c-modal-box")
+        b.check_superuser_indicator("Administrative access")
+
+        # Verify that neither sudo nor pkexec are being used
+        self.assertEqual(m.execute(["pgrep", "-a", "sudo"], check=False).strip(), "")
+        self.assertEqual(m.execute(["pgrep", "-a", "pkexec"], check=False).strip(), "")
+
+    @testlib.skipOstree("can't delete sudo")
+    def testStartTransientUnitNoSudo(self):
+        # Break sudo to force StartTransientUnit to be used
+        self.restore_file("/usr/bin/sudo")
+        self.machine.execute(["rm", "-f", "/usr/bin/sudo"])
+        self.start_transient_unit_common()
+
+    @testlib.skipOstree("can't replace sudo")
+    def testStartTransientUnitNoAskpass(self):
+        # sudo doesn't support -A: StartTransientUnit must be used
+        # we need to be a bit more explicit here because it might be a symlink
+        self.restore_file("/usr/bin/sudo")
+        self.machine.execute(["rm", "-f", "/usr/bin/sudo"])
+        self.machine.write("/usr/bin/sudo", """#!/bin/sh
+echo "no -A support!" >&2
+exit 1
+""", perm="0755")
+        self.start_transient_unit_common()
+
+
+@testlib.skipBeiboot("host switching disabled in beiboot mode")
+class TestSuperuserDashboard(testlib.MachineCase):
+    provision = {
+        "machine1": {"address": "10.111.113.1/20"},
+        "machine2": {"address": "10.111.113.2/20"},
+    }
+
+    def test(self):
+        b = self.browser
+        self.setup_provisioned_hosts()
+        self.enable_multihost(self.machine)
+
+        self.login_and_go()
+        b.go("/@10.111.113.2")
+        b.click('#machine-troubleshoot')
+        b.wait_visible('#hosts_setup_server_dialog')
+        b.wait_visible('#hosts_setup_server_dialog button:contains("Add")')
+        b.click('#hosts_setup_server_dialog button:contains("Add")')
+        b.wait_visible('#hosts_connect_server_dialog')
+        b.click('#hosts_connect_server_dialog button.pf-m-warning')
+        b.wait_in_text('#hosts_setup_server_dialog', "You are connecting to 10.111.113.2 for the first time.")
+        b.click('#hosts_setup_server_dialog button.pf-m-primary')
+        b.wait_in_text('#hosts_setup_server_dialog', "Unable to log in")
+        b.set_input_text("#login-custom-password", "foobar")
+        b.click('#hosts_setup_server_dialog button:contains("Log in")')
+        b.wait_not_present('#hosts_setup_server_dialog')
+
+        # There should be no superuser indicator in the Overview
+
+        b.go("/@10.111.113.2/system")
+        b.enter_page("/system", host="10.111.113.2")
+        b.wait_not_present(".ct-overview-header-actions button:contains('Administrative access')")
+        b.wait_not_present(".ct-overview-header-actions button:contains('Limited access')")
+        b.leave_page()
+
+        # The superuser indicator in the Shell should apply to machine2
+
+        b.check_superuser_indicator("Limited access")
+        b.become_superuser()
+        b.go("/@10.111.113.2/playground/test")
+        b.enter_page("/playground/test", host="10.111.113.2")
+        b.click(".super-channel button")
+        b.wait_in_text(".super-channel span", 'result: ')
+        self.assertIn('result: uid=0', b.text(".super-channel span"))
+
+        # Logging out and logging back in should give us immediate
+        # superuser on m2 (once we have logged in there).
+        b.relogin()
+        b.wait_visible('#hosts_connect_server_dialog')
+        b.click('#hosts_connect_server_dialog button.pf-m-warning')
+        b.wait_visible('#hosts_setup_server_dialog')
+        b.set_input_text("#login-custom-password", "foobar")
+        b.click('#hosts_setup_server_dialog button:contains("Log in")')
+        b.wait_not_present('#hosts_setup_server_dialog')
+        b.check_superuser_indicator("Administrative access")
+
+        b.enter_page("/playground/test", host="10.111.113.2")
+        b.click(".super-channel button")
+        b.wait_in_text(".super-channel span", 'result: ')
+        self.assertIn('result: uid=0', b.text(".super-channel span"))
+
+        b.drop_superuser()
+        b.click(".super-channel button")
+        b.wait_in_text(".super-channel span", 'access-denied')
+
+        # back to superuser on machine2
+        b.become_superuser()
+        user = self.machines["machine2"].execute("loginctl user-status admin")
+        self.assertIn("cockpit-bridge --privileged", user)
+        # no stray askpass process
+        self.assertNotIn("cockpit-askpass", user)
+        # logging out cleans up logind sessions on both machines
+        b.logout()
+        for m in [self.machine, self.machines["machine2"]]:
+            m.execute('while [ "$(loginctl show-user --property=State --value admin)" = "active" ]; do sleep 1; done')
+            self.assertNotIn("cockpit", "loginctl user-status admin")
+
+        self.allow_hostkey_messages()
+
+
+if __name__ == '__main__':
+    testlib.test_main()

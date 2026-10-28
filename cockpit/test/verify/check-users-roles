@@ -1,0 +1,108 @@
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
+
+#
+# Copyright (C) 2013 Red Hat, Inc.
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
+
+import testlib
+
+
+class TestRoles(testlib.MachineCase):
+
+    @testlib.nondestructive
+    def testBasic(self):
+        m = self.machine
+        b = self.browser
+
+        # Create a user without any role
+        m.execute("useradd user -s /bin/bash -c User")
+        m.execute("echo user:foobar | chpasswd")
+
+        # Give name to admin account
+        m.execute("usermod -c Administrator admin")
+
+        m.start_cockpit()
+
+        def login(user, password):
+            b.set_val("#login-user-input", user)
+            b.set_val("#login-password-input", password)
+            b.click('#login-button')
+
+        # login
+        b.open("/system")
+        b.wait_visible("#login")
+        login("user", "foobar")
+        b.enter_page("/system")
+        b.switch_to_top()
+        b.wait_text('#current-username', 'user')
+
+        b.go("/users#/user")
+        b.enter_page("/users")
+
+        admin_rol_sel = "#account-groups-form-group .pf-v6-c-label-group"
+
+        b.wait_text("#account-user-name", "user")
+        b.wait_visible("#account-locked[disabled]")
+        b.wait_visible('output#account-real-name')
+        b.wait_visible("#account-set-password:not([disabled])")
+        b.wait_not_present("#account-delete")
+        b.wait_not_present("#account-logout")
+        b.wait_not_in_text(admin_rol_sel, m.get_admin_group())
+
+        # Check permissions for admin account
+        b.go("/users")
+        b.wait_visible("#accounts-list tbody tr[data-row-id='admin'] td[data-label='Group'] .pf-v6-c-label.pf-m-blue:contains(admin)")
+        b.go("#/admin")
+        b.wait_text("#account-user-name", "admin")
+        b.wait_visible("#account-locked")
+        b.wait_visible('output#account-real-name')
+        b.wait_not_present("#account-set-password")
+        b.wait_not_present("#account-delete")
+        b.wait_not_present("#account-logout")
+        b.wait_not_present("#account-groups")
+        b.wait_in_text(admin_rol_sel, m.get_admin_group())
+
+        # Add admin role from the outside (and wait for it to stick)
+        b.go("#/user")
+        b.wait_text("#account-user-name", "user")
+
+        b.wait_not_in_text(admin_rol_sel, m.get_admin_group())
+        m.execute(f"usermod -a -G {m.get_admin_group()} user")
+        b.wait_in_text(admin_rol_sel, m.get_admin_group())
+
+        b.relogin("/users", "user", superuser=True)
+        b.wait_text("#account-user-name", "user")
+
+        # Check permissions for admin again
+        b.go("#/admin")
+        b.wait_text("#account-user-name", "admin")
+        b.wait_visible("#account-locked:not([disabled])")
+        b.wait_visible("input#account-real-name")
+        b.wait_visible("#account-set-password:not([disabled])")
+        b.wait_visible("#account-delete:not([disabled])")
+        # admin is not logged in, thus still disabled
+        b.wait_visible("#account-logout[disabled]")
+        b.wait_in_text(admin_rol_sel, m.get_admin_group())
+        b.wait_visible("#account-groups")
+
+    @testlib.nondestructive
+    def testDynamic(self):
+        m = self.machine
+        b = self.browser
+
+        self.addCleanup(m.execute, "groupdel docker || true")
+        m.execute("getent group docker >/dev/null || groupadd docker")
+
+        self.login_and_go("/users")
+        b.go("#/admin")
+
+        b.click("#account-groups > button")
+        b.wait_in_text(".pf-v6-c-menu", "docker")
+
+        m.execute("groupdel docker")
+        b.wait_not_in_text(".pf-v6-c-menu", "docker")
+
+
+if __name__ == '__main__':
+    testlib.test_main()

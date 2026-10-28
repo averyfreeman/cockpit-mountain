@@ -1,0 +1,83 @@
+/basic:
+  summary: Run browser integration for basic functionality
+  require:
+    - cockpit-machines
+    - cockpit-system
+    - cockpit-ws
+    # it's a Recommends:, but sometimes dnf ignores it
+    - virt-install
+    # required by tests
+    - podman
+    - dbus-tools
+    - firewalld
+    - libvirt-daemon-driver-storage-iscsi
+    - targetcli
+  test: ./browser.sh basic
+  duration: 60m
+
+  adjust:
+    # RHEL/ELN
+    - require+:
+        # required by TestMachinesCreate.testCreateUrlSource
+        - qemu-kvm-block-curl
+      when: distro ~ rhel or distro == fedora-eln
+
+    # Fedora split out qemu-virtiofsd
+    - require+:
+        - virtiofsd
+      when: distro ~ fedora
+
+    - require+:
+        # cockpit-machines dropped the SPICE Recommends: on Fedora 46+, explicitly install it.
+        # since qemu-char-spice is not available on fedora-eln, exclude it
+        - qemu-audio-spice
+        - qemu-char-spice
+        - qemu-ui-spice-core
+      when: distro ~ fedora and distro != fedora-eln
+
+/network:
+  summary: Run browser integration for network functionality
+  require:
+    - cockpit-machines
+    - cockpit-system
+    - cockpit-ws
+    # it's a Recommends:, but sometimes dnf ignores it
+    - virt-install
+    # required by tests
+    - podman
+    - dbus-tools
+    - firewalld
+  test: ./browser.sh network
+  duration: 60m
+
+  adjust:
+    # Fedora split out qemu-virtiofsd
+    - require+:
+        - virtiofsd
+      when: distro ~ fedora
+
+/storage:
+  summary: Run browser integration for storage functionality
+  require:
+    - cockpit-machines
+    - cockpit-system
+    - cockpit-ws
+    # it's a Recommends:, but sometimes dnf ignores it
+    - virt-install
+    # required by tests
+    - podman
+    - dbus-tools
+    - firewalld
+    - libvirt-daemon-driver-storage-iscsi
+    - libvirt-daemon-driver-storage-logical
+    - nfs-utils
+    - targetcli
+  test: ./browser.sh storage
+  duration: 60m
+
+  adjust:
+    # Fedora split out qemu-virtiofsd
+    - require+:
+        - virtiofsd
+        - libvirt-daemon-driver-storage-iscsi-direct
+      when: distro ~ fedora and distro != fedora-eln

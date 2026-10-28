@@ -1,0 +1,8 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
+@import "@xterm/xterm/css/xterm.css";
+
+.terminal {
+    /* 5px all around and on right +11 since the scrollbar is 11px wide */
+    padding-block: 5px;
+    padding-inline: 5px 16px;
+}

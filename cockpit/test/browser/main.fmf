@@ -1,0 +1,116 @@
+/main:
+  summary: Non-storage tests
+  require:
+    # ourself
+    - cockpit
+    - cockpit-packagekit
+    # build/test infra dependencies
+    - podman
+    # required by tests
+    - createrepo_c
+    - dnf-automatic
+    - firewalld
+    - glibc-all-langpacks
+    - libvirt-daemon-config-network
+    # for semanage
+    - policycoreutils-python-utils
+    - rpm-build
+    - sssd
+    - sssd-dbus
+    - subscription-manager
+    - targetcli
+    - tlog
+    - tuned
+  test: ./browser.sh main
+  duration: 1h
+
+  adjust:
+    # Fedora-only packages which are not available in CentOS/RHEL
+    - require+:
+        # required by TestLogin.testBasic
+        - tcsh
+        # HACK: RHEL has these bundled in cockpit-system, but Fedora doesn't; Provides: break in CentOS/RHEL 10
+        - cockpit-kdump
+        - cockpit-networkmanager
+        - cockpit-sosreport
+      when: distro ~ fedora
+
+    # Fedora ELN is Fedora with only "RHEL" packages
+    - require+:
+        # required by TestTeam
+        - NetworkManager-team
+        # required by TestNetworkingWifi
+        - hostapd
+        - kernel-modules-internal
+        - NetworkManager-wifi
+      when: distro ~ fedora and distro != fedora-eln
+
+    # RHEL only packages
+    - require+:
+        # required by TestUpdates.testKpatch
+        - kpatch
+        - kpatch-dnf
+      when: distro ~ rhel
+
+/storage-basic:
+  summary: Basic storage tests
+  require:
+    # ourself
+    - cockpit
+    - cockpit-storaged
+    # for at least swap metrics on storage page
+    - python3-pcp
+    # build/test infra dependencies
+    - podman
+    # required by tests
+    - cryptsetup
+    - dnf-automatic
+    - firewalld
+    - lvm2
+    - mdadm
+    - nfs-utils
+    - parted
+    - stratis-cli
+    - stratisd
+    - stratisd-tools
+    - subscription-manager
+    - targetcli
+    - udisks2-lvm2
+    - udisks2-iscsi
+  test: ./browser.sh storage-basic
+  duration: 1h
+
+  adjust:
+    # Fedora-only packages which are not available in CentOS/RHEL/Fedora ELN
+    - require+:
+        # required by TestStorageBtrfs
+        - udisks2-btrfs
+      when: distro ~ fedora and distro != fedora-eln
+
+/storage-extra:
+  summary: More expensive storage tests (LVM, LUKS, Anaconda)
+  require:
+    # ourself
+    - cockpit
+    - cockpit-storaged
+    # for at least swap metrics on storage page
+    - python3-pcp
+    # build/test infra dependencies
+    - podman
+    # required by tests
+    - createrepo_c
+    - cryptsetup
+    - dnf-automatic
+    - firewalld
+    - lvm2
+    - nfs-utils
+    - parted
+    - rpm-build
+    - stratis-cli
+    - stratisd
+    - subscription-manager
+    - targetcli
+    - udisks2-lvm2
+    - udisks2-iscsi
+  test: ./browser.sh storage-extra
+  duration: 1h

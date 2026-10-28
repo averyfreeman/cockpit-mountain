@@ -1,0 +1,710 @@
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
+
+#
+# Copyright (C) 2023 Red Hat, Inc.
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
+
+import os.path
+
+import storagelib
+import testlib
+
+
+@testlib.nondestructive
+@testlib.skipImage('no btrfs support', 'rhel-*', 'centos-*', 'fedora-eln')
+class TestStorageBtrfs(storagelib.StorageCase):
+    def setUp(self):
+        super().setUp()
+        self.allow_browser_errors("unable to obtain subvolumes for mount point.*")
+        self.allow_browser_errors("unable to obtain default subvolume for mount point.*")
+        self.allow_browser_errors("error: unable to run findmnt.*")
+        self.allow_browser_errors("error: findmnt.*")
+
+    def checkTeardownAction(self, row, label, text):
+        self.browser.wait_in_text(f".modal-footer-teardown tbody:nth-of-type({row}) td[data-label='{label}']", text)
+
+    def testBasic(self):
+        m = self.machine
+        b = self.browser
+
+        # Chinese name to test utf-8 encoding
+        # Emoji to test against lone surrogates e.g. 😄 -> ['\ud83d', '\ude04']
+        mount_name = "😄数据ö资料😄"
+        mount_point = f"/run/{mount_name}"
+        # btrfs requires a 128 MB
+        dev_1 = self.add_ram_disk(size=128)
+
+        self.login_and_go("/storage")
+        with b.wait_timeout(30):
+            b.wait_visible(self.card_row("Storage", name="sda"))
+
+        self.click_dropdown(self.card_row("Storage", name=dev_1), "Format")
+        self.dialog({"name": mount_name, "type": "btrfs", "mount_point": mount_point, "mount_options.ro": True})
+
+        # disk(s) are part of the volume card
+        b.wait_visible(self.card_row("Storage", location=mount_point))
+        # Use LANG=C.UTF-8 so distros without it set shows the label as we want it
+        fstab = m.execute(f"LANG=C.UTF-8 findmnt --fstab -n -o OPTIONS,LABEL {mount_point}")
+        self.assertIn("subvol=/", fstab)
+        self.assertIn(mount_name, fstab)
+        self.click_card_row("Storage", name="sda")
+
+        b.wait_text(self.card_desc("btrfs filesystem", "Label"), mount_name)
+
+        # Can't relabel a filesystem that is mounted read-only
+        b.wait_visible(self.card_desc_action("btrfs filesystem", "Label") + ":disabled")
+
+        # Unmount to change label
+        self.click_dropdown(self.card_row("btrfs filesystem", name="top-level"), "Unmount")
+        self.confirm()
+        b.wait_visible(self.card_row("btrfs filesystem", location=f"{mount_point} (not mounted)"))
+
+        label = "margarine"
+        b.click(self.card_desc_action("btrfs filesystem", "Label"))
+        self.dialog({"name": label})
+        b.wait_text(self.card_desc("btrfs filesystem", "Label"), label)
+
+        # Mount writable for the rest of the test
+        self.click_dropdown(self.card_row("btrfs filesystem", name="top-level"), "Mount")
+        self.dialog({"mount_options.ro": False})
+        b.wait_visible(self.card_row("btrfs filesystem", location=f"{mount_point}"))
+
+        # Change label
+        label = "butter"
+        b.click(self.card_desc_action("btrfs filesystem", "Label"))
+        self.dialog({"name": label})
+        b.wait_text(self.card_desc("btrfs filesystem", "Label"), label)
+
+        # detect new subvolume
+        subvol = os.path.join(mount_point, "cake")
+        m.execute(f"btrfs subvolume create {subvol}")
+        b.wait_visible(self.card_row("btrfs filesystem", name=os.path.basename(subvol)))
+
+        self.click_dropdown(self.card_row("btrfs filesystem", location=mount_point), "Unmount")
+        self.confirm()
+
+        b.wait_visible(self.card_row("btrfs filesystem", location=f"{mount_point} (not mounted)"))
+        self.click_dropdown(self.card_row("btrfs filesystem", name="top-level"), "Mount")
+        self.confirm()
+
+        b.wait_visible(self.card_row("btrfs filesystem", location=mount_point))
+        # try to mount a subvol
+        subvol_mount_point = "/run/kitchen"
+        self.click_dropdown(self.card_row("btrfs filesystem", name=os.path.basename(subvol)), "Mount")
+        self.dialog({"mount_point": subvol_mount_point})
+
+        b.wait_in_text(self.card_row("btrfs filesystem", location=subvol_mount_point), "cake")
+        b.wait_visible(self.card_row("btrfs filesystem", location=mount_point))
+
+        b.go("#/")
+        b.wait_visible(self.card("Storage"))
+
+        # podman subvolumes are hidden, Cockpit hides everything matching "containers/storage/btrfs/subvolumes"
+        m.execute(f"""
+        mkdir -p /run/kitchen/containers/storage/btrfs/subvolumes
+        btrfs subvolume create /run/kitchen/containers/storage/btrfs/subvolumes/containername
+
+        mkdir -p /run/kitchen/.local/share/containers/storage/btrfs/subvolumes
+        btrfs subvolume create /run/kitchen/.local/share/containers/storage/btrfs/subvolumes/grafana
+
+        btrfs subvolume create {subvol_mount_point}/pancake
+        """)
+
+        b.wait_in_text(self.card_row("Storage", name="pancake"), "btrfs subvolume")
+        b.wait_not_in_text("div[data-test-card-title='Storage']", "containername")
+        b.wait_not_in_text("div[data-test-card-title='Storage']", "grafana")
+
+        m.execute(f"""
+        btrfs subvolume create {mount_point}/candy
+        echo '{dev_1} /run/fstab auto nofail,subvol=/candy 0 0' >> /etc/fstab
+        """)
+
+        b.wait_visible(self.card_row("Storage", location="/run/fstab (not mounted)"))
+
+        # mount outside of fstab, should be cleaned up when re-formatting
+        m.execute(f"""
+            btrfs subvolume create {mount_point}/nonfstab
+            mkdir -p /run/basement
+            mount -o subvol=nonfstab {dev_1} /run/basement
+        """)
+
+        b.wait_visible(self.card_row("Storage", name="nonfstab"))
+
+        # Format the btrfs device
+        # The mount of /run/basement might take some time to be recognized by Cockpit
+        self.dialog_open_with_retry(lambda: self.click_dropdown(self.card_row("Storage", name="sda"), "Format"),
+                                    lambda: "/run/basement" in b.text("#dialog"))
+        self.checkTeardownAction(1, "Device", os.path.basename(dev_1))
+        self.checkTeardownAction(1, "Location", "/run/basement")
+        self.checkTeardownAction(1, "Action", "unmount, format")
+        self.checkTeardownAction(2, "Location", subvol_mount_point)
+        self.checkTeardownAction(2, "Action", "unmount, format")
+        self.checkTeardownAction(3, "Location", mount_point)
+        self.checkTeardownAction(3, "Action", "unmount, format")
+        self.dialog_set_val("type", "empty")
+        self.dialog_apply()
+
+        # subvolume is gone
+        b.wait_not_present(self.card_row("Storage", name="nonfstab"))
+
+        # All mounts should be gone
+        m.execute(f"! findmnt -n | grep {dev_1}")
+
+    def testCreateSubvolume(self):
+        m = self.machine
+        b = self.browser
+
+        self.login_and_go("/storage")
+
+        disk1 = self.add_ram_disk(size=140)
+        label = "test_subvol"
+        mount_point = "/run/butter"
+        subvol = "cake"
+
+        m.execute(f"mkfs.btrfs -L {label} {disk1}")
+        self.login_and_go("/storage")
+
+        # creation of btrfs partition can take a while on TF.
+        with b.wait_timeout(30):
+            b.wait_visible(self.card_row("Storage", name="sda"))
+
+        root_sel = self.card_row("Storage", name="sda") + " + tr"
+        self.check_dropdown_action_disabled(root_sel, "Create subvolume", "At least one subvolume needs to be mounted")
+
+        self.click_dropdown(root_sel, "Mount")
+        self.dialog({"mount_point": mount_point})
+        self.addCleanupMount(mount_point)
+        b.wait_in_text(self.card_row("Storage", location=mount_point), "btrfs subvolume")
+        self.click_dropdown(self.card_row("Storage", location=mount_point), "Create subvolume")
+
+        # Validation
+        self.dialog_wait_open()
+        self.dialog_apply_secondary()
+        self.dialog_wait_error("name", "Name cannot be empty")
+        self.dialog_set_val("name", "foo/bar")
+        self.dialog_apply_secondary()
+        self.dialog_wait_error("name", "Name cannot contain the character '/'.")
+        self.dialog_set_val("name", "a" * 256)
+        self.dialog_apply_secondary()
+        self.dialog_wait_error("name", "Name cannot be longer than 255 characters.")
+
+        # Without mount point
+        self.dialog_set_val("name", subvol)
+        self.dialog_apply_secondary()
+        self.dialog_wait_close()
+        b.wait_visible(self.card_row("Storage", name=subvol))
+        # no fstab entry
+        m.execute(f"! findmnt --fstab -n | grep subvol={subvol}")
+
+        subvol_mount = "quiche"
+        subvol_mount_point = "/run/oven"
+        self.click_dropdown(self.card_row("Storage", location=mount_point), "Create subvolume")
+
+        # With mount point
+        self.dialog_wait_open()
+        self.dialog_set_val("name", subvol_mount)
+        self.dialog_apply()
+        self.dialog_wait_error("mount_point", "Mount point cannot be empty")
+        self.dialog_set_val("mount_point", mount_point)
+        self.dialog_apply()
+        self.dialog_wait_error("mount_point", "Mount point is already used for btrfs subvolume top-level of test_subvol")
+        self.dialog_set_val("mount_point", subvol_mount_point)
+        self.dialog_apply()
+        self.dialog_wait_close()
+        self.addCleanupMount(subvol_mount_point)
+        b.wait_in_text(self.card_row("Storage", location=subvol_mount_point), "btrfs subvolume")
+
+        # Finding the correct subvolume parent from a non-mounted subvolume
+        m.execute(f"btrfs subvolume create {subvol_mount_point}/pizza")
+        self.click_dropdown(self.card_row("Storage", name="pizza"), "Create subvolume")
+        self.dialog({"name": "pineapple"}, secondary=True)
+        b.wait_in_text(self.card_row("Storage", name="pineapple"), "btrfs subvolume")
+
+        left_subvol_mount = "/run/left"
+        right_subvol_mount = "/run/right"
+
+        self.click_dropdown(self.card_row("Storage", location=mount_point), "Create subvolume")
+        self.dialog({"name": os.path.basename(left_subvol_mount), "mount_point": left_subvol_mount})
+        self.click_dropdown(self.card_row("Storage", location=mount_point), "Create subvolume")
+        self.dialog({"name": os.path.basename(right_subvol_mount), "mount_point": right_subvol_mount})
+        self.addCleanupMount(left_subvol_mount)
+        self.addCleanupMount(right_subvol_mount)
+
+        b.wait_in_text(self.card_row("Storage", location=left_subvol_mount), "btrfs subvolume")
+        b.wait_in_text(self.card_row("Storage", location=right_subvol_mount), "btrfs subvolume")
+
+        self.click_dropdown(self.card_row("Storage", location=left_subvol_mount), "Create subvolume")
+        self.dialog({"name": "links"}, secondary=True)
+        b.wait_in_text(self.card_row("Storage", name="links"), "btrfs subvolume")
+
+        self.click_dropdown(self.card_row("Storage", location=right_subvol_mount), "Create subvolume")
+        self.dialog({"name": "rechts"}, secondary=True)
+        b.wait_in_text(self.card_row("Storage", name="rechts"), "btrfs subvolume")
+
+        # Read only mount, cannot create subvolumes once /run/butter
+        # is unmounted.
+
+        ro_subvol = "/run/ro"
+        self.click_dropdown(self.card_row("Storage", location=mount_point), "Create subvolume")
+        self.dialog({"name": os.path.basename(ro_subvol), "mount_point": ro_subvol, "mount_options.ro": True})
+
+        # We can always create subvolumes as long as a single one is
+        # mounted, even read-only.
+
+        self.click_dropdown(self.card_row("Storage", location="/run/butter"), "Unmount")
+        self.confirm()
+
+        self.click_dropdown(self.card_row("Storage", location=ro_subvol), "Create subvolume")
+        self.dialog({"name": "bot"}, secondary=True)
+        b.wait_visible(self.card_row("Storage", name="bot"))
+
+    def testDeleteSubvolume(self):
+        m = self.machine
+        b = self.browser
+
+        self.login_and_go("/storage")
+
+        disk1 = self.add_ram_disk(size=140)
+        label = "test_subvol"
+        mount_point = "/run/butter"
+        m.execute(f"mkfs.btrfs -L {label} {disk1}")
+        self.login_and_go("/storage")
+
+        # creation of btrfs partition can take a while on TF.
+        with b.wait_timeout(30):
+            b.wait_visible(self.card_row("Storage", name="sda"))
+
+        root_sel = self.card_row("Storage", name="sda") + " + tr"
+        self.click_dropdown(root_sel, "Mount")
+        self.dialog({"mount_point": mount_point})
+        self.addCleanupMount(mount_point)
+
+        # No Delete button for the root subvolume
+        b.click(self.dropdown_toggle(root_sel))
+        b.wait_not_present(self.dropdown_action("Delete"))
+        b.click(self.dropdown_toggle(root_sel))
+
+        # Delete subvolume
+        subvol = "subvol"
+        self.click_dropdown(self.card_row("Storage", location=mount_point), "Create subvolume")
+        self.dialog({"name": subvol}, secondary=True)
+        b.wait_visible(self.card_row("Storage", name=subvol))
+
+        self.click_dropdown(self.card_row("Storage", name=subvol), "Delete")
+        self.checkTeardownAction(1, "Device", subvol)
+        self.checkTeardownAction(1, "Action", "delete")
+        self.confirm()
+        b.wait_not_present(self.card_row("Storage", name=subvol))
+
+        # Delete with subvolume with children
+        child_subvol = "child-subvol"
+        self.click_dropdown(self.card_row("Storage", location=mount_point), "Create subvolume")
+        self.dialog({"name": subvol}, secondary=True)
+        b.wait_visible(self.card_row("Storage", name=subvol))
+
+        self.click_dropdown(self.card_row("Storage", name=subvol), "Create subvolume")
+        self.dialog({"name": child_subvol}, secondary=True)
+        b.wait_visible(self.card_row("Storage", name=child_subvol))
+
+        self.click_dropdown(self.card_row("Storage", name=subvol), "Delete")
+        self.checkTeardownAction(1, "Device", child_subvol)
+        self.checkTeardownAction(1, "Action", "delete")
+        self.checkTeardownAction(2, "Device", subvol)
+        self.checkTeardownAction(2, "Action", "delete")
+        self.confirm()
+
+        b.wait_not_present(self.card_row("Storage", name=child_subvol))
+        b.wait_not_present(self.card_row("Storage", name=subvol))
+
+        # Delete with subvolume with children and self mounted
+        child_subvol = "child-subvol"
+        subvol_mount_point = "/run/delete"
+        self.click_dropdown(self.card_row("Storage", location=mount_point), "Create subvolume")
+        self.dialog({"name": subvol, "mount_point": subvol_mount_point})
+        b.wait_visible(self.card_row("Storage", location=subvol_mount_point))
+
+        self.click_dropdown(self.card_row("Storage", name=subvol), "Create subvolume")
+        self.dialog({"name": child_subvol}, secondary=True)
+        b.wait_visible(self.card_row("Storage", name=child_subvol))
+
+        # Unmount root subvolume and delete child-subvol. That will use the mountpoint of "subvol"
+        self.click_dropdown(root_sel, "Unmount")
+        self.confirm()
+
+        self.click_dropdown(self.card_row("Storage", name=child_subvol), "Delete")
+        self.confirm()
+        b.wait_not_present(self.card_row("Storage", name=child_subvol))
+
+        # Creating inside subvol will also use its mountpoint now
+        self.click_dropdown(self.card_row("Storage", name=subvol), "Create subvolume")
+        self.dialog({"name": child_subvol}, secondary=True)
+        b.wait_visible(self.card_row("Storage", name=child_subvol))
+
+        # Mount the root subvolume again so that we can delete the lot
+        self.click_dropdown(root_sel, "Mount")
+        self.confirm()
+
+        self.click_dropdown(self.card_row("Storage", name=subvol), "Delete")
+        self.checkTeardownAction(1, "Device", child_subvol)
+        self.checkTeardownAction(1, "Action", "delete")
+        self.checkTeardownAction(1, "Device", subvol)
+        self.checkTeardownAction(2, "Location", subvol_mount_point)
+        self.checkTeardownAction(2, "Action", "unmount, delete")
+        self.confirm()
+
+        b.wait_not_present(self.card_row("Storage", location=subvol_mount_point))
+        b.wait_not_present(self.card_row("Storage", name=subvol))
+
+        # Delete with subvolume which is mounted and busy
+        self.click_dropdown(self.card_row("Storage", location=mount_point), "Create subvolume")
+        self.dialog({"name": subvol, "mount_point": subvol_mount_point})
+        b.wait_visible(self.card_row("Storage", location=subvol_mount_point))
+        sleep_pid = m.spawn(f"cd {subvol_mount_point}; sleep infinity", "sleep")
+
+        self.click_dropdown(self.card_row("Storage", location=subvol_mount_point), "Delete")
+        self.checkTeardownAction(1, "Location", subvol_mount_point)
+        self.checkTeardownAction(1, "Action", "unmount, delete")
+        b.wait_in_text(".modal-footer-teardown tbody:nth-of-type(1)", "Currently in use")
+        b.click(".modal-footer-teardown tbody:nth-of-type(1) button")
+        b.wait_in_text(".pf-v6-c-popover", str(sleep_pid))
+
+        self.confirm()
+        b.wait_not_present(self.card_row("Storage", location=subvol_mount_point))
+
+        subvol = "new-subvol"
+        self.click_dropdown(self.card_row("Storage", location=mount_point), "Create subvolume")
+        self.dialog({"name": subvol, "mount_point": subvol_mount_point})
+
+        # We can not delete the last mounted subvolume
+
+        self.click_dropdown(root_sel, "Unmount")
+        self.confirm()
+
+        sel = self.card_row("Storage", location=subvol_mount_point)
+        self.check_dropdown_action_disabled(sel, "Delete", "The last mounted subvolume can not be deleted")
+
+        subvol2 = "subvol2"
+        subvol2_mount_point = "/run/subvol2"
+        child_subvol = "child-subvol"
+        self.click_dropdown(self.card_row("Storage", location=mount_point + " (not mounted)"), "Create subvolume")
+        self.dialog({"name": subvol2, "mount_point": subvol2_mount_point, "mount_options.ro": True})
+        b.wait_visible(self.card_row("Storage", location=subvol2_mount_point))
+        self.assertIn("ro", m.execute(f"findmnt -s -n -o OPTIONS {subvol2_mount_point}"))
+
+        self.click_dropdown(self.card_row("Storage", name=subvol2), "Create subvolume")
+        self.dialog({"name": child_subvol}, secondary=True)
+        b.wait_visible(self.card_row("Storage", name=child_subvol))
+
+        # Now we can delete "new-subvol"
+        self.click_dropdown(self.card_row("Storage", location=subvol_mount_point), "Delete")
+        self.confirm()
+
+        # And also "child-subvol". The readonly-ness of "subvol2" should not matter
+        self.click_dropdown(self.card_row("Storage", name=child_subvol), "Delete")
+        self.confirm()
+
+    def testMultiDevice(self):
+        m = self.machine
+        b = self.browser
+
+        self.login_and_go("/storage")
+
+        disk1 = self.add_ram_disk(size=140)
+        disk2 = self.add_loopback_disk(size=140)
+        label = "raid1"
+        mount_point = "/run/butter"
+        subvol_mount_point = "/run/cake"
+        subvol = "/run/butter/cake"
+        subvol2 = "/run/butter/bread"
+        subvol_name = os.path.basename(subvol)
+
+        m.execute(f"mkfs.btrfs -L {label} -d raid1 {disk1} {disk2}")
+        self.login_and_go("/storage")
+
+        # creation of btrfs partition can take a while on TF.
+        with b.wait_timeout(30):
+            b.wait_visible(self.card_row("Storage", name=label))
+
+        b.wait_in_text(self.card_row("Storage", name=os.path.basename(disk1)), "btrfs device")
+        b.wait_in_text(self.card_row("Storage", name=os.path.basename(disk2)), "btrfs device")
+
+        # We don't allow formatting of multi device btrfs filesystems
+        self.click_dropdown(self.card_row("Storage", name=os.path.basename(disk1)), "Format")
+        self.dialog_wait_open()
+        self.dialog_wait_title(f"{disk1} is in use")
+        self.dialog_cancel()
+        self.dialog_wait_close()
+
+        # mount /
+        self.click_dropdown(self.card_row("Storage", name=label) + " + tr", "Mount")
+        self.dialog({"mount_point": mount_point})
+        b.wait_visible(self.card_row("Storage", location=mount_point))
+        self.addCleanup(m.execute, f"while mountpoint -q {mount_point} && ! umount {mount_point}; do sleep 0.2; done;")
+
+        # create subvolume
+        m.execute(f"""
+            btrfs subvolume create {subvol}
+            btrfs subvolume create {subvol2}
+        """)
+        b.wait_visible(self.card_row("Storage", name=os.path.basename(subvol)))
+
+        self.click_dropdown(self.card_row("Storage", name=os.path.basename(subvol)), "Mount")
+        self.dialog({"mount_point": subvol_mount_point})
+        b.wait_visible(self.card_row("Storage", location=subvol_mount_point))
+        self.addCleanup(m.execute, f"while mountpoint -q {subvol_mount_point} && ! umount {subvol_mount_point}; do sleep 0.2; done;")
+
+        # devices overview
+        self.click_card_row("Storage", name=label)
+        b.wait_visible(self.card_row("btrfs volume", name=disk1))
+        b.wait_visible(self.card_row("btrfs volume", name=disk2))
+
+        # device details page
+        self.click_card_row("btrfs volume", name="sda")
+        b.wait_visible(self.card("btrfs device"))
+        b.wait_text(self.card_desc("btrfs device", "btrfs volume"), "raid1")
+        b.click(self.card_desc("btrfs device", "btrfs volume") + " button")
+        b.wait_visible(self.card("btrfs volume"))
+        b.wait_text(self.card_desc("btrfs volume", "Label"), label)
+
+        # unmount via main page
+        b.go("#/")
+        b.wait_visible(self.card("Storage"))
+
+        self.click_dropdown(self.card_row("Storage", location=subvol_mount_point), "Unmount")
+        self.confirm()
+        b.wait_visible(self.card_row("Storage", location=f"{subvol_mount_point} (not mounted)"))
+
+        self.click_dropdown(self.card_row("Storage", name=os.path.basename(subvol)), "Mount")
+        self.dialog({"mount_point": subvol_mount_point})
+        b.wait_visible(self.card_row("Storage", location=subvol_mount_point))
+
+        mount_options = m.execute(f"findmnt --fstab -n -o OPTIONS {subvol_mount_point}").strip()
+        self.assertIn(f"subvol={subvol_name}", mount_options)
+        self.assertEqual(mount_options.count(subvol_name), 1)
+
+        self.click_dropdown(self.card_row("Storage", name=os.path.basename(subvol2)), "Mount")
+        self.dialog_wait_open()
+        self.dialog_set_val("mount_point", subvol_mount_point)
+        self.dialog_apply()
+        self.dialog_wait_error("mount_point", f"Mount point is already used for btrfs subvolume {os.path.basename(subvol)} of raid1")
+        self.dialog_cancel()
+
+        self.click_dropdown(self.card_row("Storage", location=subvol_mount_point), "Unmount")
+        self.confirm()
+        b.wait_visible(self.card_row("Storage", location=f"{subvol_mount_point} (not mounted)"))
+
+        # Make sure we still have btrfs on both disks and have the entries in fstab
+        self.assertIn('TYPE="btrfs"', m.execute(f"blkid -p {disk1}"))
+        self.assertIn('TYPE="btrfs"', m.execute(f"blkid -p {disk2}"))
+        m.execute(f"findmnt --fstab -n {mount_point}")
+        m.execute(f"findmnt --fstab -n {subvol_mount_point}")
+
+        # Delete the whole thing
+        self.click_dropdown(self.card_row("Storage", name=label), "Delete filesystem")
+        self.confirm()
+
+        # Disks should be empty, fstab entries should be gone
+        m.execute(f"! findmnt --fstab -n {mount_point}")
+        m.execute(f"! findmnt --fstab -n {subvol_mount_point}")
+        m.execute(f"! blkid -p {disk1}")
+        m.execute(f"! blkid -p {disk2}")
+
+    def testDefaultSubvolume(self):
+        m = self.machine
+        b = self.browser
+
+        disk1 = self.add_ram_disk(size=140)
+        label = "test_subvol"
+        mount_point = "/run/butter"
+        subvol = "cake"
+        subvol_path = f"{mount_point}/{subvol}"
+
+        m.execute(f"mkfs.btrfs -L {label} {disk1}")
+        self.login_and_go("/storage")
+
+        # creation of btrfs partition can take a while on TF.
+        with b.wait_timeout(30):
+            b.wait_visible(self.card_row("Storage", name="sda"))
+
+        b.wait_in_text(self.card_row("Storage", name=os.path.basename(disk1)), "btrfs filesystem")
+
+        # Create a new btrfs subvolume and set it as default and mount it.
+        m.execute(f"""
+            mkdir -p {mount_point}
+            mount {disk1} {mount_point}
+            btrfs subvolume create {subvol_path}
+            btrfs subvolume set-default {subvol_path}
+            while mountpoint -q {mount_point} && ! umount {mount_point}; do sleep 0.2; done;
+            mount {disk1} {mount_point}
+        """)
+
+        # Show a warning for mismounting in details.
+        b.wait_visible(self.card_row("Storage", name=subvol))
+        b.wait_visible(self.card_row("Storage", name=subvol) + ' .ct-icon-exclamation-triangle')
+        self.click_card_row("Storage", name=subvol)
+        b.wait_text(self.card_desc("btrfs subvolume", "Name"), subvol)
+
+        # Mount automatically on /run/butter on boot
+        b.click(self.card_button("btrfs subvolume", f"Mount automatically on {mount_point} on boot"))
+        b.wait_not_present(self.card_button("btrfs subvolume", f"Mount automatically on {mount_point} on boot"))
+
+        # No warnings for either subvolume
+        b.go("#/")
+        self.click_card_row("Storage", name=disk1)
+        b.wait_visible(self.card("btrfs filesystem"))
+        b.wait_not_present(self.card_row("btrfs filesystem", name=subvol) + ' .ct-icon-exclamation-triangle')
+        b.wait_not_present(self.card_row("btrfs filesystem", name="/") + ' .ct-icon-exclamation-triangle')
+
+    def testLuksEncrypted(self):
+        m = self.machine
+        b = self.browser
+
+        disk = self.add_ram_disk(size=128)
+        label = "butter"
+        mount_point = "/run/butter"
+        passphrase = "einszweidrei"
+
+        m.execute(f"""
+            echo {passphrase} | cryptsetup luksFormat --pbkdf-memory 32768 {disk}
+            echo {passphrase} | cryptsetup luksOpen {disk} btrfs-test
+            mkfs.btrfs -L {label} /dev/mapper/btrfs-test
+        """)
+
+        self.login_and_go("/storage")
+        # creation of btrfs partition can take a while on TF.
+        with b.wait_timeout(30):
+            b.wait_visible(self.card_row("Storage", name="sda"))
+
+        # Make sure Cockpit hasn't mounted it in a secret
+        # place. This should only happen in Anaconda mode.
+        self.assertNotIn("/dev/mapper/btrfs-test", m.execute("findmnt"))
+
+        b.wait_in_text(self.card_row("Storage", name="sda"), "btrfs filesystem (encrypted)")
+        self.click_dropdown(self.card_row("Storage", name="sda") + " + tr", "Mount")
+        self.dialog({"mount_point": mount_point})
+
+        m.execute(f"""
+            umount {mount_point}
+            cryptsetup luksClose /dev/mapper/btrfs-test
+        """)
+        b.wait_in_text(self.card_row("Storage", name="sda"), "Locked data (encrypted)")
+        self.click_dropdown(self.card_row("Storage", name="sda"), "Unlock")
+        self.dialog({"passphrase": "einszweidrei"})
+        b.wait_in_text(self.card_row("Storage", name="sda"), "btrfs filesystem (encrypted)")
+
+        self.click_dropdown(self.card_row("Storage", name="sda") + " + tr", "Mount")
+        self.confirm()
+        b.wait_in_text(self.card_row("Storage", location=mount_point), "btrfs subvolume")
+
+    def testNoSubvolMount(self):
+        m = self.machine
+        b = self.browser
+
+        disk = self.add_ram_disk(size=128)
+        mount_point = "/run/butter"
+
+        m.execute(f"""
+            mkfs.btrfs -L butter {disk}
+            mkdir -p {mount_point}
+            mount {disk} {mount_point}
+            echo '{disk} {mount_point} auto defaults 0 0' >> /etc/fstab
+        """)
+
+        self.login_and_go("/storage")
+
+        self.click_card_row("Storage", name="sda")
+        b.wait_visible(self.card_row("btrfs filesystem", name="top-level"))
+
+    def testNothingMounted(self):
+        m = self.machine
+        b = self.browser
+
+        disk = self.add_ram_disk(size=128)
+
+        m.execute(f"mkfs.btrfs -L butter {disk}; mount {disk} {self.mnt_dir}; btrfs subvolume create {self.mnt_dir}/home; btrfs subvolume create {self.mnt_dir}/home/backups")
+        m.execute(f"while mountpoint -q {self.mnt_dir} && ! umount {self.mnt_dir}; do sleep 0.2; done;")
+
+        self.login_and_go("/storage")
+
+        self.click_card_row("Storage", name="sda")
+        b.wait_not_present(self.card_row("btrfs filesystem", name="home"))
+        b.wait_not_present(self.card_row("btrfs filesystem", name="backups"))
+
+        # Add some fstab entries. Cockpit should pick up the
+        # subvolumes mentioned in them and show them.
+
+        m.execute(f"echo >>/etc/fstab '{disk} {self.mnt_dir}/home auto noauto,subvol=home 0 0'")
+        m.execute(f"echo >>/etc/fstab '{disk} {self.mnt_dir}/backups auto noauto,subvol=home/backups 0 0'")
+
+        b.wait_text(self.card_row_col("btrfs filesystem", row_name="home", col_index=3), f"{self.mnt_dir}/home (not mounted)")
+        b.wait_text(self.card_row_col("btrfs filesystem", row_name="backups", col_index=3), f"{self.mnt_dir}/backups (not mounted)")
+
+    def testSnapshot(self):
+        m = self.machine
+        b = self.browser
+
+        disk = self.add_ram_disk(size=128)
+        mount_point = "/run/butter"
+
+        snapshot_dir = f"{mount_point}/snapshots"
+        subdir = f"{mount_point}/subdir"
+
+        m.execute(f"""
+            mkfs.btrfs -L butter {disk}
+            mkdir -p {mount_point}
+            mount {disk} {mount_point}
+            echo '{disk} {mount_point} auto defaults 0 0' >> /etc/fstab
+            btrfs subvolume create {subdir} {subdir}/foo {snapshot_dir}
+            btrfs subvolume snapshot {subdir} {snapshot_dir}/snap-1
+            btrfs subvolume snapshot {mount_point} {snapshot_dir}/snap-2
+        """)
+
+        self.login_and_go("/storage")
+
+        self.click_card_row("Storage", name=os.path.basename(subdir))
+        b.wait_text(self.card_desc("btrfs subvolume", "Name"), "subdir")
+        b.wait_visible(self.card_row("btrfs subvolume", table_index=2, name="snap-1"))
+
+        # Normal subvolume does not show under snapshots
+        b.wait_visible(self.card_row("btrfs subvolume", name="foo"))
+        b.wait_not_present(self.card_row("btrfs subvolume", table_index=2, name="foo"))
+
+        # Snapshot details
+        self.click_card_row("btrfs subvolume", table_index=2, name="snap-1")
+        b.wait_text(self.card_desc("btrfs subvolume", "Name"), "snapshots/snap-1")
+        b.wait_text(self.card_desc("btrfs subvolume", "Snapshot origin"), "subdir")
+
+        # Origin link works
+        b.click(self.card_button("btrfs subvolume", "subdir"))
+        b.wait_text(self.card_desc("btrfs subvolume", "Name"), "subdir")
+
+    def testOverMounting(self):
+        # Add a disk and make a btrfs with two subvolumes on it and
+        # then try to mount one in a way that would hide the other.
+
+        disk = self.add_ram_disk(size=128)
+
+        self.login_and_go("/storage")
+        self.click_dropdown(self.card_row("Storage", name=disk), "Format")
+        self.dialog({"name": "butter", "type": "btrfs", "mount_point": "/butter"})
+        self.click_dropdown(self.card_row("Storage", location="/butter"), "Create subvolume")
+        self.dialog({"name": "foo", "mount_point": "/foo"}, secondary=True)
+        self.click_dropdown(self.card_row("Storage", location="/butter"), "Create subvolume")
+        self.dialog({"name": "bar", "mount_point": "/foo/bar"}, secondary=True)
+
+        self.click_dropdown(self.card_row("Storage", location="/foo/bar (not mounted)"), "Mount")
+        self.confirm()
+        self.click_dropdown(self.card_row("Storage", location="/foo (not mounted)"), "Mount")
+        self.dialog_wait_open()
+        self.dialog_apply()
+        self.dialog_wait_error("mount_point", "Filesystems are already mounted below this mountpoint.")
+        self.dialog_wait_error("mount_point", f"{disk} on /foo/bar")
+        self.dialog_cancel()
+
+        self.click_dropdown(self.card_row("Storage", location="/foo/bar"), "Unmount")
+        self.confirm()
+
+
+if __name__ == '__main__':
+    testlib.test_main()

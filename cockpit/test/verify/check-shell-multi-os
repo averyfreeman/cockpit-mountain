@@ -1,0 +1,94 @@
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
+
+#
+# Copyright (C) 2013 Red Hat, Inc.
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
+
+import testlib
+
+
+@testlib.skipBeiboot("host switching disabled in beiboot mode")
+class TestRHEL8(testlib.MachineCase):
+    provision = {
+        "0": {"address": "10.111.113.1/20"},
+        "stock": {"address": "10.111.113.5/20", "image": "rhel-8-10"}
+    }
+
+    def logout_pf5(self, b: testlib.Browser) -> None:
+        b.switch_to_top()
+        b.wait_visible("#toggle-menu")
+        if (b.attr("#toggle-menu", "aria-expanded") != "true"):
+            b.click("#toggle-menu")
+        b.mouse('#logout', "click", scrollVisible=False)
+        b.wait_visible('#login')
+
+    def test(self) -> None:
+        """Verify forward/backward compatibility with an older bridge and ws protocol.
+
+        Testing that a development machine can directly login and via "Add
+        host" load the RHEL 8 shell, and vice-versa.
+        """
+
+        dev_m = self.machine
+        dev_b = self.browser
+
+        stock_m = self.machines['stock']
+        stock_m.execute("hostnamectl set-hostname stock")
+        self.enable_multihost(dev_m)
+
+        # Wait for connectivity between the two
+        stock_m.execute("ping -q -w5 -c5 10.111.113.1")
+        dev_m.execute("ping -q -w5 -c5 10.111.113.5")
+
+        self.allow_hostkey_messages()
+
+        dev_m.start_cockpit()
+
+        # dev → stock: direct login
+        dev_b.open("/=10.111.113.5")
+        dev_b.try_login()
+        dev_b.wait_in_text("#hostkey-message-1", "10.111.113.5")
+        dev_b.click('#login-button')
+        dev_b.wait_in_text("#hosts-sel", "admin@stock")
+        dev_b.enter_page("/system")
+        dev_b.wait_in_text(".ct-overview-header-hostname", "stock")
+        dev_b.wait_in_text(".ct-overview-header-hostname", "running Red Hat Enterprise Linux 8")
+        # Shell has been loaded from "stock_m" and is some old PF5
+        # version of Cockpit, so we can't use Browser.logout() which
+        # only works with current PF6 releases from main.
+        self.logout_pf5(dev_b)
+
+        # dev → stock: via shell Add host
+        dev_b.login_and_go()
+        dev_b.add_machine("10.111.113.5")
+        dev_b.wait_in_text(".ct-overview-header-hostname", "stock")
+        dev_b.wait_in_text(".ct-overview-header-hostname", "running Red Hat Enterprise Linux 8")
+        # Shell has been loaded from "dev_m" and thus is the current PF6 version
+        dev_b.logout()
+
+        dev_m.stop_cockpit()
+        dev_b.kill()
+
+        # stock → dev: direct login
+        stock_m.start_cockpit()
+        stock_b = self.new_browser(stock_m)
+        stock_b.open("/=10.111.113.1")
+        stock_b.try_login()
+        stock_b.wait_in_text("#hostkey-message-1", "10.111.113.1")
+        stock_b.click('#login-button')
+        dev_hostname = dev_m.execute("hostname").strip()
+        stock_b.wait_in_text("#hosts-sel", f"admin@{dev_hostname}")
+        stock_b.enter_page("/system")
+        stock_b.wait_in_text(".ct-overview-header-hostname", dev_hostname)
+        # Shell has been loaded from "dev_m" (via SSH) and thus is the current PF6 version
+        stock_b.logout()
+
+        # stock → dev: via shell Add host
+        stock_b.login_and_go()
+        stock_b.add_machine("10.111.113.1", expect_warning=False)
+        stock_b.wait_in_text(".ct-overview-header-hostname", dev_hostname)
+
+
+if __name__ == '__main__':
+    testlib.test_main()

@@ -1,0 +1,3699 @@
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/common/pywrap", sys.argv)
+# Run this with --help to see available options for tracing and debugging
+# See https://github.com/cockpit-project/cockpit/blob/main/test/common/testlib.py
+# "class Browser" and "class MachineCase" for the available API.
+
+import re
+import sys
+import time
+from contextlib import contextmanager
+from typing import Generator, Self, Sequence, TypedDict
+
+import testlib
+from lib.constants import DEFAULT_IDENTITY_PUB_FILE
+from machine.machine_core import ssh_connection
+
+REGISTRIES_CONF = """
+unqualified-search-registries = ["localhost:5000", "localhost:6000", "subdomain.local.localhost:7000"]
+
+[[registry]]
+  location = "localhost:80"
+  insecure = true
+
+[[registry]]
+  location = "localhost:5000"
+  insecure = true
+
+[[registry]]
+  location = "localhost:6000"
+  insecure = true
+
+[[registry]]
+  location = "subdomain.local.localhost:7000"
+  insecure = true
+"""
+
+NOT_RUNNING = ["Exited", "Stopped"]
+
+# image names used in tests
+IMG_ALPINE = "localhost/test-alpine"
+IMG_ALPINE_LATEST = IMG_ALPINE + ":latest"
+IMG_BUSYBOX = "localhost/test-busybox"
+IMG_BUSYBOX_LATEST = IMG_BUSYBOX + ":latest"
+IMG_REGISTRY = "localhost/test-registry"
+IMG_REGISTRY_LATEST = IMG_REGISTRY + ":latest"
+
+# nginx configuration to simulate a registry without search API (like ghcr.io)
+NGINX_DEFAULT_CONF = """
+server {
+  listen 80;
+  listen [::]:80;
+  server_name localhost;
+
+  location / {
+    proxy_pass http://localhost:5000/;
+  }
+
+  # Simulate a registry without search API, like ghcr.io
+  location ^~ /v2/_catalog {
+    return 403;
+  }
+}
+"""
+
+
+class ContainerList(TypedDict):
+    id: str
+    name: str
+    image: str
+    command: str
+    state: list[str] | str
+
+
+def showImages(browser: testlib.Browser) -> None:
+    if browser.attr("#containers-images .pf-v6-c-expandable-section__toggle button", "aria-expanded") == 'false':
+        browser.click("#containers-images .pf-v6-c-expandable-section__toggle button")
+
+
+def checkImage(browser: testlib.Browser, name: str, owner: str) -> None:
+    showImages(browser)
+    browser.wait_visible("#containers-images table")
+    browser.wait_js_func("""(function (first, last) {
+        let items = ph_select("#containers-images table tbody");
+        for (i = 0; i < items.length; i++)
+            if (items[i].innerText.trim().startsWith(first) && items[i].innerText.trim().includes(last))
+                return true;
+        return false;
+        })""", name, owner)
+
+
+@testlib.nondestructive
+class TestApplication(testlib.MachineCase):
+
+    def setUp(self) -> None:
+        super().setUp()
+        m = self.machine
+        m.execute("""
+            systemctl stop podman.service
+            # Ensure podman is really stopped, otherwise it keeps the containers/ directory busy
+            pkill -e -9 podman || true
+            while pgrep podman; do sleep 0.1; done
+            pkill -e -9 conmon || true
+            while pgrep conmon; do sleep 0.1; done
+            findmnt --list -otarget | grep /var/lib/containers/. | xargs -r umount
+            sync
+            """)
+
+        # backup/restore pristine podman state, so that tests can run on existing testbeds
+        self.restore_dir("/var/lib/containers")
+
+        self.addCleanup(m.execute, """
+            systemctl stop podman.service podman.socket
+
+            # HACK: system reset has 10s timeout, make that faster with an extra `stop`
+            # https://github.com/containers/podman/issues/21874
+            podman stop --time 0 --all
+            podman pod stop --time 0 --all
+
+            systemctl reset-failed podman.service podman.socket || true
+            podman system reset --force
+            pkill -e -9 podman || true
+            while pgrep podman; do sleep 0.1; done
+            pkill -e -9 conmon || true
+            while pgrep conmon; do sleep 0.1; done
+
+            # HACK: sometimes podman leaks mounts
+            findmnt --list -otarget | grep /var/lib/containers/. | xargs -r umount
+            sync
+            """)
+
+        # Create admin session
+        with open(DEFAULT_IDENTITY_PUB_FILE) as f:
+            authorized_keys = f.read()
+        m.write("/home/admin/.ssh/authorized_keys", authorized_keys, owner="admin:admin", perm="600")
+        self.admin_s = ssh_connection.SSHConnection(user="admin",
+                                                    address=m.ssh_address,
+                                                    ssh_port=m.ssh_port,
+                                                    identity_file=m.identity_file)
+
+        # Enable user service as well; copy our images (except cockpit/ws) from system
+        self.execute("""
+            systemctl --user stop podman.service
+            for img in $(ls /var/lib/test-images/*.tar | grep -v cockpitws); do podman load < "$img"; done
+            """, system=False)
+        self.addCleanup(self.execute, """
+            systemctl --user stop podman.service podman.socket
+            podman system reset --force
+            """, system=False)
+        self.addCleanup(self.execute, "podman rm --force --time 0 --all", system=False)
+        self.addCleanup(self.execute, "podman pod rm --force --time 0 --all", system=False)
+
+        self.allow_journal_messages("/run.*/podman/podman: couldn't connect.*")
+        self.allow_journal_messages(".*/run.*/podman/podman.*Connection reset by peer")
+
+        # old C bridge sometimes does that; not fixable any more
+        if m.image.startswith('rhel-8'):
+            self.allow_journal_messages(".*cockpit_http_stream_close: code should not be reached")
+
+        self.has_selinux = not any(img in m.image for img in ["arch", "debian", "ubuntu", "suse"])
+        self.has_cgroupsV2 = not m.image.startswith('rhel-8')
+
+        self.system_images_count = int(m.execute("podman images -n | wc -l").strip())
+        self.user_images_count = int(self.execute("podman images -n | wc -l", system=False).strip())
+
+        # allow console.error
+        self.allow_browser_errors(
+            ".*couldn't search registry \".*\": pinging container registry .*",
+            ".*Error occurred while connecting console: cannot resize session: cannot resize container.*",
+        )
+
+    def tearDown(self) -> None:
+        if self.getError():
+            # dump container logs for debugging
+            for auth in [False, True]:
+                print(f"----- {'system' if auth else 'user'} containers -----", file=sys.stderr)
+                self.execute("podman ps -a >&2", system=auth)
+                self.execute('for c in $(podman ps -aq); do echo "---- $c ----" >&2; podman logs $c >&2; done',
+                             system=auth)
+
+        super().tearDown()
+
+    def podman_version(self) -> tuple[int, ...]:
+        version = self.execute("podman -v", system=False).strip().split(' ')[-1]
+        # HACK: handle possible rc versions such as 4.4.0-rc2
+        return tuple(int(v.split('-')[0]) for v in version.split('.')[:3])
+
+    def getRestartPolicy(self, container_name: str, *, auth: bool) -> str:
+        cmd = f"podman inspect --format '{{{{.HostConfig.RestartPolicy}}}}' {container_name}"
+        return self.execute(cmd, system=auth).strip()
+
+    def waitNumImages(self, expected: int) -> None:
+        self.browser.wait_count("#containers-images table[aria-label='Images'] > tbody", expected)
+
+    def waitNumContainers(self, expected: int, *, auth: bool) -> None:
+        if auth and self.machine.ws_container:
+            extra = 1  # cockpit/ws
+        else:
+            extra = 0
+
+        self.browser.wait_count("#containers-containers tbody", expected + extra)
+
+    @contextmanager
+    def withContainerActionMenu(self, container: str, *, system: bool = True) -> Generator[None, None, None]:
+        b = self.browser
+        container_sel = self.getContainerSelector(container, system=system)
+        try:
+            b.click(f"{container_sel} .pf-v6-c-menu-toggle")
+            yield
+        finally:
+            b.click(f"{container_sel} .pf-v6-c-menu-toggle")
+            b.wait_not_present(".pf-v6-c-menu__item")
+
+    def getContainerSelector(self, container: str, *, system: bool = True) -> str:
+        name = f"{'0' if system else 'user'}-{container}"
+        return f'#containers-containers tbody tr[data-row-name="{name}"]'
+
+    def performContainerAction(self, container: str, cmd: str, *, system: bool = True) -> None:
+        b = self.browser
+        b.click(f"{self.getContainerSelector(container, system=system)} .pf-v6-c-menu-toggle")
+        b.click(self.getContainerAction(cmd))
+
+    def getContainerAction(self, cmd: str) -> str:
+        return f".pf-v6-c-menu__item:contains('{cmd}')"
+
+    def toggleExpandedContainer(self, container: str, *, system: bool = True) -> None:
+        b = self.browser
+        b.click(f"{self.getContainerSelector(container, system=system)} .pf-v6-c-table__toggle button")
+
+    def getContainerAttr(self, container: str, key: str, selector: str = "", *, system: bool = True) -> str:
+        b = self.browser
+        return b.text(f"{self.getContainerSelector(container, system=system)} > td[data-label={key}] {selector}")
+
+    def getImageSelector(self, image: str, *, system: bool = True) -> str:
+        name = f"{'0' if system else 'user'}-{image}"
+        return f'#containers-images tbody tr[data-row-name="{name}"]'
+
+    def openCreateContainerDialog(self, image: str, *, system: bool = True) -> None:
+        self.browser.click(f'{self.getImageSelector(image, system=system)} .ct-container-create')
+
+    def execute(self, cmd: str, *, system: bool, check: bool = True) -> str:
+        if system:
+            return self.machine.execute(cmd, check=check)
+        else:
+            return self.admin_s.execute(cmd, check=check)
+
+    def login(self, *, system: bool = True) -> None:
+        b = self.browser
+        self.login_and_go("/podman", superuser=system)
+        b.wait_visible("#app")
+        b.wait_not_in_text("#containers-containers", "Loading")
+
+    def waitPodRow(self, podName: str, *, present: bool = False) -> None:
+        if present:
+            self.browser.wait_visible("#table-" + podName)
+        else:
+            self.browser.wait_not_present("#table-" + podName)
+
+    def waitPodContainer(self, podName: str, containerList: Sequence[ContainerList], *, system: bool = True) -> None:
+        if len(containerList):
+            for container in containerList:
+                self.waitContainer(container["id"], auth=system, name=container["name"], image=container["image"],
+                                   cmd=container["command"], state=container["state"], pod=podName)
+        else:
+            if self.browser.val("#containers-containers-filter") == "all":
+                self.browser.wait_in_text("#table-" + podName + " .pf-v6-c-empty-state", "No containers in this pod")
+            else:
+                self.browser.wait_in_text("#table-" + podName + " .pf-v6-c-empty-state",
+                                          "No running containers in this pod")
+
+    def waitContainerRow(self, container: str, *, present: bool = True) -> None:
+        b = self.browser
+        if present:
+            b.wait_visible(f'#containers-containers td[data-label="Container"]:contains("{container}")')
+        else:
+            b.wait_not_present(f'#containers-containers td[data-label="Container"]:contains("{container}")')
+
+    def performPodAction(self, podName: str, podOwner: str, action: str) -> None:
+        b = self.browser
+
+        b.click(f"#pod-{podName}-{podOwner}-action-toggle")
+        b.click(f"ul.pf-v6-c-menu__list li > button.pod-action-{action.lower()}")
+        b.wait_not_present("ul.pf-v6-c-menu__list")
+
+    def getStartTime(self, container: str, *, auth: bool, check: bool = True) -> str:
+        # don't format the raw time strings from the API, force json format
+        out = self.execute("podman inspect --format '{{json .State.StartedAt}}' " + container,
+                           system=auth, check=check)
+        return out.strip().replace('"', '')
+
+    def waitRestart(self, container: str, old_start: str, *, auth: bool, check: bool = True) -> str:
+        for _ in range(10):
+            new_start = self.getStartTime(container, auth=auth, check=check)
+            if new_start > old_start:
+                return new_start
+            time.sleep(1)
+        else:
+            self.fail("Timed out waiting for StartedAt change")
+            return ''  # quiesce mypy, not reached
+
+    def setupRegistry(self) -> None:
+        m = self.machine
+
+        m.execute(f"""
+            podman run -d -p 5000:5000 --name registry --stop-timeout 0 {IMG_REGISTRY}
+            podman run -d -p 6000:5000 --name registry_alt --stop-timeout 0 {IMG_REGISTRY}
+            podman run -d -p 7000:5000 --name registry_subdomain --stop-timeout 0 {IMG_REGISTRY}
+            echo "127.0.0.1 subdomain.local.localhost" >> /etc/hosts
+        """)
+
+        # Add local insecure registry into registries conf
+        m.execute("mkdir -p /etc/containers/registries.conf.d")
+        m.write("/etc/containers/registries.conf.d/99-cockpit-podman-test.conf", REGISTRIES_CONF)
+        m.execute("systemctl stop podman.service")
+
+    def createQuadlet(self, name: str, podName: str | None = None, containerName: str | None = None,
+                      *, auth: bool = False, autostart: bool = True) -> None:
+        pod_option = f'Pod={podName}.pod' if podName else ''
+        containername_option = f'ContainerName={containerName}' if containerName else ''
+        stop_timeout = 'StopTimeout=0' if self.machine.image not in ['rhel-8-10'] else ''
+        quadlet = f"""
+[Unit]
+Description=Podman - {name}
+After=local-fs.target
+
+[Container]
+Image={IMG_BUSYBOX}
+Exec=sleep infinity
+{containername_option}
+{pod_option}
+{stop_timeout}
+
+[Install]
+WantedBy=multi-user.target default.target
+"""
+
+        service_file = f"/etc/containers/systemd/{name}.container"
+        if not auth:  # user session
+            service_file = f"/home/admin/.config/containers/systemd/{name}.container"
+
+        systemctl_cmd = "systemctl" if auth else "systemctl --user"
+        self.addCleanup(self.execute, f"{systemctl_cmd} daemon-reload", system=auth)
+        self.write_file(service_file, quadlet)
+        self.execute(f"{systemctl_cmd} daemon-reload", system=auth)
+        if autostart:
+            self.addCleanup(self.execute, f"{systemctl_cmd} stop {name}.service", system=auth)
+            self.execute(f"{systemctl_cmd} start {name}.service", system=auth)
+
+    def createQuadletPod(self, name: str, podName: str | None = None, *, auth: bool = False) -> None:
+        podName = podName if podName else name
+        quadlet = f"""
+[Pod]
+PodName={podName}
+"""
+        service_file = f"/etc/containers/systemd/{name}.pod"
+        if not auth:  # user session
+            service_file = f"/home/admin/.config/containers/systemd/{name}.pod"
+
+        systemctl_cmd = "systemctl" if auth else "systemctl --user"
+        self.addCleanup(self.execute, f"{systemctl_cmd} daemon-reload", system=auth)
+        self.write_file(service_file, quadlet)
+        self.addCleanup(self.execute, f"{systemctl_cmd} stop {name}-pod.service", system=auth)
+        self.execute(f"{systemctl_cmd} daemon-reload; {systemctl_cmd} start {name}-pod.service", system=auth)
+        self.execute(f"until {systemctl_cmd} is-active {name}-pod.service; do sleep 1; done", system=auth)
+
+    def createKubeDeployment(self, name: str, *, auth: bool = False) -> None:
+        kube_yaml = f"""
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {name}
+spec:
+  selector:
+    matchLabels:
+      app: {name}-pod
+  template:
+    spec:
+      containers:
+        - name: {name}
+          image: {IMG_BUSYBOX}
+          command: ["sleep", "infinity"]
+"""
+        kube = f"""
+[Unit]
+Description={name} kube deployment
+After=local-fs.target
+
+[Install]
+WantedBy=default.target
+
+[Kube]
+Yaml={name}.yaml
+"""
+        yaml_file = f"/etc/containers/systemd/{name}.yaml"
+        kube_file = f"/etc/containers/systemd/{name}-kube.kube"
+        if not auth:  # user session
+            yaml_file = f"/home/admin/.config/containers/systemd/{name}.yaml"
+            kube_file = f"/home/admin/.config/containers/systemd/{name}-kube.kube"
+
+        systemctl_cmd = "systemctl" if auth else "systemctl --user"
+        self.addCleanup(self.execute, f"{systemctl_cmd} daemon-reload", system=auth)
+        self.write_file(yaml_file, kube_yaml)
+        self.write_file(kube_file, kube)
+        self.execute(f"{systemctl_cmd} daemon-reload; {systemctl_cmd} start {name}-kube.service", system=auth)
+        self.addCleanup(self.execute, f"{systemctl_cmd} stop {name}-kube.service", system=auth)
+        self.execute(f"until {systemctl_cmd} is-active {name}-kube.service; do sleep 1; done", system=auth)
+
+    def testPods(self) -> None:
+        b = self.browser
+
+        self.login()
+
+        self.filter_containers("running")
+        if not self.machine.ws_container:
+            b.wait_in_text("#containers-containers", "No running containers")
+
+        # Run a pods as system
+        self.machine.execute("podman pod create --infra=false --name pod-1")
+
+        self.waitPodRow("pod-1", present=False)
+        self.filter_containers("all")
+        self.waitPodContainer("pod-1", [])
+
+        def get_pod_cpu_usage(pod_name: str) -> float:
+            cpu = self.browser.text(f"#table-{pod_name}-title .pod-cpu")
+            self.assertIn('%', cpu)
+            return float(cpu[:-1])
+
+        def get_pod_memory(pod_name: str) -> float:
+            memory = self.browser.text(f"#table-{pod_name}-title .pod-memory")
+            try:
+                value, unit = memory.split(' ')
+                self.assertIn(unit, ["GB", "MB", "kB", "B"])
+                return float(value)
+            except ValueError:
+                # no unit → only for 0 or not initialized yet
+                self.assertIn(memory, ["0", ""])
+                return 0
+
+        run_cmd = f"podman run -d --pod pod-1 --name test-pod-1-system --stop-timeout 0 {IMG_ALPINE} sleep 100"
+        containerId = self.machine.execute(run_cmd).strip()
+        self.waitPodContainer("pod-1", [{"name": "test-pod-1-system", "image": IMG_ALPINE,
+                                         "command": "sleep 100", "state": "Running", "id": containerId}])
+        cpu = get_pod_cpu_usage("pod-1")
+        b.wait(lambda: get_pod_memory("pod-1") > 0)
+
+        # Test that cpu usage increases
+        self.machine.execute("podman exec -d test-pod-1-system sh -c 'dd bs=1024 < /dev/urandom > /dev/null'")
+        b.wait(lambda: get_pod_cpu_usage("pod-1") > cpu)
+
+        self.machine.execute("podman pod stop -t0 pod-1")  # disable timeout, so test doesn't wait endlessly
+        self.waitPodContainer("pod-1", [{"name": "test-pod-1-system", "image": IMG_ALPINE,
+                                         "command": "sleep 100", "state": NOT_RUNNING, "id": containerId}])
+        self.filter_containers("running")
+        self.waitPodRow("pod-1", present=False)
+
+        self.filter_containers("all")
+        b.set_input_text('#containers-filter input', 'pod-1')
+        self.waitPodContainer("pod-1", [{"name": "test-pod-1-system", "image": IMG_ALPINE,
+                                         "command": "sleep 100", "state": NOT_RUNNING, "id": containerId}])
+        b.set_input_text('#containers-filter input', 'test-pod-1-system')
+        self.waitPodContainer("pod-1", [{"name": "test-pod-1-system", "image": IMG_ALPINE,
+                                         "command": "sleep 100", "state": NOT_RUNNING, "id": containerId}])
+
+        b.assert_pixels('#containers-containers', "pods", skip_layouts=["rtl", "mobile"])
+
+        # Check Pod Actions
+        self.performPodAction("pod-1", "system", "Start")
+        self.waitPodContainer("pod-1", [{"name": "test-pod-1-system", "image": IMG_ALPINE,
+                                         "command": "sleep 100", "state": "Running", "id": containerId}])
+
+        self.performPodAction("pod-1", "system", "Pause")
+        self.waitPodContainer("pod-1", [{"name": "test-pod-1-system", "image": IMG_ALPINE,
+                                         "command": "sleep 100", "state": "Paused", "id": containerId}])
+
+        self.performPodAction("pod-1", "system", "Unpause")
+        self.waitPodContainer("pod-1", [{"name": "test-pod-1-system", "image": IMG_ALPINE,
+                                         "command": "sleep 100", "state": "Running", "id": containerId}])
+
+        self.performPodAction("pod-1", "system", "Stop")
+        self.waitPodContainer("pod-1", [{"name": "test-pod-1-system", "image": IMG_ALPINE,
+                                         "command": "sleep 100", "state": NOT_RUNNING, "id": containerId}])
+
+        self.machine.execute("podman pod start pod-1")
+        self.waitPodContainer("pod-1", [{"name": "test-pod-1-system", "image": IMG_ALPINE,
+                                         "command": "sleep 100", "state": "Running", "id": containerId}])
+
+        old_start = self.getStartTime("test-pod-1-system", auth=True)
+        self.performPodAction("pod-1", "system", "Restart")
+        self.waitRestart("test-pod-1-system", old_start, auth=True)
+
+        self.performPodAction("pod-1", "system", "Delete")
+        b.click(".pf-v6-c-modal-box button:contains('Delete')")
+        # Alert should be shown, that running pods need to be force deleted.
+        b.wait_in_text(".pf-v6-c-modal-box__body .pf-v6-c-list", "test-pod-1-system")
+        b.click(".pf-v6-c-modal-box button:contains('Force delete')")
+        self.waitPodRow("pod-1", present=False)
+
+        b.click('#containers-filter button[aria-label="Reset"]')
+        self.machine.execute("podman pod create --infra=false --name pod-2")
+        self.waitPodContainer("pod-2", [])
+        run_cmd = f"podman run -d --pod pod-2 --name test-pod-2-system --stop-timeout 0 {IMG_ALPINE} sleep 100"
+        containerId = self.machine.execute(run_cmd).strip()
+        self.waitPodContainer("pod-2", [{"name": "test-pod-2-system", "image": IMG_ALPINE,
+                                         "command": "sleep 100", "state": "Running", "id": containerId}])
+        self.machine.execute("podman rm --force -t0 test-pod-2-system")
+        self.waitPodContainer("pod-2", [])
+        self.performPodAction("pod-2", "system", "Delete")
+        b.wait_not_in_text(".pf-v6-c-modal-box__body", "test-pod-2-system")
+        b.click(".pf-v6-c-modal-box button:contains('Delete')")
+        self.waitPodRow("pod-2", present=False)
+
+        # Volumes / mounts
+        self.machine.execute("podman pod create -p 9999:9999 -v /tmp:/app --name pod-3")
+        self.machine.execute("podman pod start pod-3")
+
+        self.waitPodContainer("pod-3", [])
+        # Verify 1 port mapping
+        b.wait_in_text("#table-pod-3-title .pod-details-ports-btn", "1")
+        b.click("#table-pod-3-title .pod-details-ports-btn")
+        b.wait_in_text(".pf-v6-c-popover__content", "0.0.0.0:9999 → 9999/tcp")
+        # Verify 1 mount
+        b.wait_in_text("#table-pod-3-title .pod-details-volumes-btn", "1")
+        b.click("#table-pod-3-title .pod-details-volumes-btn")
+        b.wait_in_text(".pf-v6-c-popover__content", "/tmp ↔ /app")
+
+    def testBasicSystem(self) -> None:
+        self._testBasic(auth=True)
+
+        b = self.browser
+
+        # Test dropping and gaining privileges
+        b.set_val("#containers-containers-owner", "all")
+        self.filter_containers("all")
+        self.execute("podman pod create --infra=false --name pod_user", system=False)
+        self.execute("podman pod create --infra=false --name pod_system", system=True)
+
+        checkImage(b, IMG_REGISTRY, "system")
+        checkImage(b, IMG_REGISTRY, "admin")
+        b.wait_visible("#containers-containers .pod-name:contains('pod_user')")
+        b.wait_visible("#containers-containers .pod-name:contains('pod_system')")
+        b.wait_visible("#containers-containers .container-name:contains('a')")
+        b.wait_visible("#containers-containers .container-name:contains('b')")
+
+        # Drop privileges - all system things should disappear
+        b.drop_superuser()
+        b.wait_not_present("#containers-containers .pod-name:contains('pod_system')")
+        b.wait_not_present("#containers-containers .container-name:contains('a')")
+        b.wait_visible("#containers-containers .pod-name:contains('pod_user')")
+        b.wait_visible("#containers-containers .container-name:contains('b')")
+        # Checking images is harder but if there would be more than one this would fail
+        b.wait_visible(f"#containers-images:contains('{IMG_REGISTRY}')")
+
+        # Owner select should disappear
+        b.wait_not_present("#containers-containers-owner")
+
+        # Also user selection in image download should not be visible
+        b.click("#image-actions-dropdown")
+        b.click("button:contains('Download new image')")
+
+        b.wait_text('div.pf-v6-c-modal-box header', 'Search for an image')
+        b.wait_visible("div.pf-v6-c-modal-box footer button:contains('Download'):disabled")
+        b.wait_not_present("#as-user")
+        b.click(".pf-v6-c-modal-box button:contains('Cancel')")
+        b.wait_not_present('div.pf-v6-c-modal-box')
+
+        # Gain privileges
+        b.become_superuser()
+
+        checkImage(b, IMG_REGISTRY, "system")
+        checkImage(b, IMG_REGISTRY, "admin")
+        b.wait_visible("#containers-containers .pod-name:contains('pod_user')")
+        b.wait_visible("#containers-containers .pod-name:contains('pod_system')")
+        b.wait_visible("#containers-containers .container-name:contains('a')")
+        b.wait_visible("#containers-containers .container-name:contains('b')")
+
+        # Owner select should appear
+        b.wait_visible("#containers-containers-owner")
+
+        # Also user selection in image download should be visible
+        b.click("#image-actions-dropdown")
+        b.click("button:contains('Download new image')")
+        b.wait_in_text('div.pf-v6-c-modal-box header', 'Search for an image')
+        b.wait_visible("div.pf-v6-c-modal-box footer button:contains('Download'):disabled")
+        b.wait_visible("#as-user")
+        b.click(".pf-v6-c-modal-box button:contains('Cancel')")
+        b.wait_not_present('div.pf-v6-c-modal-box')
+
+        # Check that when we filter only system stuff an then drop privileges that we show user stuff
+        b.set_val("#containers-containers-owner", "0")
+        b.wait_not_present("#containers-containers .pod-name:contains('pod_user')")
+        b.wait_not_present("#containers-containers .container-name:contains('b')")
+        # Checking images is harder but if there would be more than one this would fail
+        b.wait_visible(f"#containers-images:contains('{IMG_REGISTRY}')")
+
+        b.drop_superuser()
+        b.wait_visible("#containers-containers .pod-name:contains('pod_user')")
+        b.wait_visible("#containers-containers .container-name:contains('b')")
+        # Checking images is harder but if there would be more than one this would fail
+        b.wait_visible(f"#containers-images:contains('{IMG_REGISTRY}')")
+
+        # Check showing of entrypoint
+        b.click("#containers-containers-create-container-btn")
+        b.click("#create-image-image input")
+        b.click(f'button.pf-v6-c-menu__item:contains("{IMG_REGISTRY}")')
+        b.wait_val("#run-image-dialog-command", '/etc/docker/registry/config.yml')
+        b.wait_text("#run-image-dialog-entrypoint", '/entrypoint.sh')
+
+        # Deleting image will cleanup both command and entrypoint
+        b.click("button[aria-label='Clear input value']")
+        b.wait_val("#run-image-dialog-command", '')
+        b.wait_not_present("#run-image-dialog-entrypoint")
+
+        # Edited command will not be cleared
+        b.click("#create-image-image input")
+        time.sleep(1)  # wait for TypeaheadSelect focus shenanigans
+        b.click(f'button.pf-v6-c-menu__item:contains("{IMG_REGISTRY}")')
+        b.wait_val("#run-image-dialog-command", '/etc/docker/registry/config.yml')
+        b.set_input_text("#run-image-dialog-command", '/etc/docker/registry/config.yaml')
+        b.click("button[aria-label='Clear input value']")
+        b.wait_not_present("#run-image-dialog-entrypoint")
+        b.wait_val("#run-image-dialog-command", '/etc/docker/registry/config.yaml')
+
+        # Setting a new image will still keep the old command and not prefill it
+        b.click("#create-image-image input")
+        b.click(f'button.pf-v6-c-menu__item:contains("{IMG_ALPINE}")')
+        b.wait_visible("#run-image-dialog-pull-latest-image")
+        b.wait_val("#run-image-dialog-command", '/etc/docker/registry/config.yaml')
+        b.click(".pf-v6-c-modal-box button:contains('Cancel')")
+        b.wait_not_present('div.pf-v6-c-modal-box')
+
+        b.logout()
+
+        if self.machine.ws_container:
+            self.machine.execute("echo foobar | passwd --stdin root")
+            self.write_file("/etc/ssh/sshd_config.d/99-root-password.conf", "PermitRootLogin yes",
+                            post_restore_action="systemctl try-restart sshd")
+            self.machine.execute("systemctl try-restart sshd")
+
+        # Test that when root is logged in we don't present "user" and "system"
+        self.login_and_go("/podman", user="root", enable_root_login=True)
+        b.wait_visible("#app")
+
+        # `User Service is also available` banner should not be present
+        b.wait_not_present("#overview div.pf-v6-c-alert")
+        # There should not be any duplicate images listed
+        # The "busybox" and "alpine" images have been deleted by _testBasic.
+        showImages(b)
+        self.waitNumImages(self.system_images_count - 2)
+        # There should not be 'owner' selector
+        b.wait_not_present("#containers-containers-owner")
+
+        # Test the isSystem boolean for searching
+        # https://github.com/cockpit-project/cockpit-podman/pull/891
+        b.click("#containers-containers-create-container-btn")
+        b.set_input_text("#create-image-image input", "registry")
+        b.wait_visible('button.pf-v6-c-menu__item:contains("registry")')
+        self.confirm_modal("Cancel")
+
+    def testBasicUser(self) -> None:
+        self._testBasic(auth=False)
+
+    def _testBasic(self, *, auth: bool) -> None:
+        b = self.browser
+
+        def clickDeleteImage(image_sel: str) -> None:
+            b.click(f'{image_sel} .pf-v6-c-menu-toggle')
+            b.click(".pf-v6-c-menu button.btn-delete")
+
+        if not auth:
+            self.allow_browser_errors("Failed to start system podman.socket.*")
+
+        expected_ws = ""
+        if auth and self.machine.ws_container:
+            expected_ws += "ws"
+
+        self.login(system=auth)
+
+        # Check all containers
+        if auth:
+            checkImage(b, IMG_ALPINE, "system")
+            checkImage(b, IMG_BUSYBOX, "system")
+            checkImage(b, IMG_REGISTRY, "system")
+
+        checkImage(b, IMG_ALPINE, "admin")
+        checkImage(b, IMG_BUSYBOX, "admin")
+        checkImage(b, IMG_REGISTRY, "admin")
+
+        # Check order of images
+        text = b.text("#containers-images table")
+        if auth:
+            # all user images before all system images
+            self.assertRegex(text, ".*admin.*system.*")
+            self.assertNotRegex(text, ".*system.*admin.*")
+        else:
+            self.assertNotIn("system", text)
+        # images are sorted alphabetically
+        self.assertRegex(text, ".*/test-alpine.*/test-busybox.*/test-registry")
+
+        # build a dummy image so that the timestamp is "today" (for predictable pixel tests)
+        # ensure that CMD neither comes first (podman rmi leaves that layer otherwise)
+        # nor last (then the topmost layer does not match the image ID)
+        IMG_HELLO_LATEST = "localhost/test-hello:latest"
+        self.machine.execute(f"""set -eu; D={self.vm_tmpdir}/hello;
+        mkdir $D
+        printf 'FROM scratch\\nCOPY test.txt /\\nCMD ["/run.sh"]\\nCOPY test.txt /test2.txt\\n' > $D/Containerfile
+        echo hello > $D/test.txt""")
+        self.execute(f"podman build -t {IMG_HELLO_LATEST} {self.vm_tmpdir}/hello", system=auth)
+
+        # prepare image ids - much easier to pick a specific container
+        images: dict[str, str] = {}
+        for image in self.execute("podman images --noheading --no-trunc", system=auth).strip().split("\n"):
+            # <name> <tag> sha256:<sha> <other things>
+            items = image.split()
+            images[f"{items[0]}:{items[1]}"] = items[2].split(":")[-1]
+
+        # show image listing toggle
+        uid = '0' if auth else 'user'
+        hello_sel = f"#containers-images tbody tr[data-row-id=\"{uid}-{images[IMG_HELLO_LATEST]}\"]".lower()
+        b.wait_visible(hello_sel)
+        b.click(hello_sel + " td.pf-v6-c-table__toggle button")
+        b.click(hello_sel + " .pf-v6-c-menu-toggle")
+        b.wait_visible(".pf-v6-c-menu button.btn-delete")
+        b.wait_in_text("#containers-images tbody.pf-m-expanded tr .image-details:first-child", "Command/run.sh")
+        # Show history
+        b.click("#containers-images tbody.pf-m-expanded .pf-v6-c-tabs__list li:nth-child(2) button")
+        first_row_sel = "#containers-images .pf-v6-c-table__expandable-row.pf-m-expanded tbody:first-of-type"
+        b.wait_in_text(f"{first_row_sel} td[data-label=\"ID\"]",
+                       images[IMG_HELLO_LATEST][:12])
+        created_sel = f"{first_row_sel} td[data-label=\"Created\"]"
+        b.wait_text(f"{created_sel}", "less than a minute ago")
+        # topmost (last) layer
+        created_sel = f"{first_row_sel} td[data-label=\"Created by\"]"
+        b.wait_in_text(f"{created_sel}", "COPY")
+        b.wait_in_text(f"{created_sel}", "in /test2.txt")
+        # initial (first) layer
+        last_row_sel = "#containers-images .pf-v6-c-table__expandable-row.pf-m-expanded tbody:last-of-type"
+        b.wait_in_text(f"{last_row_sel} td[data-label=\"Created by\"]", "COPY")
+
+        self.execute(f"podman rmi {IMG_HELLO_LATEST}", system=auth)
+        b.wait_not_present(hello_sel)
+
+        # make sure no running containers shown; on CoreOS there's the cockpit/ws container
+        self.filter_containers('running')
+        if auth and self.machine.ws_container:
+            self.waitContainerRow("ws")
+        else:
+            b.wait_in_text("#containers-containers", "No running containers")
+
+        if auth:
+            # Run two containers as system (first exits immediately)
+            self.execute(f"podman run -d --name test-sh-system --stop-timeout 0 {IMG_ALPINE} sh", system=auth)
+            self.execute(f"podman run -d --name swamped-crate-system --stop-timeout 0 {IMG_BUSYBOX} sleep 1000",
+                         system=auth)
+
+        # Run two containers as admin (first exits immediately)
+        self.execute(f"podman run -d --name test-sh-user --stop-timeout 0 {IMG_ALPINE} sh", system=False)
+        self.execute(f"podman run -d --name swamped-crate-user --stop-timeout 0 {IMG_BUSYBOX} sleep 1000",
+                     system=False)
+
+        # Test owner filtering
+        if auth:
+            self.waitNumImages(self.user_images_count + self.system_images_count)
+            self.waitNumContainers(2, auth=True)
+
+            def verify_system() -> None:
+                self.waitNumImages(self.system_images_count)
+                b.wait_in_text("#containers-images", "system")
+                self.waitNumContainers(1, auth=True)
+                b.wait_in_text("#containers-containers", "system")
+
+            b.set_val("#containers-containers-owner", "0")
+            verify_system()
+            b.set_val("#containers-containers-owner", "all")
+            b.go("#/?owner=0")
+            verify_system()
+
+            def verify_user() -> None:
+                self.waitNumImages(self.user_images_count)
+                b.wait_in_text("#containers-images", "admin")
+                self.waitNumContainers(1, auth=False)
+                b.wait_in_text("#containers-containers", "admin")
+
+            b.set_val("#containers-containers-owner", "user")
+            verify_user()
+            b.set_val("#containers-containers-owner", "all")
+            b.go("#/?owner=user")
+            verify_user()
+
+            # changing to an invalid user keeps the current filter
+            b.go("#/?owner=huh")
+            b.wait_js_cond('window.location.hash === "#/?owner=user"')
+            verify_user()
+
+            b.set_val("#containers-containers-owner", "all")
+            self.waitNumImages(self.user_images_count + self.system_images_count)
+            self.waitNumContainers(2, auth=True)
+        else:  # No 'owner' selector when not privileged
+            b.wait_not_present("#containers-containers-owner")
+
+        user_containers: dict[str, str] = {}
+        system_containers: dict[str, str] = {}
+        for container in self.execute("podman ps --all --no-trunc", system=True).strip().split("\n")[1:]:
+            # <sha> <other things> <name>
+            items = container.split()
+            system_containers[items[-1]] = items[0]
+        for container in self.execute("podman ps --all --no-trunc", system=False).strip().split("\n")[1:]:
+            # <sha> <other things> <name>
+            items = container.split()
+            user_containers[items[-1]] = items[0]
+
+        # running busybox shown
+        if auth:
+            self.waitContainerRow("swamped-crate-system")
+            self.waitContainer(system_containers["swamped-crate-system"], auth=True, name='swamped-crate-system',
+                               image=IMG_BUSYBOX, cmd="sleep 1000", state='Running')
+
+        self.waitContainerRow("swamped-crate-user")
+        self.waitContainer(user_containers["swamped-crate-user"], auth=False, name='swamped-crate-user',
+                           image=IMG_BUSYBOX, cmd="sleep 1000", state='Running')
+
+        # exited alpine not shown
+        b.wait_not_in_text("#containers-containers", "alpine")
+
+        # show all containers and check status
+        b.go("#/?container=all")
+
+        # exited alpine under everything list
+        b.wait_visible("#containers-containers")
+        if auth:
+            self.waitContainer(system_containers["test-sh-system"], auth=True, name='test-sh-system',
+                               image=IMG_ALPINE, cmd='sh', state=NOT_RUNNING)
+
+        self.waitContainer(user_containers["test-sh-user"], auth=False, name='test-sh-user', image=IMG_ALPINE,
+                           cmd='sh', state=NOT_RUNNING)
+
+        self.performContainerAction("swamped-crate-user", "Delete", system=False)
+        self.confirm_modal("Cancel")
+
+        if auth:
+            self.performContainerAction("swamped-crate-system", "Delete", system=True)
+            self.confirm_modal("Cancel")
+
+        # Checked order of containers
+        expected = ["swamped-crate-user", "test-sh-user"]
+        if auth:
+            expected.extend(["swamped-crate-system", "test-sh-system"])
+        expected.extend([expected_ws])
+        b.wait_collected_text("#containers-containers .container-name", ''.join(sorted(expected)))
+
+        # show running container
+        self.filter_containers('running')
+        if auth:
+            self.waitContainer(system_containers["swamped-crate-system"], auth=True, name='swamped-crate-system',
+                               image=IMG_BUSYBOX, cmd="sleep 1000", state='Running')
+        self.waitContainer(user_containers["swamped-crate-user"], auth=False, name='swamped-crate-user',
+                           image=IMG_BUSYBOX, cmd="sleep 1000", state='Running')
+        # check exited alpine not in running list
+        b.wait_not_in_text("#containers-containers", "alpine")
+
+        # delete running container busybox using force delete
+        if auth:
+            self.performContainerAction("swamped-crate-system", "Delete", system=True)
+            self.confirm_modal("Force delete")
+            self.waitContainerRow("swamped-crate-system", present=False)
+
+        self.filter_containers("all")
+
+        self.performContainerAction("swamped-crate-user", "Delete", system=False)
+        self.confirm_modal("Force delete")
+        self.waitContainerRow("swamped-crate-user", present=False)
+
+        self.waitContainerRow("test-sh-user")
+        self.performContainerAction("test-sh-user", "Delete", system=False)
+        self.confirm_modal("Delete")
+        b.wait_not_in_text("#containers-containers", "test-sh-user")
+
+        if auth:
+            self.waitContainerRow("test-sh-system")
+            self.performContainerAction("test-sh-system", "Delete")
+            self.confirm_modal("Delete")
+            b.wait_not_in_text("#containers-containers", "test-sh-system")
+
+        # delete image busybox that hasn't been used
+        # First try to just untag and then remove with more tags
+        self.execute(f"podman tag {IMG_BUSYBOX} {IMG_BUSYBOX}:1", system=auth)
+        self.execute(f"podman tag {IMG_BUSYBOX} {IMG_BUSYBOX}:2", system=auth)
+        self.execute(f"podman tag {IMG_BUSYBOX} {IMG_BUSYBOX}:3", system=auth)
+        self.execute(f"podman tag {IMG_BUSYBOX} {IMG_BUSYBOX}:4", system=auth)
+
+        busybox_sel = f"#containers-images tbody tr[data-row-id=\"{uid}-{images[IMG_BUSYBOX_LATEST]}\"]".lower()
+        b.click(busybox_sel + " td.pf-v6-c-table__toggle button")
+
+        b.wait_in_text(busybox_sel + " + tr", f"{IMG_BUSYBOX}:1")
+        b.wait_in_text(busybox_sel + " + tr", f"{IMG_BUSYBOX}:2")
+        b.wait_in_text(busybox_sel + " + tr", f"{IMG_BUSYBOX}:3")
+        b.wait_in_text(busybox_sel + " + tr", f"{IMG_BUSYBOX}:4")
+
+        clickDeleteImage(busybox_sel)
+        self.assertTrue(b.get_checked(f".pf-v6-c-check__input[aria-label='{IMG_BUSYBOX_LATEST}']"))
+        b.set_checked(f".pf-v6-c-check__input[aria-label='{IMG_BUSYBOX}:1']", val=True)
+        b.set_checked(f".pf-v6-c-check__input[aria-label='{IMG_BUSYBOX}:3']", val=True)
+        b.set_checked(f".pf-v6-c-check__input[aria-label='{IMG_BUSYBOX_LATEST}']", val=False)
+        self.confirm_modal("Delete")
+        b.wait_in_text(busybox_sel + " + tr", f"{IMG_BUSYBOX_LATEST}")
+        b.wait_in_text(busybox_sel + " + tr", f"{IMG_BUSYBOX}:2")
+        b.wait_not_in_text(busybox_sel + " + tr", f"{IMG_BUSYBOX}:1")
+        b.wait_not_in_text(busybox_sel + " + tr", f"{IMG_BUSYBOX}:3")
+
+        clickDeleteImage(busybox_sel)
+        b.click("#delete-all")
+        self.assertTrue(b.get_checked(f".pf-v6-c-check__input[aria-label='{IMG_BUSYBOX_LATEST}']"))
+        self.assertTrue(b.get_checked(f".pf-v6-c-check__input[aria-label='{IMG_BUSYBOX}:2']"))
+        self.assertTrue(b.get_checked(f".pf-v6-c-check__input[aria-label='{IMG_BUSYBOX}:4']"))
+        self.confirm_modal("Delete")
+        self.confirm_modal("Force delete")
+        b.wait_not_present(busybox_sel)
+
+        # Check that we correctly show networking information
+        # Rootless don't have this info
+        if auth:
+            self.execute(f"podman run -dt --name net_check --stop-timeout 0 {IMG_ALPINE}", system=auth)
+            self.toggleExpandedContainer("net_check", system=auth)
+            b.wait_in_text(".pf-m-expanded .container-details-networking",
+                           self.execute("""
+                           podman inspect --format '{{.NetworkSettings.Gateway}}' net_check""", system=auth).strip())
+            b.wait_in_text(".pf-m-expanded .container-details-networking",
+                           self.execute("""
+                           podman inspect --format '{{.NetworkSettings.IPAddress}}' net_check""",
+                                        system=auth).strip())
+            b.wait_in_text(".pf-m-expanded .container-details-networking",
+                           self.execute("""
+                           podman inspect --format '{{.NetworkSettings.MacAddress}}' net_check""",
+                                        system=auth).strip())
+            self.execute("podman stop net_check", system=auth)
+            b.wait(lambda: self.execute("podman ps --all | grep -e net_check -e Exited", system=auth))
+            self.toggleExpandedContainer("net_check", system=auth)
+            sha = self.execute("podman inspect --format '{{.Id}}' net_check", system=auth).strip()
+            self.waitContainer(sha, auth=auth, state='Exited')
+
+        # delete image alpine that has been used by a container
+        self.execute(f"podman run -d --name test-sh4 --stop-timeout 0 {IMG_ALPINE} sh", system=auth)
+        # our pixel test expects both containers to be in state "Exited"
+        sha = self.execute("podman inspect --format '{{.Id}}' test-sh4", system=auth).strip()
+        self.waitContainer(sha, auth=auth, name="test-sh4", state='Exited')
+        if auth:
+            b.assert_pixels('#app', "overview", ignore=[".ignore-pixels"], skip_layouts=["rtl", "mobile"],
+                            mock={".image-created": "2 months ago", ".image-id": "d3241e050fc9"})
+        alpine_sel = f"#containers-images tbody tr[data-row-id=\"{uid}-{images[IMG_ALPINE_LATEST]}\"]".lower()
+        b.wait_visible(alpine_sel)
+        b.click(alpine_sel + " td.pf-v6-c-table__toggle button")
+        clickDeleteImage(alpine_sel)
+        self.confirm_modal("Delete")
+        self.confirm_modal("Force delete")
+        b.wait_not_present(alpine_sel)
+
+        b.wait_collected_text("#containers-containers .container-name", expected_ws)
+        self.execute(f"podman run -d --name c --stop-timeout 0 {IMG_REGISTRY} sh", system=auth)
+        b.wait_collected_text("#containers-containers .container-name", "c" + expected_ws)
+        self.execute(f"podman run -d --name a --stop-timeout 0 {IMG_REGISTRY} sh", system=auth)
+        b.wait_collected_text("#containers-containers .container-name", "ac" + expected_ws)
+
+        self.execute(f"podman run -d --name b --stop-timeout 0 {IMG_REGISTRY} sh", system=False)
+        if auth:
+            b.wait_collected_text("#containers-containers .container-name", "abc" + expected_ws)
+            self.execute(f"podman run -d --name doremi --stop-timeout 0 {IMG_REGISTRY} sh", system=False)
+            b.wait_collected_text("#containers-containers .container-name", "abcdoremi" + expected_ws)
+            b.wait(lambda: self.getContainerAttr("doremi", "State", "", system=False) in NOT_RUNNING)
+        else:
+            b.wait_collected_text("#containers-containers .container-name", "abc")
+
+        # Test intermediate images
+        b.wait_not_present(".listing-action")
+        tmpdir = self.execute("mktemp -d", system=auth).strip()
+        self.execute(f"echo 'FROM {IMG_REGISTRY}\nRUN ls' > {tmpdir}/Dockerfile", system=auth)
+        self.execute(f"podman build {tmpdir}", system=auth)
+
+        b.wait_not_in_text("#containers-images", "<none>:<none>")
+        b.click(".listing-action button:contains('Show intermediate images')")
+        b.wait_in_text("#containers-images", "<none>:<none>")
+        b.wait_text("#containers-images tbody:last-child td[data-label=Created]", "less than a minute ago")
+
+        b.click(".listing-action button:contains('Hide intermediate images')")
+        b.wait_not_in_text("#containers-images", "<none>:<none>")
+
+        # Intermediate images are not shown in create container dialog
+        b.click("#containers-containers-create-container-btn")
+        b.wait_text('div.pf-v6-c-modal-box header', 'Create container')
+        b.click("#create-image-image input")
+        b.wait_visible(f".pf-v6-c-menu__item:contains('{IMG_REGISTRY}')")
+        b.wait_not_present(".pf-v6-c-menu__item:contains('none')")
+        b.click(".pf-v6-c-modal-box .btn-cancel")
+        b.wait_not_present(".pf-v6-c-modal-box")
+
+        # Delete intermediate images
+        intermediate_image_sel = self.getImageSelector("<none>:<none>", system=auth)
+        b.click(".listing-action button:contains('Show intermediate images')")
+        clickDeleteImage(intermediate_image_sel)
+        self.confirm_modal("Delete")
+        b.wait_not_present(intermediate_image_sel)
+
+        # Create intermediate image and use it in a container
+        tmpdir = self.execute("mktemp -d", system=auth).strip()
+        self.execute(f"echo 'FROM {IMG_REGISTRY}\nRUN ls' > {tmpdir}/Dockerfile", system=auth)
+        IMG_INTERMEDIATE = 'localhost/test-intermediate'
+        self.execute(f"podman build -t {IMG_INTERMEDIATE} {tmpdir}", system=auth)
+        self.openCreateContainerDialog(f"{IMG_INTERMEDIATE}:latest", system=auth)
+        b.wait_text('div.pf-v6-c-modal-box header', 'Create container')
+        b.click("#create-image-create-btn")
+        b.wait_not_present("div.pf-v6-c-modal-box")
+        self.waitContainerRow(IMG_INTERMEDIATE)
+
+        # Integration tab should not crash with an intermediate image
+        # podman ps doesn't output the full ID
+        container_name = self.execute("podman ps --filter 'status=created' --format {{.Names}}", system=auth).strip()
+        container_id = self.execute(f"podman inspect --format {{{{.ID}}}} {container_name}", system=auth).strip()
+        uid = '0' if auth else 'user'
+        intermediate_sel = f"#containers-containers tbody tr[data-row-id='{uid}-{container_id}']"
+        b.click(intermediate_sel + " td.pf-v6-c-table__toggle button")
+        b.click(".pf-m-expanded button:contains('Integration')")
+
+        # Delete intermediate image which is in use
+        self.execute(f"podman untag {IMG_INTERMEDIATE}", system=auth)
+        clickDeleteImage(intermediate_image_sel)
+        self.confirm_modal("Delete")
+        self.confirm_modal("Force delete")
+        b.wait_not_in_text("#containers-images", "<none>:<none>")
+        b.wait_not_in_text("#containers-containers", IMG_INTERMEDIATE)
+
+        # Image without a Command, shows no Command. This is common for podman quadlets
+        IMG_ENTRYPOINT = "localhost/test-entrypoint"
+        IMG_ENTRYPOINT_LATEST = f"{IMG_ENTRYPOINT}:latest"
+        tmpdir = self.execute("mktemp -d", system=auth).strip()
+        self.addCleanup(self.execute, f"rm -r {tmpdir}", system=auth)
+        self.execute(f"echo 'FROM {IMG_REGISTRY}\nENTRYPOINT /entrypoint' > {tmpdir}/Dockerfile", system=auth)
+        self.execute(f"podman build -t {IMG_ENTRYPOINT} {tmpdir}", system=auth)
+
+        b.click(f"{self.getImageSelector(IMG_ENTRYPOINT_LATEST, system=auth)} td.pf-v6-c-table__toggle button")
+        b.wait_in_text("#containers-images tbody.pf-m-expanded tr .image-details", "/bin/sh -c /entrypoint")
+        b.wait_not_in_text("#containers-images tbody.pf-m-expanded tr .image-details", "Command")
+
+        self.openCreateContainerDialog(f"{IMG_ENTRYPOINT}:latest", system=auth)
+        b.wait_text('div.pf-v6-c-modal-box header', 'Create container')
+        b.set_input_text("#run-image-dialog-name", "no-cmd")
+        b.wait_visible("#run-image-dialog-command[value='']")
+        b.wait_text("#run-image-dialog-entrypoint", "/bin/sh -c /entrypoint")
+
+        b.click('.pf-v6-c-modal-box__footer #create-image-create-run-btn')
+        b.wait_not_present("div.pf-v6-c-modal-box")
+        self.waitContainerRow("no-cmd")
+        self.toggleExpandedContainer("no-cmd", system=auth)
+        b.wait_in_text("#containers-containers tbody tr:contains('no-cmd')", IMG_ENTRYPOINT)
+        b.wait_not_in_text("#containers-containers tbody tr:contains('no-cmd')", "Command")
+
+        sha = self.execute(f"podman inspect --format '{{{{.Id}}}}' {IMG_ENTRYPOINT}", system=auth).strip()
+        entrypoint_sel = f"#containers-images tbody tr[data-row-id=\"{uid}-{sha}\"]".lower()
+        clickDeleteImage(entrypoint_sel)
+        self.confirm_modal("Delete")
+        self.confirm_modal("Force delete")
+        b.wait_not_in_text("#containers-images", "<none>:<none>")
+
+    def testCommitUser(self) -> None:
+        self._testCommit(auth=False)
+
+    def testCommitSystem(self) -> None:
+        self._testCommit(auth=True)
+
+    def _testCommit(self, *, auth: bool) -> None:
+        b = self.browser
+        self.allow_browser_errors("Failed to commit container .* repository name must be lowercase")
+
+        self.login(system=auth)
+
+        # run a container (will exit immediately) and test the display of commit modal
+        self.execute(f"podman run -d --name test-sh0 --stop-timeout 0 {IMG_ALPINE} sh -c 'ls -a'", system=auth)
+
+        self.filter_containers("all")
+        self.waitContainerRow("test-sh0")
+        self.toggleExpandedContainer("test-sh0", system=auth)
+
+        self.performContainerAction("test-sh0", "Commit", system=auth)
+        b.wait_visible(".pf-v6-c-modal-box")
+
+        b.wait_in_text(".pf-v6-c-modal-box__description", "state of the test-sh0 container")
+
+        # Empty name yields warning
+        b.click("button:contains('Commit')")
+        b.wait_text("#commit-dialog-image-name-helper", "Image name is required")
+        b.wait_visible("button:contains('Commit'):disabled")
+        b.wait_visible("button:contains('Force commit')")
+        # Warning should be cleaned when updating name
+        b.set_input_text("#commit-dialog-image-name", "foobar")
+        b.wait_not_present("button:contains('Force commit')")
+        b.wait_not_present("#commit-dialog-image-name-helper")
+
+        # Existing name yields warning
+        b.set_input_text("#commit-dialog-image-name", IMG_ALPINE)
+        b.click("button:contains('Commit')")
+        b.wait_text("#commit-dialog-image-name-helper", "Image name is not unique")
+        b.wait_visible("button:contains('Commit'):disabled")
+        b.wait_visible("button:contains('Force commit')")
+        # Warning should be cleaned when updating tag
+        b.set_input_text("#commit-dialog-image-tag", "foobar")
+        b.wait_not_present("button:contains('Force commit')")
+        b.wait_not_present("#commit-dialog-image-name-helper")
+
+        # Check failing commit
+        b.set_input_text("#commit-dialog-image-name", "TEST")
+        b.click("button:contains('Commit')")
+        b.wait_in_text(".pf-v6-c-alert", "Failed to commit container test-sh0")
+        b.wait_in_text(".pf-v6-c-alert", "repository name must be lowercase")
+
+        # Test cancel
+        self.confirm_modal("Cancel")
+
+        # Force commit empty container
+        self.performContainerAction("test-sh0", "Commit", system=auth)
+        b.wait_visible(".pf-v6-c-modal-box")
+        # We prefill command
+        b.wait_val("#commit-dialog-command", 'sh -c "ls -a"')
+        # Test docker format
+        b.set_checked("#commit-dialog-docker", val=True)
+        b.click("button:contains('Commit')")
+        self.confirm_modal("Force commit")
+
+        # don't use waitNumImages() here, as we want to include anonymous images
+        def waitImageCount(expected: int) -> None:
+            if auth:
+                expected += self.system_images_count
+
+            b.wait_in_text("#containers-images", f"{expected} images")
+
+        waitImageCount(self.user_images_count + 1)
+        image_id = self.execute("podman images --sort created --format '{{.Id}}' | head -n 1", system=auth).strip()
+        manifest_type = self.execute("podman inspect --format '{{.ManifestType}}' " + image_id, system=auth).strip()
+        cmd = self.execute("podman inspect --format '{{.Config.Cmd}}' " + image_id, system=auth).strip()
+        self.assertIn("docker.distribution.manifest", manifest_type)
+        self.assertEqual("[sh -c ls -a]", cmd)
+
+        # Commit with name, tag, author and edited command
+        self.performContainerAction("test-sh0", "Commit", system=auth)
+        b.wait_visible(".pf-v6-c-modal-box")
+        b.set_input_text("#commit-dialog-image-name", "newname")
+        b.set_input_text("#commit-dialog-image-tag", "24")
+        b.set_input_text("#commit-dialog-author", "MM")
+        b.set_input_text("#commit-dialog-command", "sh -c 'ps'")
+
+        if auth:
+            b.assert_pixels(".pf-v6-c-modal-box", "commit", skip_layouts=["rtl"])
+
+        self.confirm_modal("Commit")
+
+        waitImageCount(self.user_images_count + 2)
+        self.assertEqual(self.execute("podman inspect --format '{{.Author}}' newname:24", system=auth).strip(), "MM")
+        self.assertEqual(self.execute("podman inspect --format '{{.Config.Cmd}}' newname:24", system=auth).strip(),
+                         "[sh -c ps]")
+        self.assertIn("vnd.oci.image.manifest",
+                      self.execute("podman inspect --format '{{.ManifestType}}' newname:24", system=auth).strip())
+
+        # Test commit of running container
+        self.execute(f"podman run -d --name test-sh2 --stop-timeout 0 {IMG_BUSYBOX} sleep 1000", system=auth)
+        self.performContainerAction("test-sh2", "Commit", system=auth)
+        b.wait_visible(".pf-v6-c-modal-box")
+        b.set_input_text("#commit-dialog-image-name", "newname")
+        self.confirm_modal("Commit")
+        waitImageCount(self.user_images_count + 3)
+        self.assertEqual(self.execute("podman inspect --format '{{.Config.Cmd}}' newname:latest",
+                                      system=auth).strip(),
+                         "[sleep 1000]")
+
+        # Test commit of running container with pause (also conflicting name through :latest)
+        # This only works on rootless with cgroupsv2
+        if auth or self.has_cgroupsV2:
+            self.performContainerAction("test-sh2", "Commit", system=auth)
+            b.wait_visible(".pf-v6-c-modal-box")
+            b.set_input_text("#commit-dialog-image-name", "newname")
+            b.set_checked("#commit-dialog-pause", val=True)
+            b.click("button:contains('Commit')")
+            self.confirm_modal("Force commit")
+            waitImageCount(self.user_images_count + 4)
+
+    def testDownloadImage(self) -> None:
+        b = self.browser
+        execute = self.execute
+
+        def prepare() -> None:
+            self.setupRegistry()
+            # Push busybox image to the local registries
+            self.execute(f"podman tag {IMG_BUSYBOX} localhost:5000/my-busybox; podman push localhost:5000/my-busybox",
+                         system=True)
+            self.execute(f"podman tag {IMG_BUSYBOX} localhost:6000/my-busybox; podman push localhost:6000/my-busybox",
+                         system=True)
+            # Untag busybox image which duplicates the image we are about to download
+            self.execute(f"podman rmi -f {IMG_BUSYBOX} localhost:5000/my-busybox localhost:6000/my-busybox",
+                         system=True)
+            self.execute(f"podman rmi -f {IMG_BUSYBOX}", system=False)
+
+        class DownloadImageDialog():
+            def __init__(self, test_obj: TestApplication, imageName: str,
+                         imageTag: str | None = None, user: str = "system"):
+                self.imageName = imageName
+                self.imageTag = imageTag
+                self.user = user
+                self.imageSha = ""
+                self.assertTrue = test_obj.assertTrue
+
+            def openDialog(self) -> Self:
+                # Open get new image modal
+                b.click("#image-actions-dropdown")
+                b.click("button:contains('Download new image')")
+                b.wait_text('div.pf-v6-c-modal-box header', 'Search for an image')
+                b.wait_visible("div.pf-v6-c-modal-box footer button:contains('Download'):disabled")
+
+                return self
+
+            def fillDialog(self) -> Self:
+                # Search for image specified with self.imageName and self.imageTag
+                b.click(f"#image-search-modal-owner-{self.user}")
+                b.set_val('#registry-select', "localhost:5000")
+                # HACK: Sometimes the value is not shown fully. FIXME
+                b.set_input_text("#search-image-dialog-name", self.imageName, value_check=False)
+                if self.imageTag:
+                    b.set_input_text(".image-tag-entry input", self.imageTag)
+
+                return self
+
+            def selectImageAndDownload(self) -> Self:
+                # Select and download the self.imageName image
+                b.click(f".pf-v6-c-data-list .image-name:contains('{self.imageName}')")
+                b.click("div.pf-v6-c-modal-box footer button:contains('Download')")
+                b.wait_not_present("div.pf-v6-c-modal-box")
+
+                return self
+
+            def expectDownloadErrorForNonExistingTag(self) -> Self:
+                title = f"Danger alert:Failed to download image localhost:5000/{self.imageName}:{self.imageTag}"
+                b.wait_in_text('h4.pf-v6-c-alert__title', title)
+
+                return self
+
+            def dismissNotification(self) -> Self:
+                b.click('.pf-v6-c-alert-group.pf-m-toast .pf-v6-c-alert .pf-v6-c-alert__action button')
+                b.wait_not_present('.pf-v6-c-alert-group.pf-m-toast .pf-v6-c-alert')
+
+                return self
+
+            def expectSearchErrorForNotExistingImage(self) -> Self:
+                b.wait_visible(f".pf-v6-c-modal-box__body:contains('No results for {self.imageName}')")
+                b.click(".pf-v6-c-modal-box button.btn-cancel")
+                b.wait_not_present(".pf-v6-c-modal-box__body")
+
+                return self
+
+            def expectDownloadSuccess(self) -> Self:
+                # Confirm that the modal dialog is not open anymore
+                b.wait_not_present('div.pf-v6-c-modal-box')
+                # Confirm that the image got downloaded
+                checkImage(b,
+                           f"localhost:5000/{self.imageName}:{self.imageTag or 'latest'}",
+                           "system" if self.user == "system" else "admin")
+
+                # Confirm that no error has happened
+                b.wait_not_present('h4.pf-v6-c-alert__title:contains("Failed to download image")')
+
+                # Find out this image ID
+                container_name = f"localhost:5000/{self.imageName}:{self.imageTag or 'latest'}"
+                self.imageSha = execute(f"podman inspect --format '{{{{.Id}}}}' {container_name}",
+                                        system=self.user == "system").strip()
+
+                return self
+
+            def deleteImage(self, *, force: bool = False, another: str | None = None) -> Self:
+                imageTagSuffix = ":" + (self.imageTag or 'latest')
+
+                # Select the image row
+
+                # show image listing toggle
+                imageId = f"{'0' if self.user == 'system' else 'user'}-{self.imageSha}"
+                sel = f"#containers-images tbody tr[data-row-id=\"{imageId}\"]"
+                b.wait_visible(sel)
+                b.click(sel + " td.pf-v6-c-table__toggle button")
+
+                # Click the delete icon on the image row
+                b.click(sel + " .pf-v6-c-menu-toggle")
+                b.click(".pf-v6-c-menu button.btn-delete")
+
+                if another:
+                    b.click("#delete-all")
+                    sel = f".pf-v6-c-check__input[aria-label='localhost:5000/{self.imageName}{imageTagSuffix}']"
+                    self.assertTrue(b.get_checked(sel))
+                    self.assertTrue(b.get_checked(f".pf-v6-c-check__input[aria-label='{another}']"))
+                    b.click("#delete-all")
+                    b.wait_visible("#btn-img-delete:disabled")
+
+                    b.set_checked(
+                        f".pf-v6-c-check__input[aria-label='localhost:5000/{self.imageName}{imageTagSuffix}']",
+                        val=True)
+                    b.set_checked(f".pf-v6-c-check__input[aria-label='{another}']", val=True)
+
+                # Confirm deletion in the delete dialog
+                b.click(".pf-v6-c-modal-box #btn-img-delete")
+
+                if force:
+                    # Confirm force delete
+                    b.click(".pf-v6-c-modal-box button:contains('Force delete')")
+
+                b.wait_not_present(sel)
+
+                return self
+
+        prepare()
+
+        self.login()
+
+        # Test registries
+        b.click("#image-actions-dropdown")
+        b.click("button:contains('Download new image')")
+        b.wait_text('div.pf-v6-c-modal-box header', 'Search for an image')
+        b.wait_visible("#image-search-modal-owner-admin")
+        # HACK: Sometimes the value is not shown fully. FIXME
+        b.set_input_text("#search-image-dialog-name", "my-busybox", value_check=False)
+
+        b.wait_visible(".pf-v6-c-data-list .image-name:contains('localhost:5000/my-busybox')")
+        b.wait_visible(".pf-v6-c-data-list .image-name:contains('localhost:6000/my-busybox')")
+        b.assert_pixels(".podman-search", "download", skip_layouts=["rtl"])
+
+        b.set_val('#registry-select', "localhost:6000")
+        b.wait_not_present(".pf-v6-c-data-list .image-name:contains('localhost:5000/my-busybox')")
+        b.wait_visible(".pf-v6-c-data-list .image-name:contains('localhost:6000/my-busybox')")
+        b.click(".pf-v6-c-modal-box button:contains('Cancel')")
+        b.wait_not_present('div.pf-v6-c-modal-box')
+
+        dialog0 = DownloadImageDialog(self, imageName='my-busybox', user="system")
+        dialog0.openDialog() \
+            .fillDialog() \
+            .selectImageAndDownload() \
+            .expectDownloadSuccess()
+        dialog0.deleteImage()
+
+        dialog1 = DownloadImageDialog(self, imageName='my-busybox', user="admin")
+        dialog1.openDialog() \
+            .fillDialog() \
+            .selectImageAndDownload() \
+            .expectDownloadSuccess()
+        # test recognition/deletion of multiple image tags
+        second_tag = "localhost/copybox:latest"
+        b.click(f"#containers-images tr[data-row-id='user-{dialog1.imageSha}'] td.pf-v6-c-table__toggle button")
+        self.execute(f"podman tag localhost:5000/my-busybox {second_tag}", system=False)
+        b.wait_in_text("#containers-images tbody.pf-m-expanded tr .image-details", second_tag)
+        dialog1.deleteImage(force=True, another=second_tag)
+
+        dialog = DownloadImageDialog(self, imageName='my-busybox', imageTag='latest', user="system")
+        dialog.openDialog() \
+              .fillDialog() \
+              .selectImageAndDownload() \
+              .expectDownloadSuccess() \
+              .deleteImage()
+
+        dialog = DownloadImageDialog(self, imageName='foobar')
+        dialog.openDialog() \
+              .fillDialog() \
+              .expectSearchErrorForNotExistingImage()
+
+        dialog = DownloadImageDialog(self, imageName='my-busybox', imageTag='foobar')
+        dialog.openDialog() \
+              .fillDialog() \
+              .selectImageAndDownload() \
+              .expectDownloadErrorForNonExistingTag() \
+              .dismissNotification()
+
+    def testPullImage(self) -> None:
+        b = self.browser
+
+        self.setupRegistry()
+
+        def buildImage(image_name: str, size: int, *, auth: bool) -> None:
+            temp_dir = self.machine.execute(f"""
+                set -eu
+                D=$(mktemp -d -p {self.vm_tmpdir})
+                # Allow admin to read the created directory, mktemp by default creates it unreadable for other users
+                chmod 755 $D
+                truncate -s {size}M $D/test.img
+                printf 'FROM scratch\\nCOPY test.img /\\n' > $D/Containerfile
+                echo $D
+            """).strip()
+            self.execute(f"podman build -t {image_name} {temp_dir}", system=auth)
+
+        def getImageSize(image_name: str, *, system: bool = True) -> float:
+            image_sel = self.getImageSelector(image_name, system=system)
+            return float(b.text(f"{image_sel} td[data-label='Disk space']").replace(' MB', ''))
+
+        image1 = "localhost:5000/test-image:1"
+
+        # build update and push it
+        buildImage(image1, 50, auth=True)
+        self.execute(f"podman push {image1}; podman rmi {image1}", system=True)
+
+        # build image which we try to pull
+        buildImage(image1, 1, auth=True)
+        image1_sha = self.execute(f"podman inspect --format '{{{{.Id}}}}' {image1}", system=True).strip()
+
+        self.login()
+
+        image1_sel = f"#containers-images tbody tr[data-row-id=\"0-{image1_sha}\"]".lower()
+
+        showImages(b)
+        b.click(f'{image1_sel} .pf-v6-c-menu-toggle')
+        b.click("button.pf-v6-c-menu__item:contains('Pull')")
+        b.wait_in_text("div.download-in-progress", "Pulling")
+        b.wait_not_present(image1_sel)
+
+        # assert that the new image is bigger, the initial image as 1MB, the
+        # new one 50MB.
+        b.wait(lambda: getImageSize(image1, system=True) > 40)
+
+        image1_update_sha = self.execute(f"podman inspect --format '{{{{.Id}}}}' {image1}", system=True).strip()
+        self.assertNotEqual(image1_sha, image1_update_sha)
+        b.wait_visible(f"#containers-images tbody tr[data-row-id=\"0-{image1_update_sha}\"]".lower())
+
+        # Try to pull multiple images, drop to superuser as its easier to
+        # remove all images and pulling all images will show an error if the
+        # registry is not available.
+        b.drop_superuser()
+
+        image1 = "localhost:5000/test-image:1"
+
+        # build update and push it
+        buildImage(image1, 25, auth=False)
+        self.execute(f"podman push {image1}; podman rmi {image1}", system=False)
+
+        # build image which we try to pull
+        buildImage(image1, 1, auth=False)
+        image1_sha = self.execute(f"podman inspect --format '{{{{.Id}}}}' {image1}", system=False).strip()
+
+        image2 = "localhost:5000/test-image:2"
+
+        # build update and push it
+        buildImage(image2, 50, auth=False)
+        self.execute(f"podman push {image2}; podman rmi {image2}", system=False)
+
+        # build image which we try to pull
+        buildImage(image2, 10, auth=False)
+        image2_sha = self.execute(f"podman inspect --format '{{{{.Id}}}}' {image2}", system=False).strip()
+
+        b.wait_in_text("#containers-images", f"{self.user_images_count + 2} images")
+        b.click("#image-actions-dropdown")
+        b.click("button:contains('Pull all images')")
+        b.wait_in_text("div.download-in-progress", "Pulling")
+        b.wait_not_present("div.download-in-progress")
+        b.wait_not_present('.pf-v6-c-alert__title')
+        b.wait_not_present(f"#containers-images tbody tr[data-row-id=\"user-{image1_sha}\"]".lower())
+        b.wait_not_present(f"#containers-images tbody tr[data-row-id=\"user-{image2_sha}\"]".lower())
+
+        # assert the image size changed
+        b.wait(lambda: getImageSize(image1, system=False) > 20)
+        b.wait(lambda: getImageSize(image2, system=False) > 40)
+
+        # after pulling the two test-images, we now have two <none>:<none> intermediate images
+        # pulling all images ignores them and shows no alert
+        b.wait_in_text("#containers-images", f"{self.user_images_count + 4} images")
+        image1_size = getImageSize(image1, system=False)
+        image2_size = getImageSize(image2, system=False)
+        b.click("#image-actions-dropdown")
+        b.click("button:contains('Pull all images')")
+        b.wait_not_present('.pf-v6-c-alert__title')
+        b.wait_in_text("#containers-images", f"{self.user_images_count + 4} images")
+        self.assertEqual(image1_size, image1_size)
+        self.assertEqual(image2_size, image2_size)
+
+    def testLifecycleOperationsUser(self) -> None:
+        self._testLifecycleOperations(auth=False)
+
+    def testLifecycleOperationsSystem(self) -> None:
+        self._testLifecycleOperations(auth=True)
+
+    def _testLifecycleOperations(self, *, auth: bool) -> None:
+        b = self.browser
+
+        if not auth:
+            self.allow_browser_errors("Failed to start system podman.socket.*")
+
+        self.login()
+        self.filter_containers('all')
+
+        # run a container
+        self.execute(f"""
+                podman run -d --name swamped-crate --stop-timeout 0 {IMG_BUSYBOX} sh -c 'echo 123; sleep infinity';
+                podman stop swamped-crate""", system=auth)
+        b.wait(lambda: self.execute("podman ps --all | grep -e swamped-crate -e Exited", system=auth))
+
+        b.wait_visible("#containers-containers")
+        container_sha = self.execute("podman inspect --format '{{.Id}}' swamped-crate", system=auth).strip()
+        self.waitContainer(container_sha, auth=auth, name='swamped-crate', image=IMG_BUSYBOX,
+                           state='Exited', owner="system" if auth else "admin")
+        if not auth:
+            # Checkpoint/restore is not supported on user containers yet - the related buttons should not be shown
+            # Check that the restore option is not present
+            with self.withContainerActionMenu("swamped-crate", system=auth):
+                b.wait_not_present(self.getContainerAction('Restore'))
+
+        # Start the container
+        self.performContainerAction("swamped-crate", "Start", system=auth)
+
+        self.waitContainer(container_sha, auth=auth, name='swamped-crate', image=IMG_BUSYBOX,
+                           state='Running', owner="system" if auth else "admin")
+
+        # run another container with explicit memory 400 MiB limit, with a process that uses 300 MB memory
+        self.execute(
+            f"podman run -d --name picket-fence --memory 400m --stop-timeout 0 {IMG_ALPINE} "
+            """awk 'BEGIN { y = sprintf("%300000000s",""); system("sleep infinity") }'""",
+            system=auth)
+        picket_fence_sha = self.execute("podman inspect --format '{{.Id}}' picket-fence", system=auth).strip()
+        self.waitContainer(picket_fence_sha, auth=auth, name="picket-fence", state="Running")
+
+        def get_cpu_usage(sel: str) -> float:
+            cpu = self.getContainerAttr(sel, "CPU", "", system=auth)
+            self.assertIn('%', cpu)
+            # If it not a number it will raise ValueError which is what we want to know
+            return float(cpu[:-1])
+
+        # Check we show usage
+        b.wait(lambda: self.getContainerAttr("swamped-crate", "CPU", "", system=auth) != "")
+        b.wait(lambda: self.getContainerAttr("swamped-crate", "Memory", "", system=auth) != "")
+        if auth or self.has_cgroupsV2:
+            # Wait for CPU usage to settle before saving CPU usage for comparison later
+            b.wait(lambda: get_cpu_usage("swamped-crate") < 25)
+            cpu = get_cpu_usage("swamped-crate")
+            memory = self.getContainerAttr("swamped-crate", "Memory", "", system=auth)
+
+            # swamped-crate has no explicit --memory limit
+            m = re.match(r'([0-9]+)%([0-9.]+) kB$', memory)
+            assert m is not None, "memory regex did not match"
+            self.assertTrue(m, memory)
+            mem_pct = int(m.group(1))
+            mem_abs = float(m.group(2))
+            self.assertGreaterEqual(mem_pct, 0)
+            self.assertGreaterEqual(mem_abs, 1.0)
+            # this container doesn't do anything, should have small memory usage
+            self.assertLessEqual(mem_pct, 5)
+            self.assertLessEqual(mem_abs, 300.0)
+
+            # Test that the CPU value is updated dynamically
+            self.execute("podman exec -d swamped-crate sh -c 'dd bs=1024 < /dev/urandom > /dev/null'", system=auth)
+            b.wait(lambda: get_cpu_usage("swamped-crate") > cpu)
+            self.execute("podman exec swamped-crate sh -c 'pkill dd'", system=auth)
+
+            # picket-fence has a memory limit
+
+            # Wait for CPU usage to settle before checking the memory usage, on
+            # a busy host the awk script takes longer to run.
+            b.wait(lambda: get_cpu_usage("picket-fence") < 10)
+            memory = self.getContainerAttr("picket-fence", "Memory", "", system=auth)
+            m = re.match(r'([0-9]+)%([0-9.]+) MB([0-9]+)% of ([0-9.]+) MB limit$', memory)
+            assert m is not None, "memory regex did not match"
+            self.assertTrue(m, memory)
+            # wide range here, to work on custom testbeds
+            host_mem_pct = int(m.group(1))
+            self.assertGreater(host_mem_pct, 2)
+            self.assertLess(host_mem_pct, 90)
+            # this is fairly well predictable
+            mem_abs = float(m.group(2))
+            self.assertGreaterEqual(mem_abs, 300.0)
+            self.assertLess(mem_abs, 305.0)
+            limit_mem_pct = int(m.group(3))
+            self.assertGreaterEqual(limit_mem_pct, 70)
+            self.assertLessEqual(limit_mem_pct, 75)
+            # 400 MiB limit
+            self.assertEqual(m.group(4), "419")
+        else:
+            # No support for CGroupsV2
+            memory = self.getContainerAttr("swamped-crate", "Memory", "", system=auth)
+            self.assertEqual(self.getContainerAttr("picket-fence", "CPU", "", system=auth), "n/a")
+            self.assertEqual(memory, "n/a")
+
+        # Restart the container; there is no steady state change in the visible UI, so look for
+        # a changed data-started-at attribute
+        old_start = self.getStartTime("swamped-crate", auth=auth)
+        b.wait_in_text(f'#containers-containers tr[data-started-at="{old_start}"]', "swamped-crate")
+        self.performContainerAction("swamped-crate", "Force restart", system=auth)
+        new_start = self.waitRestart("swamped-crate", old_start, auth=auth)
+        b.wait_in_text(f'#containers-containers tr[data-started-at="{new_start}"]', "swamped-crate")
+        self.waitContainer(container_sha, auth=auth, name='swamped-crate', image=IMG_BUSYBOX, state='Running')
+
+        self.waitContainerRow(IMG_BUSYBOX)
+        if not auth:
+            # Check that the checkpoint option is not present for rootless
+            with self.withContainerActionMenu("swamped-crate", system=auth):
+                b.wait_visible(self.getContainerAction('Force stop'))
+                b.wait_not_present(self.getContainerAction('Checkpoint'))
+        # Stop the container
+        self.performContainerAction("swamped-crate", "Force stop", system=auth)
+
+        self.waitContainer(container_sha, auth=auth, name='swamped-crate', image=IMG_BUSYBOX)
+        b.wait(lambda: self.getContainerAttr("swamped-crate", "State", "", system=auth) in NOT_RUNNING)
+        b.wait(lambda: self.getContainerAttr("swamped-crate", "CPU", "", system=auth) == "")
+        b.wait(lambda: self.getContainerAttr("swamped-crate", "Memory", "", system=auth) == "")
+
+        # Check that container details are not lost when the container is stopped
+        self.toggleExpandedContainer("swamped-crate", system=auth)
+        b.click(".pf-m-expanded button:contains('Integration')")
+        b.wait_in_text("#containers-containers tbody.pf-m-expanded", "Environment variables")
+
+        # Check that console reconnects when container starts
+        b.click(".pf-m-expanded button:contains('Console')")
+        self.performContainerAction("swamped-crate", "Start", system=auth)
+        # WebGL2 is not supported in firefox headless mode
+        if b.browser != "firefox":
+            b.wait_text(".pf-m-expanded .pf-v6-c-empty-state", "Container is not running")
+            b.wait_in_text(".pf-m-expanded .xterm-accessibility-tree", "/ # ")
+            b.focus(".pf-m-expanded .xterm-helper-textarea")
+            b.input_text("clear")
+            b.key("Enter")
+            b.wait_not_in_text(".pf-m-expanded .xterm-accessibility-tree", "clear")
+            b.wait_text(".pf-m-expanded .xterm-accessibility-tree > div:nth-child(1)", "/ # ")
+            b.input_text('echo hello')
+            b.key("Enter")
+            b.wait_text(".pf-m-expanded .xterm-accessibility-tree > div:nth-child(2)", "hello")
+            b.wait_text(".pf-m-expanded .xterm-accessibility-tree > div:nth-child(3)", "/ # ")
+            self.performContainerAction("swamped-crate", "Stop", system=auth)
+            b.wait_text(".pf-m-expanded .xterm-accessibility-tree > div:nth-child(3)", "/ #  disconnected ")
+            sha = self.execute("podman inspect --format '{{.Id}}' swamped-crate", system=auth).strip()
+            self.waitContainer(sha, auth=auth, name='swamped-crate', image=IMG_BUSYBOX, state=NOT_RUNNING)
+            self.performContainerAction("swamped-crate", "Start", system=auth)
+            self.waitContainer(sha, auth=auth, state='Running')
+            b.wait_text(".pf-m-expanded .xterm-accessibility-tree > div:nth-child(1)", "/ # ")
+            b.wait_not_in_text(".pf-m-expanded .xterm-accessibility-tree > div:nth-child(2)", "hello")
+
+            # Check that logs reconnect when container starts
+            b.click(".pf-m-expanded button:contains('Logs')")
+            self.performContainerAction("swamped-crate", "Stop", system=auth)
+            self.waitContainer(sha, auth=auth, state=NOT_RUNNING)
+            b.wait_in_text(".pf-m-expanded .container-logs .xterm-accessibility-tree", "Streaming disconnected")
+            self.performContainerAction("swamped-crate", "Start", system=auth)
+            b.wait_in_text(".pf-m-expanded .container-logs .xterm-accessibility-tree", "Streaming disconnected123")
+        else:
+            # check that empty state is shown instead of terminal
+            b.wait_in_text(".pf-m-expanded .pf-v6-c-empty-state", "Terminal not available")
+
+    def testCheckpointRestore(self) -> None:
+        m = self.machine
+        b = self.browser
+
+        self.login()
+        self.filter_containers('all')
+
+        # Run a container
+        mac_address = '92:d0:c6:0a:29:38'
+        m.execute(f"""
+            podman run -dit --mac-address {mac_address} --name swamped-crate --stop-timeout 0 {IMG_BUSYBOX} sh;
+            podman stop swamped-crate
+        """)
+        b.wait(lambda: self.execute("podman ps --all | grep -e swamped-crate -e Exited", system=True))
+
+        # Check that the restore option is not present (i.e. start is a regular button)
+        with self.withContainerActionMenu("swamped-crate", system=True):
+            b.wait_not_present(self.getContainerAction('Restore'))
+
+        # Start the container
+        self.performContainerAction("swamped-crate", "Start", system=True)
+        b.wait(lambda: self.getContainerAttr("swamped-crate", "State") in 'Running')
+
+        self.toggleExpandedContainer("swamped-crate", system=True)
+        b.wait_visible(".pf-m-expanded button:contains('Details')")
+        container_sel = self.getContainerSelector("swamped-crate", system=True)
+        b.wait_not_present(f"{container_sel} + tr .container-latest-checkpoint")
+
+        # Checkpoint the container
+        self.performContainerAction("swamped-crate", "Checkpoint", system=True)
+        b.set_checked('.pf-v6-c-modal-box input#checkpoint-dialog-keep', val=True)
+        b.set_checked('.pf-v6-c-modal-box input#checkpoint-dialog-tcpEstablished', val=True)
+        b.click('.pf-v6-c-modal-box button:contains("Checkpoint")')
+
+        with b.wait_timeout(300):
+            b.wait_not_present(".pf-v6-c-modal-box")
+
+        try:
+            b.wait(lambda: self.getContainerAttr("swamped-crate", "State") in NOT_RUNNING)
+            b.wait_text(f"{container_sel} + tr .container-latest-checkpoint", "less than a minute ago")
+        except testlib.Error:
+            # dump.log may help with debugging criu failures
+            attachment = self.label() + "-dump.log"
+            dump_log = m.execute("find /var/lib/containers -name dump.log").strip()
+            m.download(dump_log, attachment, ".")
+            # Dump the dump to the test log, for naughty pattern matching. It's not big.
+            print(open(attachment).read())
+            testlib.attach(attachment, move=True)
+            raise
+
+        # Restore the container
+        self.waitContainerRow("swamped-crate")
+        self.performContainerAction("swamped-crate", "Restore", system=True)
+        b.set_checked('.pf-v6-c-modal-box input#restore-dialog-keep', val=True)
+        b.set_checked('.pf-v6-c-modal-box input#restore-dialog-tcpEstablished', val=True)
+        b.set_checked('.pf-v6-c-modal-box input#restore-dialog-ignoreStaticIP', val=True)
+        b.set_checked('.pf-v6-c-modal-box input#restore-dialog-ignoreStaticMAC', val=True)
+        b.click('.pf-v6-c-modal-box button:contains("Restore")')
+        b.wait(lambda: self.getContainerAttr("swamped-crate", "State") in 'Running')
+
+        # A new MAC address should have been generated
+        cmd = "podman inspect --format '{{.NetworkSettings.MacAddress}}' swamped-crate"
+        new_mac_address = m.execute(cmd).strip()
+        self.assertNotEqual(new_mac_address, mac_address)
+
+        # Checkpoint the container without stopping
+        self.waitContainerRow("swamped-crate")
+        self.performContainerAction("swamped-crate", "Checkpoint", system=True)
+        b.set_checked('.pf-v6-c-modal-box input#checkpoint-dialog-leaveRunning', val=True)
+        b.click('.pf-v6-c-modal-box button:contains("Checkpoint")')
+        b.wait_not_present('.modal_dialog')
+
+        # Stop the container
+        m.execute("podman stop swamped-crate")
+        b.wait(lambda: self.getContainerAttr("swamped-crate", "State") in NOT_RUNNING)
+
+        # Restore the container
+        self.performContainerAction("swamped-crate", "Restore", system=True)
+        b.click('.pf-v6-c-modal-box button:contains("Restore")')
+        b.wait(lambda: self.getContainerAttr("swamped-crate", "State") in 'Running')
+
+    def testFailingPodmanService(self) -> None:
+        b = self.browser
+
+        try:
+            self.execute("systemctl mask podman.service", system=True)
+            self.execute("systemctl --user mask podman.service", system=False)
+            self.login_and_go("/podman")
+
+            # Troubleshoot action
+            b.wait_text("#app .pf-v6-c-empty-state__title", "Podman service failed")
+            b.click("#app .pf-v6-c-empty-state button")
+            b.enter_page("/system/services")
+            # services page is too slow
+            with b.wait_timeout(60):
+                b.wait_in_text("#service-details", "podman.socket")
+            b.logout()
+        finally:
+            self.execute("systemctl unmask podman.service", system=True)
+            self.execute("systemctl --user unmask podman.service", system=False)
+
+        # now let it fail while c-podman is running
+        self.login()
+        b.wait_in_text("#containers-images", "system")
+        b.wait_in_text("#containers-images", "user")
+        self.execute("systemctl stop podman.service", system=True)
+        b.wait_not_in_text("#containers-images", "system")
+        b.wait_in_text("#containers-images", "user")
+        self.execute("systemctl --user stop podman.service", system=False)
+        b.wait_text("#app .pf-v6-c-empty-state__title", "Podman service failed")
+
+    def testCreateContainerSystem(self) -> None:
+        self._testCreateContainer(auth=True)
+
+    def testCreateContainerUser(self) -> None:
+        self._testCreateContainer(auth=False)
+
+    def _testCreateContainer(self, *, auth: bool) -> None:
+        m = self.machine
+        new_container = 'new-container'
+        m.execute(f"podman run -d --name {new_container} --stop-timeout 0 {IMG_BUSYBOX} touch /latest")
+        m.execute(f"podman commit {new_container} newimage")
+        new_image_sha = m.execute("podman inspect --format '{{.Id}}' newimage").strip()
+
+        self.setupRegistry()
+
+        # Push busybox image to the local registries
+        m.execute(f"podman tag {IMG_BUSYBOX} localhost:5000/my-busybox; podman push localhost:5000/my-busybox")
+        m.execute(f"podman tag {IMG_BUSYBOX} localhost:6000/my-busybox; podman push localhost:6000/my-busybox")
+        m.execute(f"""podman tag {IMG_BUSYBOX} subdomain.local.localhost:7000/my-busybox; \
+                     podman push subdomain.local.localhost:7000/my-busybox""")
+        # Untag busybox image which duplicates the image we are about to download
+        m.execute(f"""podman rmi -f {IMG_BUSYBOX} localhost:5000/my-busybox localhost:6000/my-busybox \
+                         subdomain.local.localhost:7000/my-busybox""")
+
+        self.login(system=auth)
+
+        b = self.browser
+        container_name = "busybox-downloaded"
+
+        b.click("#containers-containers button.pf-v6-c-button.pf-m-primary")
+        b.set_input_text("#run-image-dialog-name", container_name)
+
+        # Test special characters.
+        # Initially both the registry image and Alpine are shown
+        b.click("#create-image-image input")
+        b.wait_visible(f'.pf-v6-c-menu__item:contains("{IMG_ALPINE_LATEST}")')
+        b.wait_visible(f'.pf-v6-c-menu__item:contains("{IMG_REGISTRY_LATEST}")')
+        # Filter it down to just Alpine
+        b.set_input_text("#create-image-image input", "|alpi*ne?\\")
+        b.wait_not_present(f'.pf-v6-c-menu__item:contains("{IMG_REGISTRY_LATEST}")')
+        b.wait_visible(f'.pf-v6-c-menu__item:contains("{IMG_ALPINE_LATEST}")')
+
+        # No local results found
+        b.set_input_text("#create-image-image input", "notfound")
+
+        # FIXME; BiDi clicks flake in CI (both Chromium and Firefox)
+        b.mouse('button.pf-v6-c-toggle-group__button:contains("Local")', "click", y=1)
+        b.wait_text(".pf-v6-c-menu__item[disabled]", "No images found")
+        b.wait_visible("button.pf-v6-c-toggle-group__button.pf-m-selected:contains('Local')")
+
+        # Local results found
+        b.set_input_text("#create-image-image input", "registry")
+        # Wait for "searching in progress" spinner to go away
+        b.wait_not_present(".pf-v6-c-menu__content svg[aria-valuetext='Loading...']")
+        b.wait_not_in_text(".pf-v6-c-menu__content", "Local images")
+        b.wait_text(".pf-v6-c-menu__item:not([disabled])", IMG_REGISTRY_LATEST)
+        if auth:
+            b.assert_pixels(".pf-v6-c-modal-box", "image-select", skip_layouts=["rtl"])
+
+        # Test filter with a subdomain.
+        b.click('.pf-v6-c-toggle-group__text:contains("local.localhost")')
+        b.set_input_text("#create-image-image input", "my-busybox", blur=False)
+        b.wait_text(".pf-v6-c-menu__item:not([disabled])", "subdomain.local.localhost:7000/my-busybox")
+
+        # Local registry
+        b.click('button.pf-v6-c-toggle-group__button:contains("localhost:5000")')
+        b.set_input_text("#create-image-image input", "my-busybox", blur=False)
+        b.wait_text(".pf-v6-c-menu__item:not([disabled])", "localhost:5000/my-busybox")
+
+        # pressing Enter does not disturb the dialog or open popup help
+        b.wait_val("#create-image-image input", "my-busybox")
+        b.key("Enter")
+        time.sleep(0.3)
+        self.assertFalse(b.is_present(".pf-v6-c-popover"))
+        b.wait_val("#create-image-image input", "my-busybox")
+
+        # Select image
+        b.click('button.pf-v6-c-menu__item:contains("localhost:5000/my-busybox")')
+
+        # Remote image, no pull latest image option
+        b.wait_not_present("#run-image-dialog-pull-latest-image")
+
+        # Create Container, image is pulled and should end up being "running"
+        b.click('.pf-v6-c-modal-box__footer #create-image-create-run-btn')
+        sel = " span:not(.downloading)"
+        b.wait(lambda: self.getContainerAttr(container_name, "State", sel, system=auth) in 'Running')
+        self.execute(f"podman exec {container_name} test ! -e /latest", system=auth)
+
+        # Now that we have downloaded an image, verify that selecting download latest image
+        # downloads the latest image we now push to the registry. Note this image has a /latest file
+        # to differentiate it from the other local image.
+        m.execute(f"podman push {new_image_sha} localhost:5000/my-busybox")
+        m.execute(f"podman push {new_image_sha} localhost:6000/my-busybox")
+        m.execute(f"podman rmi {new_image_sha}")
+
+        container_name = "busybox-latest"
+
+        b.click("#containers-containers button.pf-v6-c-button.pf-m-primary")
+        b.set_input_text("#run-image-dialog-name", container_name)
+
+        # Local registry
+        b.set_input_text("#create-image-image input", "no-container")
+        b.wait_text(".pf-v6-c-menu__item[disabled]", "No images found")
+        # Search with full url
+        b.set_input_text("#create-image-image input", "localhost:5000/my-busybox")
+        # FIXME; BiDi clicks flake in CI (both Chromium and Firefox)
+        b.mouse('button.pf-v6-c-toggle-group__button:contains("Local")', "click", y=1)
+        b.wait_in_text("button.pf-v6-c-toggle-group__button.pf-m-selected", "Local")
+        b.wait_not_in_text(".pf-v6-c-menu__content", "Local images")
+
+        # Select image
+        b.click('button.pf-v6-c-menu__item:contains("localhost:5000/my-busybox")')
+
+        # Pull the latest image
+        b.set_checked("#run-image-dialog-pull-latest-image", val=True)
+
+        # Create Container, image is pulled and should end up being "running"
+        b.click('.pf-v6-c-modal-box__footer #create-image-create-run-btn')
+        sel = " span:not(.downloading)"
+        b.wait(lambda: self.getContainerAttr(container_name, "State", sel, system=auth) in 'Running')
+        # Verify that the latest file exists
+        output = self.execute(f"podman exec {container_name} ls -lh /latest", system=auth).strip()
+        self.assertNotIn("No such file or directory", output)
+
+        # Test creating a container with choosing owner
+        if auth:
+            container_name = "busybox-download-admin"
+            b.click("#containers-containers button.pf-v6-c-button.pf-m-primary")
+
+            # Start container as admin
+            b.click('#run-image-dialog-owner-admin')
+
+            # Create Container, image is pulled and should end up being "Running"
+            b.set_input_text("#run-image-dialog-name", container_name)
+
+            # Open image dropdown, it should list both Alpine and Busybox from the local repository
+            b.click("#create-image-image input")
+            b.wait_visible(f'.pf-v6-c-menu__item:contains("{IMG_ALPINE_LATEST}")')
+            b.wait_visible(f'.pf-v6-c-menu__item:contains("{IMG_BUSYBOX_LATEST}")')
+            # Filter it down to just Busybox
+            b.set_input_text("#create-image-image input", IMG_BUSYBOX_LATEST)
+            b.wait_visible(f'.pf-v6-c-menu__item:contains("{IMG_BUSYBOX_LATEST}")')
+            b.wait_not_present(f'.pf-v6-c-menu__item:contains("{IMG_ALPINE_LATEST}")')
+            # Switch to another view; different images have different registries, so don't assume their name, just
+            # that at least one more exists
+            b.click('.image-search-footer .pf-v6-c-toggle-group__item:nth-of-type(3) button')
+            b.wait_in_text(".pf-v6-c-menu", "No images found")
+            # Back to local and let's select Busybox and create the container
+            b.click('button.pf-v6-c-toggle-group__button:contains("Local")')
+            b.click(f'.pf-v6-c-menu__item:contains("{IMG_BUSYBOX_LATEST}")')
+
+            b.click('.pf-v6-c-modal-box__footer #create-image-create-run-btn')
+            b.wait(lambda: self.getContainerAttr(container_name, "State", sel, system=False) in 'Running')
+
+    def testRunImageSystem(self) -> None:
+        self._testRunImage(auth=True)
+
+    def testRunImageUser(self) -> None:
+        self._testRunImage(auth=False)
+
+    def _testRunImage(self, *, auth: bool) -> None:
+        b = self.browser
+        m = self.machine
+
+        # Just drop user images so we can use simpler selectors
+        if auth:
+            self.execute("podman rmi --all", system=False)
+
+        self.login(system=auth)
+        showImages(b)
+
+        b.wait_in_text("#containers-images", IMG_BUSYBOX)
+        b.wait_in_text("#containers-images", IMG_ALPINE)
+        if auth:
+            b.wait_not_in_text("#containers-images", "admin")
+
+        # Check command in alpine
+        b.wait_visible(f'#containers-images td[data-label="Image"]:contains("{IMG_ALPINE}")')
+        self.openCreateContainerDialog(IMG_ALPINE_LATEST, system=auth)
+        b.wait_text('div.pf-v6-c-modal-box header', 'Create container')
+        # depending on the precise container, this can be /bin/sh or /bin/ash
+        cmd = self.execute('podman image inspect --format "{{.Config.Cmd}}" ' + IMG_ALPINE, system=auth)
+        cmd = cmd.strip().replace('[', '').replace(']', '')
+        b.wait_attr("#run-image-dialog-command", "value", cmd)
+        b.click(".btn-cancel")
+
+        # Open run image dialog
+        b.wait_visible(f'#containers-images td[data-label="Image"]:contains("{IMG_BUSYBOX}")')
+        self.openCreateContainerDialog(IMG_BUSYBOX_LATEST, system=auth)
+        b.wait_text('div.pf-v6-c-modal-box header', 'Create container')
+
+        # Inspect and fill modal dialog
+        b.wait_val("#create-image-image input", IMG_BUSYBOX_LATEST)
+        time.sleep(1)  # wait for TypeaheadSelect focus shenanigans
+
+        # Check that there is autogenerated name and then overwrite it
+        b.wait_not_val("#run-image-dialog-name", "")
+        b.set_input_text("#run-image-dialog-name", "busybox-with-tty")
+
+        b.wait_visible("#run-image-dialog-command[value='sh']")
+
+        # shows Owner iff authenticated
+        if auth:
+            b.wait_visible("#run-image-dialog-owner-system:checked")
+        else:
+            b.wait_not_in_text(".pf-v6-c-modal-box", "Owner")
+
+        # Check memory configuration
+        # Only works with CGroupsV2
+        if auth or self.has_cgroupsV2:
+            b.set_checked("#run-image-dialog-memory-limit-checkbox", val=True)
+            b.wait_visible("#run-image-dialog-memory-limit-checkbox:checked")
+            b.wait_visible('#run-image-dialog-memory-limit input[value="512"]')
+            b.set_input_text("#run-image-dialog-memory-limit input[type=number]", "0.5")
+            b.set_val('#memory-unit-select', "GB")
+
+        # CPU shares work only with system containers
+        if auth:
+            # Check that the checkbox is enabled when clicked on the field
+            b.wait_visible("#run-image-dialog-cpu-priority-checkbox:not(:checked)")
+            b.mouse('#run-image-cpu-priority button[aria-label="Decrease CPU shares"]', "click")
+            b.wait_visible("#run-image-dialog-cpu-priority-checkbox:checked")
+            b.set_checked("#run-image-dialog-cpu-priority-checkbox", val=False)
+
+            b.set_checked("#run-image-dialog-cpu-priority-checkbox", val=True)
+            b.wait_visible("#run-image-dialog-cpu-priority-checkbox:checked")
+            b.wait_visible('#run-image-dialog-cpu-priority input[value="1024"]')
+            b.set_input_text("#run-image-dialog-cpu-priority input[type=number]", "512")
+        else:
+            b.wait_not_present("#run-image-dialog-cpu-priority-checkbox")
+
+        # Enable tty
+        b.set_checked("#run-image-dialog-tty", val=True)
+
+        # Set up command line
+        b.set_input_text('#run-image-dialog-command',
+                         "sh -c 'for i in $(seq 20); do sleep 1; echo $i; done; sleep infinity'")
+
+        if auth:
+            # Set restart policy to 3 retries
+            b.set_val("#run-image-dialog-restart-policy", "on-failure")
+            b.set_input_text('#run-image-dialog-restart-retries input', '3')
+        else:  # no lingering enabled so it's disabled
+            b.wait_not_present("#run-image-dialog-restart-policy")
+
+        # Switch to Integration tab
+        b.click("#pf-tab-1-create-image-dialog-tab-integration")
+
+        # Prepare volume dirs
+        rodir, rwdir = m.execute("mktemp; mktemp").split('\n')[:2]
+        m.execute(f"chown admin:admin {rodir}")
+        m.execute(f"chown admin:admin {rwdir}")
+
+        # Configure one port, env, and volume for the pixel test
+        b.click('.publish-port-form .btn-add')
+        b.set_input_text('#run-image-dialog-publish-0-ip-address', '127.0.0.1')
+        b.set_input_text('#run-image-dialog-publish-0-host-port', '6001')
+        b.set_input_text('#run-image-dialog-publish-0-container-port', '5001')
+        b.set_val('#run-image-dialog-publish-0-protocol', "udp")
+
+        b.click('.env-form .btn-add')
+        b.set_input_text('#run-image-dialog-env-0-key', 'APPLE')
+        b.set_input_text('#run-image-dialog-env-0-value', 'ORANGE')
+
+        b.click('.volume-form .btn-add')
+        b.set_checked("#run-image-dialog-volume-0-mode", val=False)
+
+        if self.has_selinux:
+            b.set_val('#run-image-dialog-volume-0-selinux', "z")
+        else:
+            b.wait_not_present('#run-image-dialog-volume-0-selinux')
+
+        b.set_file_autocomplete_val("#run-image-dialog-volume-0", rodir)
+        b.set_input_text('#run-image-dialog-volume-0-container-path', '/tmp/ro')
+        ro_label = m.execute(f"ls -dZ {rodir}").split(" ")[0]
+
+        if auth:
+            b.assert_pixels(".pf-v6-c-modal-box", "integration",
+                            ignore=["#run-image-dialog-volume-0 .pf-v6-c-text-input-group__text-input"],
+                            skip_layouts=["rtl"])
+
+        # Configure more published ports
+        b.click('.publish-port-form .btn-add')
+        b.set_input_text('#run-image-dialog-publish-1-host-port', '6000')
+        b.set_input_text('#run-image-dialog-publish-1-container-port', '5000')
+        b.click('.publish-port-form .btn-add')
+        b.set_input_text('#run-image-dialog-publish-2-ip-address', '7001')
+        b.set_input_text('#run-image-dialog-publish-2-host-port', '7001')
+        b.click('#run-image-dialog-publish-2-btn-close')
+        b.click('.publish-port-form .btn-add')
+        b.set_input_text('#run-image-dialog-publish-3-container-port', '8001')
+        b.click('.publish-port-form .btn-add')
+        b.set_input_text('#run-image-dialog-publish-4-ip-address', '127.0.0.2')
+        b.set_input_text('#run-image-dialog-publish-4-container-port', '9001')
+        # publish range of ports
+        b.click('.publish-port-form .btn-add')
+        b.set_input_text('#run-image-dialog-publish-5-container-port', '4000')
+        b.set_input_text('#run-image-dialog-publish-5-host-port', '4000')
+        b.click('.publish-port-form .btn-add')
+        b.set_input_text('#run-image-dialog-publish-6-container-port', '4001')
+        b.set_input_text('#run-image-dialog-publish-6-host-port', '4001')
+        b.click('.publish-port-form .btn-add')
+        b.set_input_text('#run-image-dialog-publish-7-container-port', '4002')
+        b.set_input_text('#run-image-dialog-publish-7-host-port', '4002')
+        b.click('.publish-port-form .btn-add')
+        b.set_input_text('#run-image-dialog-publish-8-container-port', '4003')
+        b.set_input_text('#run-image-dialog-publish-8-host-port', '4003')
+
+        # Configure more env
+        b.click('.env-form .btn-add')
+        b.set_input_text('#run-image-dialog-env-1-key', 'PEAR')
+        b.set_input_text('#run-image-dialog-env-1-value', 'BANANA')
+        b.click('.env-form .btn-add')
+        b.set_input_text('#run-image-dialog-env-2-key', 'MELON')
+        b.set_input_text('#run-image-dialog-env-2-value', 'GRAPE')
+        b.click('#run-image-dialog-env-2-btn-close')
+        b.click('.env-form .btn-add')
+        # Test inputting an key=var entry; that should auto-split on '='
+        b.set_input_text('#run-image-dialog-env-3-value', "RHUBARB=STRAWBERRY", value_check=False)
+        b.wait_val("#run-image-dialog-env-3-key", "RHUBARB")
+        b.wait_val("#run-image-dialog-env-3-value", "STRAWBERRY")
+
+        # With copy&paste you can also set multiple variables
+
+        b.click('.env-form .btn-add')
+
+        # We make this more interesting by adding and deleting an
+        # extra slot.  This leads to sparse arrays in the dialog state
+        # which used to provoke a crash.
+        #
+        # See https://github.com/cockpit-project/cockpit-podman/issues/2637
+        #
+        b.click('.env-form .btn-add')
+        b.click('#run-image-dialog-env-5-btn-close')
+
+        # focus
+        b.click('#run-image-dialog-env-4-value')
+        b.wait_visible('#run-image-dialog-env-4-value:focus')
+        b.paste("DURIAN=LEMON TEST_URL=wss://cockpit/?start=1&stop=0")
+
+        b.wait_val("#run-image-dialog-env-4-key", "DURIAN")
+        b.wait_val("#run-image-dialog-env-4-value", "LEMON")
+        b.wait_val("#run-image-dialog-env-6-key", "TEST_URL")
+        b.wait_val("#run-image-dialog-env-6-value", "wss://cockpit/?start=1&stop=0")
+
+        b.click('.env-form .btn-add')
+        b.set_input_text('#run-image-dialog-env-7-key', 'HOSTNAME')
+        b.set_input_text('#run-image-dialog-env-7-value', 'busybox')
+
+        # Test inputting a var with = in it doesn't reset key
+        b.click('.env-form .btn-add')
+        b.set_input_text('#run-image-dialog-env-8-key', 'TEST')
+        b.set_input_text('#run-image-dialog-env-8-value', 'REBASE=1')
+
+        # Configure more volumes
+        b.click('.volume-form .btn-add')
+        b.wait_visible('#run-image-dialog-volume-1')
+        b.click('#run-image-dialog-volume-1-btn-close')
+        b.wait_not_present('#run-image-dialog-volume-1')
+        b.click('.volume-form .btn-add')
+
+        if self.has_selinux:
+            b.set_val('#run-image-dialog-volume-2-selinux', "Z")
+        else:
+            b.wait_not_present('#run-image-dialog-volume-2-selinux')
+
+        b.set_file_autocomplete_val("#run-image-dialog-volume-2", rwdir)
+        b.set_input_text('#run-image-dialog-volume-2-container-path', '/tmp/rw')
+        rw_label = m.execute(f"ls -dZ {rwdir}").split(" ")[0]
+
+        b.click('.pf-v6-c-modal-box__footer #create-image-create-run-btn')
+        b.wait_not_present("div.pf-v6-c-modal-box")
+        self.waitContainerRow(IMG_BUSYBOX)
+        sha = self.execute("podman inspect --format '{{.Id}}' busybox-with-tty", system=auth).strip()
+        self.waitContainer(sha, auth=auth, name='busybox-with-tty', image=IMG_BUSYBOX,
+                           cmd='sh -c "for i in $(seq 20); do sleep 1; echo $i; done; sleep infinity"',
+                           state='Running', owner="system" if auth else "admin")
+        hasTTY = self.execute("podman inspect --format '{{.Config.Tty}}' busybox-with-tty", system=auth).strip()
+        self.assertEqual(hasTTY, 'true')
+        # Only works with CGroupsV2
+        if auth or self.has_cgroupsV2:
+            memory = self.execute("podman inspect --format '{{.HostConfig.Memory}}' busybox-with-tty",
+                                  system=auth).strip()
+            self.assertEqual(memory, '500000000')
+
+        if auth:
+            cpuShares = self.execute("podman inspect --format '{{.HostConfig.CpuShares}}' busybox-with-tty",
+                                     system=auth).strip()
+            self.assertEqual(cpuShares, '512')
+
+        restartPolicy = self.getRestartPolicy("busybox-with-tty", auth=auth)
+        if auth:
+            self.assertEqual(restartPolicy, '{on-failure 3}')
+        else:
+            # No restart policy
+            # format changed in podman 5.1 (https://github.com/containers/podman/pull/22322)
+            self.assertIn(restartPolicy, ['{ 0}', '{no 0}'])
+
+        b.wait(lambda: "3" in self.execute("podman logs busybox-with-tty", system=auth))
+
+        self.toggleExpandedContainer("busybox-with-tty", system=auth)
+        if auth:
+            b.assert_pixels('#containers-containers .pf-v6-c-table__expandable-row.pf-m-expanded',
+                            "image-details-tab",
+                            ignore=['.ignore-pixels', '.container-mac-address'],
+                            # MAC Address doesn't use a monospace font so it varies
+                            mock={'.container-mac-address': 'ce:39:71:68:e1:ba'},
+                            skip_layouts=["rtl", "mobile"])
+
+        container_sel = self.getContainerSelector("busybox-with-tty", system=auth)
+        b.wait_text(f'{container_sel} + tr .container-created', 'less than a minute ago')
+
+        b.click(".pf-m-expanded button:contains('Integration')")
+
+        ports_sel = f'{container_sel} + tr .container-integration-ports'
+        b.wait_in_text(ports_sel, '0.0.0.0:6000 \u2192 5000/tcp')
+        b.wait_in_text(ports_sel, '127.0.0.1:6001 \u2192 5001/udp')
+        b.wait_in_text(ports_sel, '127.0.0.2:')
+        b.wait_in_text(ports_sel, ' \u2192 8001/tcp')
+        b.wait_in_text(ports_sel, '0.0.0.0:4000-4003 \u2192 4000-4003/tcp')
+        b.wait_not_in_text(ports_sel, '7001/tcp')
+
+        ports = self.execute("podman inspect --format '{{.NetworkSettings.Ports}}' busybox-with-tty", system=auth)
+        self.assertRegex(ports, r'5000/tcp:\[{(0.0.0.0)? 6000}\]')
+        self.assertRegex(ports, r'400[0-3]?/tcp:\[{(0.0.0.0)? 400[0-3]?}\]')
+        self.assertIn('5001/udp:[{127.0.0.1 6001}]', ports)
+        self.assertIn('8001/tcp:[{', ports)
+        self.assertIn('9001/tcp:[{127.0.0.2 ', ports)
+        self.assertNotIn('7001/tcp', ports)
+
+        env_select = f'{container_sel} + tr .container-integration-envs'
+        b.wait_in_text(env_select, 'APPLE=ORANGE')
+        b.wait_in_text(env_select, 'PEAR=BANANA')
+        b.wait_in_text(env_select, 'RHUBARB=STRAWBERRY')
+        b.wait_in_text(env_select, 'DURIAN=LEMON')
+        b.wait_in_text(env_select, 'TEST_URL=wss://cockpit/?start=1&stop=0')
+        b.wait_in_text(env_select, 'HOSTNAME=busybox')
+        b.wait_in_text(env_select, 'TEST=REBASE=1')
+        # variables are present in env but are not displayed in the UI
+        b.wait_not_in_text(env_select, 'container=podman')
+        b.wait_not_in_text(env_select, 'TERM=xterm')
+        b.wait_not_in_text(env_select, 'HOME=/root')
+        b.wait_not_in_text(env_select, 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin')
+
+        b.click(".container-integration button:contains('Show more')")
+        # previously hidden variables are now visible
+        b.wait_in_text(env_select, 'container=podman')
+        b.wait_in_text(env_select, 'TERM=xterm')
+        b.wait_in_text(env_select, 'HOME=/root')
+        b.wait_in_text(env_select, 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin')
+
+        env = self.execute("podman exec busybox-with-tty env", system=auth)
+        self.assertIn('APPLE=ORANGE', env)
+        self.assertIn('PEAR=BANANA', env)
+        self.assertIn('RHUBARB=STRAWBERRY', env)
+        self.assertIn('DURIAN=LEMON', env)
+        self.assertIn('HOSTNAME=busybox', env)
+        self.assertIn('TEST=REBASE=1', env)
+        self.assertIn('container=podman', env)
+        self.assertIn('TERM=xterm', env)
+        self.assertIn('HOME=/root', env)
+        self.assertIn('PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin', env)
+        self.assertNotIn('MELON=GRAPE', env)
+
+        vol_select = f'{container_sel} + tr .container-integration-volumes'
+        b.wait_in_text(vol_select, f"{rodir} \u2192 /tmp/ro")
+        b.wait_in_text(vol_select, f"{rwdir} \u2194 /tmp/rw")
+
+        romnt = self.execute("podman exec busybox-with-tty cat /proc/self/mountinfo | grep /tmp/ro", system=auth)
+        self.assertIn('ro', romnt)
+        self.assertIn(rodir[4:], romnt)
+        rwmnt = self.execute("podman exec busybox-with-tty cat /proc/self/mountinfo | grep /tmp/rw", system=auth)
+        self.assertIn('rw', rwmnt)
+        self.assertIn(rwdir[4:], rwmnt)
+
+        if self.has_selinux:
+            # rw was set to :Z so it should change, but not be shared
+            rw_label_new = m.execute(f"ls -dZ {rwdir}").split(" ")[0]
+            self.assertNotEqual(rw_label, rw_label_new)
+            self.assertRegex(rw_label_new, r"container_file_t:s0:c\d*,c\d*$")
+
+            # ro was set to :z to it should change and be shared
+            ro_label_new = m.execute(f"ls -dZ {rodir}").split(" ")[0]
+            self.assertNotEqual(ro_label, ro_label_new)
+            self.assertRegex(ro_label_new, "container_file_t:s0$")
+
+        def get_int(n: str) -> int:
+            try:
+                return int(n)
+            except ValueError:
+                return 0
+
+        b.wait_not_present("button:contains('Health check logs')")
+        b.click(".pf-m-expanded button:contains('Logs')")
+
+        # WebGL2 is not supported in firefox headless mode
+        if b.browser != "firefox":
+            b.wait_text(".pf-m-expanded .container-logs .xterm-accessibility-tree > div:nth-child(1)", "1")
+            b.eval_js("""
+                document.querySelector('.pf-m-expanded .container-logs .xterm-accessibility-tree').scrollIntoView()
+            """)
+            b.wait_in_text(".pf-m-expanded .container-logs .xterm-accessibility-tree", "6")
+
+            b.click(".pf-m-expanded button:contains('Console')")
+            b.wait(lambda:
+                   get_int(
+                    b.text(".pf-m-expanded .container-terminal .xterm-accessibility-tree > div:nth-child(3)")) > 7)
+
+        # Create another instance without port publishing
+        b.wait_visible(f'#containers-images td[data-label="Image"]:contains("{IMG_BUSYBOX}")')
+        self.toggleExpandedContainer("busybox-with-tty", system=auth)
+        self.openCreateContainerDialog(IMG_BUSYBOX_LATEST, system=auth)
+        b.wait_text('div.pf-v6-c-modal-box header', 'Create container')
+
+        b.wait_val("#create-image-image input", IMG_BUSYBOX_LATEST)
+        b.set_input_text("#run-image-dialog-name", "busybox-without-publish")
+
+        # Set up command line
+        b.set_input_text('#run-image-dialog-command',
+                         "sh -c 'for i in $(seq 20); do echo $i; sleep 3; done; sleep infinity'")
+
+        # Run without tty, console should be able to `exec`
+        b.set_checked("#run-image-dialog-tty", val=False)
+
+        b.click('.pf-v6-c-modal-box__footer #create-image-create-run-btn')
+        b.wait_not_present("div.pf-v6-c-modal-box")
+
+        self.waitContainerRow("busybox-without-publish")
+        self.toggleExpandedContainer("busybox-without-publish", system=auth)
+        container_sel = self.getContainerSelector("busybox-without-publish", system=auth)
+        b.wait_not_present(f'{container_sel} + tr dt:contains("Ports")')
+
+        # Rootless only works with CGroupsV2
+        if auth or self.has_cgroupsV2:
+            cpuShares = self.execute("""
+                podman inspect --format '{{.HostConfig.CpuShares}}' busybox-without-publish
+            """, system=auth).strip()
+            # podman ≥ 1.8 translates 0 default into actual value
+            self.assertIn(cpuShares, ['0', '1024'])
+
+        b.set_val("#containers-containers-filter", "all")
+
+        b.click(".pf-m-expanded button:contains('Console')")
+        # WebGL2 is not supported in firefox headless mode
+        if b.browser != "firefox":
+            b.wait_in_text(".pf-m-expanded .xterm-accessibility-tree", "/ # ")
+            b.focus(".pf-m-expanded .xterm-helper-textarea")
+            b.input_text("clear")
+            b.key("Enter")
+            b.wait_not_in_text(".pf-m-expanded .xterm-accessibility-tree", "clear")
+            b.wait_text(".pf-m-expanded .xterm-accessibility-tree > div:nth-child(1)", "/ # ")
+            b.input_text("echo hello")
+            b.key("Enter")
+            b.wait_text(".pf-m-expanded .xterm-accessibility-tree > div:nth-child(2)", "hello")
+            b.wait_text(".pf-m-expanded .xterm-accessibility-tree > div:nth-child(3)", "/ # ")
+            b.wait_text(".pf-m-expanded .xterm-accessibility-tree > div:nth-child(1)", "/ # echo hello")
+
+        b.go("#/?name=tty")
+        self.check_containers(["busybox-with-tty"], ["busybox-without-publish"])
+        b.go("#/?name=busy")
+        self.check_containers(["busybox-with-tty", "busybox-without-publish"], [])
+
+        b.set_input_text('#containers-filter input', 'tty')
+        self.check_containers(["busybox-with-tty"], ["busybox-without-publish"])
+        self.check_images([], [IMG_ALPINE, IMG_BUSYBOX, IMG_REGISTRY])
+        b.set_input_text('#containers-filter input', 'busy')
+        b.wait_js_cond('window.location.hash === "#/?name=busy"')
+        self.check_containers(["busybox-with-tty", "busybox-without-publish"], [])
+        self.check_images([IMG_BUSYBOX], [IMG_ALPINE, IMG_REGISTRY])
+        b.set_input_text('#containers-filter input', 'alpine')
+        b.wait_js_cond('window.location.hash === "#/?name=alpine"')
+        self.check_containers([], ["busybox-with-tty", "busybox-without-publish"])
+        self.check_images([IMG_ALPINE], [IMG_BUSYBOX, IMG_REGISTRY])
+        b.click('#containers-filter button[aria-label="Reset"]')
+        self.check_containers(["busybox-with-tty", "busybox-without-publish"], [])
+        self.check_images([IMG_ALPINE, IMG_BUSYBOX, IMG_REGISTRY], [])
+        b.wait_js_cond('window.location.hash === "#/"')
+
+        self.filter_containers("running")
+        id_with_tty = self.execute("podman inspect --format '{{.Id}}' busybox-with-tty", system=auth).strip()
+
+        container_sel = self.getImageSelector(IMG_BUSYBOX_LATEST, system=auth)
+        b.click(f'{container_sel} td.pf-v6-c-table__toggle button')
+        # running container, just selects it, but leaves "Only running" alone
+        b.click(f"{container_sel} + tr div.ct-listing-panel-body button:contains('busybox-with-tty')")
+        b.wait_js_cond('window.location.hash === "#/' + id_with_tty + '"')
+        b.wait_val("#containers-containers-filter", "running")
+        # FIXME: expanding running container details does not actually work right now
+        # b.wait_in_text("#containers-containers tr.pf-m-expanded .container-details", "sleep infinity")
+        # stopped container, switches to showing all containers
+
+        # Create a container without starting it
+        self.filter_containers("all")
+        container_name = "busybox-not-started"
+        b.wait_visible(f'#containers-images td[data-label="Image"]:contains("{IMG_BUSYBOX}")')
+        self.openCreateContainerDialog(IMG_BUSYBOX_LATEST, system=auth)
+        b.wait_text('div.pf-v6-c-modal-box header', 'Create container')
+
+        b.wait_val("#create-image-image input", IMG_BUSYBOX_LATEST)
+        b.set_input_text("#run-image-dialog-name", container_name)
+        b.set_input_text("#run-image-dialog-command", "sh -c sleep infinity")
+
+        b.click('.pf-v6-c-modal-box__footer #create-image-create-btn')
+        b.wait_not_present("div.pf-v6-c-modal-box")
+
+        sha = self.execute("podman inspect --format '{{.Id}}' " + container_name, system=auth).strip()
+        self.waitContainer(sha, auth=auth, name=container_name, image=IMG_BUSYBOX, state=['Configured', 'Created'])
+
+        self.filter_containers("running")
+        b.wait_not_in_text("#containers-containers", "busybox-not-started")
+        container_sel = f"{self.getImageSelector(IMG_BUSYBOX_LATEST, system=auth)} + tr div.ct-listing-panel-body"
+        b.click(f"{container_sel} button:contains('busybox-not-started')")
+        b.wait_js_cond(f"window.location.hash === '#/{sha}'")
+        b.wait_val("#containers-containers-filter", "all")
+        b.wait_in_text("#containers-containers", "busybox-not-started")
+        # auto-expands container details
+        b.wait_in_text(f"{self.getContainerSelector('busybox-not-started', system=auth)} + tr", "sleep infinity")
+
+        image_sel = self.getImageSelector(IMG_ALPINE_LATEST, system=auth)
+        b.click(f'{image_sel} td.pf-v6-c-table__toggle button')
+        b.wait_in_text(f"{image_sel} td[data-label='Used by']", 'unused')
+
+        b.set_input_text('#containers-filter input', 'foobar')
+        b.wait_in_text('#containers-containers .pf-v6-c-empty-state', 'No containers that match the current filter')
+        b.wait_in_text('#containers-images .pf-v6-c-empty-state', 'No images that match the current filter')
+        b.click('#containers-filter button[aria-label="Reset"]')
+
+        if not auth or not self.machine.ws_container:  # don't kill ws container
+            self.execute("podman rm --all --force --time 0", system=auth)
+            self.execute("podman rmi -af", system=auth)
+            b.wait_in_text('#containers-containers .pf-v6-c-empty-state', 'No containers')
+            b.set_val("#containers-containers-filter", "running")
+            b.wait_in_text('#containers-containers .pf-v6-c-empty-state', 'No running containers')
+            b.wait_in_text('#containers-images .pf-v6-c-empty-state', 'No images')
+
+    def testRunImageUserWithAuth(self) -> None:
+        b = self.browser
+
+        self.login()
+        showImages(b)
+
+        # create container from user image
+        b.wait_in_text("#containers-images", IMG_BUSYBOX)
+        self.openCreateContainerDialog(IMG_BUSYBOX_LATEST, system=False)
+        b.wait_visible("#run-image-dialog-owner-admin:checked")
+        b.set_input_text("#run-image-dialog-name", "user1")
+        b.click('.pf-v6-c-modal-box__footer #create-image-create-run-btn')
+        b.wait_not_present(".pf-v6-c-modal-box")
+        user1_sha = self.execute("podman inspect --format '{{.Id}}' user1", system=False).strip()
+        self.waitContainer(user1_sha, auth=False, owner="admin", state='Running')
+
+        self.openCreateContainerDialog(IMG_BUSYBOX_LATEST)
+        b.wait_visible("#run-image-dialog-owner-system:checked")
+        b.set_input_text("#run-image-dialog-name", "sys1")
+        b.click('.pf-v6-c-modal-box__footer #create-image-create-run-btn')
+        b.wait_not_present(".pf-v6-c-modal-box")
+        sys1_sha = self.execute("podman inspect --format '{{.Id}}' sys1", system=True).strip()
+        self.waitContainer(sys1_sha, auth=True, owner="system", state='Running')
+
+    def check_content(self, kind: str, present: list[str], not_present: list[str]) -> None:
+        b = self.browser
+        for item in present:
+            b.wait_visible(f'#containers-{kind} tbody tr:first-child:contains("{item}")')
+        for item in not_present:
+            b.wait_not_present(f'#containers-{kind} tbody tr:first-child:contains("{item}")')
+
+    def check_containers(self, present: list[str], not_present: list[str]) -> None:
+        self.check_content("containers", present, not_present)
+
+    def check_images(self, present: list[str], not_present: list[str]) -> None:
+        self.check_content("images", present, not_present)
+
+    def waitContainer(self, row_id: str, *, auth: bool, name: str = "", image: str = "", cmd: str = "",
+                      owner: str = "", state: list[str] | str | None = None, pod: str = "no-pod") -> None:
+        """Check the container with row_name has the expected values
+            "image" can be substring, "state" might be string or array of possible states, other are
+            checked for exact match.
+        """
+        uid = '0' if auth else 'user'
+        sel = "#containers-containers #table-" + pod + f" tbody tr[data-row-id=\"{uid}-{row_id}\"]".lower()
+        b = self.browser
+        if name:
+            b.wait_text(sel + " .container-name", name)
+        if image:
+            b.wait_in_text(sel + " td[data-label=Container] small:nth-child(2)", image)
+        if cmd:
+            b.wait_text(sel + " td[data-label=Container] small:last-child", cmd)
+        if owner:
+            if owner == "system":
+                b.wait_text(sel + " td[data-label=Owner]", owner)
+            else:
+                b.wait_text(sel + " td[data-label=Owner]", "user: " + owner)
+        if state is not None:
+            if not isinstance(state, list):
+                state = [state]
+            b.wait(lambda: b.text(sel + " td[data-label=State]") in state)
+
+    def filter_containers(self, value: str) -> None:
+        """Use dropdown menu in the header to filter containers"""
+        b = self.browser
+        b.set_val("#containers-containers-filter", value)
+
+    def confirm_modal(self, text: str) -> None:
+        """Wait for the pop up window and click the button with text"""
+        b = self.browser
+        b.click(f".pf-v6-c-modal-box footer button:contains('{text}')")
+        b.wait_not_present(f".pf-v6-c-modal-box footer button:contains('{text}')")
+
+    def testPruneUnusedImagesSystem(self) -> None:
+        self._testPruneUnusedImagesSystem(auth=True)
+
+    def testPruneUnusedImagesUser(self) -> None:
+        self._testPruneUnusedImagesSystem(auth=False)
+
+    @testlib.skipOstree("no root login available on ostree")
+    def testPruneUnusedImagesRoot(self) -> None:
+        self._testPruneUnusedImagesSystem(auth=False, root=True)
+
+    def _testPruneUnusedImagesSystem(self, *, auth: bool, root: bool = False) -> None:
+        b = self.browser
+        if root:
+            self.login_and_go("/podman", user="root", enable_root_login=True)
+            b.wait_visible("#app")
+        else:
+            self.login(system=auth)
+
+        leftover_images = 1
+        # cockpit-ws image
+        if self.machine.ws_container and (auth or root):
+            leftover_images += 1
+
+        # By default we have 3 unused images, start one.
+        self.execute(f"podman run -d --name used_image --stop-timeout 0 {IMG_ALPINE} sh", system=auth or root)
+        b.click("#image-actions-dropdown")
+        b.click("#prune-unused-images-button")
+
+        if auth:
+            b.wait_count(".pf-v6-c-modal-box__body .pf-v6-c-list li",
+                           (self.user_images_count + self.system_images_count) - leftover_images)
+        elif root:
+            b.wait_count(".pf-v6-c-modal-box__body .pf-v6-c-list li", self.system_images_count - leftover_images)
+        else:
+            b.wait_count(".pf-v6-c-modal-box__body .pf-v6-c-list li", self.user_images_count - leftover_images)
+        if auth:
+            self.assertTrue(b.get_checked("#deleteImages-system"))
+            self.assertTrue(b.get_checked("#deleteImages-admin"))
+            b.assert_pixels('.pf-v6-c-modal-box', "prune-modal", skip_layouts=["rtl", "mobile"])
+        b.click(".pf-v6-c-modal-box button:contains('Prune')")
+
+        # When being superuser, admin images are also removed
+        if auth:
+            self.waitNumImages(leftover_images)
+            checkImage(b, IMG_ALPINE, "system")
+        else:
+            self.waitNumImages(leftover_images)
+            # Two images removed, one in use kept
+            b.wait_not_in_text("#containers-images", IMG_BUSYBOX)
+            b.wait_not_in_text("#containers-images", IMG_REGISTRY)
+            b.wait_in_text("#containers-images", IMG_ALPINE)
+
+        # Prune button should now be disabled
+        b.click("#image-actions-dropdown")
+        b.wait_visible(".pf-m-disabled.pf-v6-c-menu__list-item:contains('Prune unused images')")
+
+    def testPruneUnusedImagesSystemSelections(self) -> None:
+        """ Test the prune unused images selection options"""
+        b = self.browser
+        self.login(system=True)
+
+        b.click("#image-actions-dropdown")
+        b.click("button:contains('Prune unused images')")
+
+        # Deselect both
+        b.click("#deleteImages-system")
+        b.click("#deleteImages-admin")
+        b.wait_visible(".pf-v6-c-modal-box button:contains('Prune'):disabled")
+
+        # Admin / user images are selected
+        expected_images = self.user_images_count + self.system_images_count
+        if self.machine.ws_container:
+            expected_images -= 1
+        b.wait_count(".pf-v6-c-modal-box__body .pf-v6-c-list li", expected_images)
+        # Select user images
+        b.click("#deleteImages-admin")
+        b.click(".pf-v6-c-modal-box button:contains('Prune')")
+
+        # System images are left over
+        self.waitNumImages(self.system_images_count)
+        checkImage(b, IMG_ALPINE, "system")
+        checkImage(b, IMG_BUSYBOX, "system")
+        checkImage(b, IMG_REGISTRY, "system")
+
+        # Pruning again, should delete all system images
+        b.click("#image-actions-dropdown")
+        b.click("button:contains('Prune unused images')")
+        b.wait_count(".pf-v6-c-modal-box__body .pf-v6-c-list li",
+                       self.system_images_count - 1 if self.machine.ws_container else self.system_images_count)
+        b.click(".pf-v6-c-modal-box button:contains('Prune')")
+        self.waitNumImages(1 if self.machine.ws_container else 0)
+
+        # Prune button should now be disabled
+        b.click("#image-actions-dropdown")
+        b.wait_visible(".pf-v6-c-menu__list-item.pf-m-disabled:contains('Prune unused images')")
+
+    def testPruneUnusedContainersSystem(self) -> None:
+        self._testPruneUnusedContainersSystem(auth=True)
+
+    def testPruneUnusedContainersUser(self) -> None:
+        self._testPruneUnusedContainersSystem(auth=False)
+
+    def _testPruneUnusedContainersSystem(self, *, auth: bool) -> None:
+        """Test the prune unused container image dialog"""
+
+        b = self.browser
+        self.login(system=auth)
+
+        # Create running and non-running containers
+        self.execute("podman pod create --name pod", system=auth)
+        notrunninginpodId = self.execute(f"""
+            podman run --name inpod --pod pod -tid {IMG_BUSYBOX} sh -c 'exit 1'""", system=auth).strip()
+        cmd = f"podman run --name inpodrunning --pod pod -tid {IMG_BUSYBOX} sh -c 'sleep infinity'"
+        runninginpodId = self.execute(cmd, system=auth).strip()
+
+        self.execute(f"podman run --name notrunning -tid {IMG_BUSYBOX} sh -c  'exit 1'", system=auth)
+        self.execute(f"podman run --name containerrunning -tid {IMG_BUSYBOX} sh -c 'sleep infinity'", system=auth)
+
+        # Create containers for the opposite of what we are, admin or super admin
+        if auth:
+            self.execute(f"podman run --name adminnotrunning -tid {IMG_BUSYBOX} sh 'exit 1'", system=False)
+            b.wait(lambda: self.getContainerAttr("adminnotrunning", "State", "", system=False) in NOT_RUNNING)
+            self.execute(f"podman run --name adminrunning -tid {IMG_BUSYBOX} sh -c 'sleep infinity'", system=False)
+            b.wait(lambda: self.getContainerAttr("adminrunning", "State", "", system=False) == "Running")
+
+        b.click("#containers-actions-dropdown")
+        b.click("button:contains('Prune unused containers')")
+
+        if auth:
+            b.wait_in_text(".pf-v6-c-modal-box__body tbody:nth-of-type(1) td[data-label=Name]", "adminnotrunning")
+            b.wait_in_text(".pf-v6-c-modal-box__body tbody:nth-of-type(2) td[data-label=Name]", "notrunning")
+        else:
+            b.wait_in_text(".pf-v6-c-modal-box__body tbody td[data-label=Name]", "notrunning")
+
+        b.click(".pf-v6-c-modal-box button:contains('Prune')")
+        b.wait_not_present(".pf-v6-c-modal-box__body")
+
+        if auth:
+            self.waitContainerRow("notrunning", present=False)
+            self.waitContainerRow("adminnotrunning", present=False)
+        else:
+            self.waitContainerRow("notrunning", present=False)
+
+        # Verify running containers still exists
+        self.waitContainerRow("containerrunning")
+        pods: Sequence[ContainerList] = [
+                {"name": "inpod", "state": "Exited", "id": notrunninginpodId, "image": IMG_BUSYBOX,
+                 "command": 'sh -c "exit 1"'},
+                {"name": "inpodrunning", "state": "Running", "id": runninginpodId,
+                 "image": IMG_BUSYBOX, "command": 'sh -c "sleep infinity"'}]
+        self.waitPodContainer("pod", pods, system=auth)
+
+    def testCreateContainerValidation(self) -> None:
+        def validateField(groupSelector: str, value: str, errorMessage: str, resetValue: str = "") -> None:
+            b.wait_visible(".pf-v6-c-modal-box__footer #create-image-create-run-btn:not(:disabled)")
+            b.set_input_text(f"{groupSelector} input", value)
+            b.wait_in_text(f"{groupSelector} .pf-v6-c-helper-text__item-text", errorMessage)
+            b.wait_visible(".pf-v6-c-modal-box__footer #create-image-create-run-btn:disabled")
+            # Reset to acceptable value and verify the validation message is not present
+            b.set_input_text(f"{groupSelector} input", resetValue)
+            b.wait_not_present(f"{groupSelector} .pf-v6-c-helper-text__item-text")
+            b.wait_visible(".pf-v6-c-modal-box__footer #create-image-create-run-btn:not(:disabled)")
+
+        # Test the validation errors
+
+        # complaint about port conflict
+        self.allow_browser_errors("error: Container failed to be started:.*")
+        self.allow_browser_errors("No routable interface.*")
+        self.allow_browser_errors(".*ddress already in use.*5000.*")
+        b = self.browser
+        self.login(system=False)
+        container_name = 'portused'
+
+        # Start a podman container which uses a port
+        self.execute(f"podman run -d -p 5000:5000 --name registry --stop-timeout 0 {IMG_REGISTRY}", system=False)
+        showImages(b)
+
+        b.wait_visible(f'#containers-images td[data-label="Image"]:contains("{IMG_BUSYBOX}")')
+        self.openCreateContainerDialog(IMG_BUSYBOX_LATEST, system=False)
+        b.wait_text('div.pf-v6-c-modal-box header', 'Create container')
+
+        validateField("#image-name-group", "registry", "Name already in use")
+
+        # Switch to Integration tab
+        b.click("#pf-tab-1-create-image-dialog-tab-integration")
+
+        # Test validation of port mapping
+        b.click('.publish-port-form .btn-add')
+        b.set_input_text("#run-image-dialog-publish-0-container-port-group input", "1")
+        validateField("#run-image-dialog-publish-0-ip-address-group", "abcd", "valid IP address")
+        validateField("#run-image-dialog-publish-0-host-port-group", "-1", "1 to 65535")
+        validateField("#run-image-dialog-publish-0-host-port-group", "99999", "1 to 65535")
+        validateField("#run-image-dialog-publish-0-container-port-group", "-1", "1 to 65535", resetValue="1")
+        validateField("#run-image-dialog-publish-0-container-port-group", "", "must not be empty", resetValue="1")
+        validateField("#run-image-dialog-publish-0-container-port-group", "99999", "1 to 65535", resetValue="1")
+
+        # Test validation of volumes
+        b.click('.volume-form .btn-add')
+        b.set_input_text("#run-image-dialog-volume-0-container-path-group input", "/somepath")
+        validateField("#run-image-dialog-volume-0-container-path-group", "", "not be empty", resetValue="/somepath")
+
+        # Test validation of environment variables
+        b.click('.env-form .btn-add')
+        validateField("#run-image-dialog-env-0-key-group", "[]]]", "invalid characters")
+        validateField("#run-image-dialog-env-0-key-group", "1a", "not begin with a digit")
+        validateField("#run-image-dialog-env-0-key-group", "", "must not be empty", resetValue="sometext")
+
+        b.set_input_text("#run-image-dialog-name", container_name)
+
+        # Port address is already in use
+        b.set_input_text('#run-image-dialog-publish-0-host-port', '5000')
+        b.set_input_text('#run-image-dialog-publish-0-container-port', '5000')
+        b.click('.pf-v6-c-modal-box__footer #create-image-create-run-btn')
+        # Can be "[aA]ddress already in use" or "Failed to bind any port" with newer passt
+        b.wait_visible(".pf-v6-c-alert")
+        self.assertRegex(b.text(".pf-v6-c-alert"), "[aA]ddress already in use|[fF]ailed to bind any port")
+
+        # Changing the port should allow creation of container
+        b.set_input_text('#run-image-dialog-publish-0-host-port', '5001')
+        b.click('.pf-v6-c-modal-box__footer #create-image-create-run-btn')
+        b.wait_not_present("#run-image-dialog-name")
+
+        self.waitContainerRow(container_name)
+
+        # Test validation JavaScript errors when removing invalid environment entries
+        container_name = 'env-var-validation'
+        self.openCreateContainerDialog(IMG_BUSYBOX_LATEST, system=False)
+        b.wait_text('div.pf-v6-c-modal-box header', 'Create container')
+
+        b.set_input_text("#run-image-dialog-name", container_name)
+        b.click("#pf-tab-1-create-image-dialog-tab-integration")
+
+        # Make sure our form validation does not crash when adding and removing invalid entries
+        b.chromium_fake_mouse = True  # FIXME; BiDi clicks flake in CI
+        b.click('.env-form .btn-add')
+        b.click('.env-form .btn-add')
+        b.click('.env-form .btn-add')
+        b.set_input_text("#run-image-dialog-env-1-key-group input", "something")
+        b.wait_visible('#run-image-dialog-env-2-key-group')
+        b.click('.pf-v6-c-modal-box__footer #create-image-create-run-btn')
+
+        b.wait_in_text("#run-image-dialog-env-0-key-group .pf-v6-c-helper-text__item-text", "must not be empty")
+        b.wait_in_text("#run-image-dialog-env-2-key-group .pf-v6-c-helper-text__item-text", "must not be empty")
+
+        # remove invalid entries
+        b.click('#run-image-dialog-env-0-btn-close')
+        b.click('#run-image-dialog-env-2-btn-close')
+
+        b.click('.pf-v6-c-modal-box__footer #create-image-create-run-btn')
+        self.waitContainerRow(container_name)
+
+    def _testHealthcheck(self, *, auth: bool) -> None:
+        b = self.browser
+
+        # Just drop user images so we can use simpler selectors
+        if auth:
+            self.execute(f"podman rmi {IMG_BUSYBOX}", system=False)
+
+        self.login(system=auth)
+        showImages(b)
+
+        b.wait_visible(f'#containers-images td[data-label="Image"]:contains("{IMG_BUSYBOX}")')
+        self.openCreateContainerDialog(IMG_BUSYBOX_LATEST, system=auth)
+        b.wait_text('div.pf-v6-c-modal-box header', 'Create container')
+
+        b.set_input_text("#run-image-dialog-name", "healthy")
+
+        b.click("#pf-tab-2-create-image-dialog-tab-healthcheck")
+        b.set_input_text('#run-image-dialog-healthcheck-command', 'true')
+        b.set_input_text('#run-image-healthcheck-interval input', '325')
+        b.set_input_text('#run-image-healthcheck-timeout input', '35')
+        b.set_input_text('#run-image-healthcheck-start-period input', '5')
+        b.click('#run-image-healthcheck-retries .pf-v6-c-input-group__item:nth-child(1) button')
+        b.wait_val("#run-image-healthcheck-retries input", 2)
+        if auth:
+            b.assert_pixels('.pf-v6-c-modal-box', "healthcheck-modal", skip_layouts=["rtl"])
+        b.click('.pf-v6-c-modal-box__footer #create-image-create-run-btn')
+
+        self.waitContainerRow("healthy")
+        # Hide container images
+        b.click("#containers-images .pf-v6-c-expandable-section__toggle button")
+
+        healthy_sha = self.execute("podman inspect --format '{{.Id}}' healthy", system=auth).strip()
+        self.waitContainer(healthy_sha, auth=auth, state='RunningHealthy')
+
+        self.toggleExpandedContainer("healthy", system=auth)
+        b.click(".pf-m-expanded button:contains('Health check')")
+
+        b.wait_in_text('#container-details-healthcheck .healthcheck-command', 'true')
+        b.wait_in_text('#container-details-healthcheck .healthcheck-interval', '325 seconds')
+        b.wait_in_text('#container-details-healthcheck .healthcheck-retries', '2')
+        b.wait_in_text('#container-details-healthcheck .healthcheck-timeout', '35 seconds')
+        b.wait_in_text('#container-details-healthcheck .healthcheck-start-period', '5 seconds')
+        b.wait_not_present('#container-details-healthcheck .healthcheck-failing-streak')
+        b.wait_in_text('#container-details-healthcheck .healthcheck-when-unhealthy', 'No action')
+
+        # format changed in podman 5.1, adds StartInterval (https://github.com/containers/podman/pull/22334)
+        self.assertIn(self.execute("podman inspect --format '{{.Config.Healthcheck}}' healthy", system=auth).strip(),
+                      ["{[true] 5s 5m25s 35s 2}", "{[true] 5s 0s 5m25s 35s 2}"])
+
+        # single successful health check
+        b.wait_in_text(".ct-listing-panel-body tbody tr", "Passed health run")
+        b.wait_visible(".ct-listing-panel-body tbody:nth-of-type(1) svg.green")
+        b.wait_not_present(".ct-listing-panel-body tbody:nth-of-type(2)")
+
+        b.click(".ct-listing-panel-body button:contains('Run health check')")
+        b.wait_visible(".ct-listing-panel-body tbody:nth-of-type(2) svg.green")
+        b.wait_not_present(".ct-listing-panel-body tbody:nth-of-type(3)")
+
+        self.toggleExpandedContainer("healthy", system=auth)
+
+        self.execute(f"podman run --name sick -dt --health-cmd false --health-interval 5s {IMG_BUSYBOX}", system=auth)
+        self.waitContainerRow("sick")
+        unhealthy_sha = self.execute("podman inspect --format '{{.Id}}' sick", system=auth).strip()
+        self.waitContainer(unhealthy_sha, auth=auth, state='RunningUnhealthy')
+        # Unhealthy should be first
+        expected_ws = ""
+        if auth and self.machine.ws_container:
+            expected_ws = "ws"
+        b.wait_collected_text("#containers-containers .container-name", "healthysick" + expected_ws)
+
+        self.toggleExpandedContainer("sick", system=auth)
+        b.click(".pf-m-expanded button:contains('Health check')")
+        b.wait_visible(".pf-m-expanded .ct-listing-panel-body tbody:nth-of-type(1)")
+        b.wait_visible(".pf-m-expanded .ct-listing-panel-body tbody:nth-of-type(4)")
+        b.wait_visible(".pf-m-expanded .ct-listing-panel-body tbody:nth-of-type(2) svg.red")
+        b.wait_in_text('.pf-m-expanded #container-details-healthcheck', 'Failing streak')
+        failures = int(b.text('.pf-m-expanded #container-details-healthcheck .healthcheck-failing-streak'))
+        self.assertGreater(failures, 3)
+        if auth:
+            b.wait_count(".pf-m-expanded table[aria-label=Logs] tbody tr", 5)
+            b.assert_pixels(".pf-m-expanded .pf-v6-c-table__expandable-row-content",
+                            "healthcheck-details",
+                            ignore=["thead", "#container-details-healthcheck .healthcheck-failing-streak",
+                                    "td[data-label='Started at']"],
+                            skip_layouts=["rtl"])
+
+        self.toggleExpandedContainer("sick", system=auth)
+        showImages(b)
+
+        b.wait_visible('#containers-images td[data-label="Image"]:contains("busybox:latest")')
+        self.openCreateContainerDialog(IMG_BUSYBOX_LATEST, system=auth)
+        b.wait_text('div.pf-v6-c-modal-box header', 'Create container')
+
+        containername = "healthaction"
+        b.set_input_text("#run-image-dialog-name", containername)
+        b.set_input_text("#run-image-dialog-command", "/bin/sh -c 'echo 1 > /healthy && sleep infinity'")
+
+        b.click("#pf-tab-2-create-image-dialog-tab-healthcheck")
+        b.set_input_text('#run-image-dialog-healthcheck-command', '/bin/test -f /healthy')
+        b.set_input_text('#run-image-healthcheck-interval input', '1')
+        b.set_input_text('#run-image-healthcheck-timeout input', '1')
+        b.click('#run-image-healthcheck-action-2')
+        b.click('.pf-v6-c-modal-box__footer #create-image-create-run-btn')
+
+        self.waitContainerRow(containername)
+        self.toggleExpandedContainer(containername, system=auth)
+        b.wait(lambda: self.getContainerAttr(containername, "State", "", system=auth) == "RunningHealthy")
+        b.click(".pf-m-expanded button:contains('Health check')")
+        b.wait_in_text('.pf-m-expanded #container-details-healthcheck .healthcheck-when-unhealthy',
+                       'Force stop')
+        # Removing the file should kill the container
+        status = self.execute(f"podman exec {containername} rm -f /healthy", system=auth).strip()
+        b.wait(lambda: self.getContainerAttr(containername,
+                                             "State",
+                                             "span:not(.ct-badge-container-unhealthy)",
+                                             system=auth) in NOT_RUNNING)
+        status = self.execute(f"podman inspect --format '{{{{.State.Health.Status}}}}' {containername}",
+                              system=auth).strip()
+        self.assertEqual(status, "unhealthy")
+
+    def testHealthcheckSystem(self) -> None:
+        self._testHealthcheck(auth=True)
+
+    def testHealthcheckUser(self) -> None:
+        self._testHealthcheck(auth=False)
+
+    def testPodmanRestartEnabledUser(self) -> None:
+        self._testPodmanRestartEnabled(auth=False)
+
+    def testPodmanRestartEnabledSystem(self) -> None:
+        self._testPodmanRestartEnabled(auth=True)
+
+    def _testPodmanRestartEnabled(self, *, auth: bool) -> None:
+        b = self.browser
+        if auth:
+            self.addCleanup(self.machine.execute, "systemctl disable podman-restart.service")
+        else:
+            self.restore_dir("/home/admin/.config")
+            self.machine.execute("loginctl enable-linger $(id -u admin)")
+            # HACK: verify that the file we watch exists
+            self.assertTrue(self.machine.execute("""
+                    if test -e /var/lib/systemd/linger/admin; then echo yes; fi
+            """).strip() != "")
+            self.addCleanup(self.machine.execute, "loginctl disable-linger $(id -u admin)")
+
+        # Drop user images for easy selection
+        if auth:
+            self.execute(f"podman rmi {IMG_BUSYBOX}", system=False)
+
+        self.login(system=auth)
+        showImages(b)
+
+        def create_container(name: str, policy: str | None = None) -> None:
+            b.wait_visible(f'#containers-images td[data-label="Image"]:contains("{IMG_BUSYBOX}")')
+            self.openCreateContainerDialog(IMG_BUSYBOX_LATEST, system=auth)
+            b.wait_text('div.pf-v6-c-modal-box header', 'Create container')
+
+            b.set_input_text("#run-image-dialog-name", name)
+            if policy:
+                b.set_val("#run-image-dialog-restart-policy", "always")
+            b.click('.pf-v6-c-modal-box__footer #create-image-create-run-btn')
+            self.waitContainerRow(name)
+
+        container_name = 'none'
+        create_container(container_name)
+        # format changed in podman 5.1 (https://github.com/containers/podman/pull/22322)
+        self.assertIn(self.getRestartPolicy(container_name, auth=auth), ['{ 0}', '{no 0}'])
+
+        container_name = 'restart'
+        create_container(container_name, 'always')
+        self.assertEqual(self.getRestartPolicy(container_name, auth=auth), '{always 0}')
+        if auth:
+            podmanRestartEnabled = self.execute("systemctl is-enabled podman-restart.service || true",
+                                                system=True).strip()
+        else:
+            podmanRestartEnabled = self.execute("systemctl --user is-enabled podman-restart.service || true",
+                                                system=False).strip()
+        self.assertEqual(podmanRestartEnabled, 'enabled')
+
+    def _testCreateContainerInPod(self, *, auth: bool) -> None:
+        b = self.browser
+
+        container_name = 'containerinpod'
+        podname = "pod1"
+        self.execute(f"podman pod create --infra=false --name={podname}", system=auth)
+
+        self.login(system=auth)
+
+        self.filter_containers('all')
+        b.click(".create-container-in-pod")
+
+        # the podname should be in the "Create container" header
+        self.assertIn(podname, b.text("#pf-modal-part-1"))
+
+        b.set_input_text("#run-image-dialog-name", container_name)
+        # Open image dropdown, it should list both Alpine and Busybox from the local repository
+        b.click("#create-image-image input")
+        b.wait_visible(f'.pf-v6-c-menu__item:contains("{IMG_ALPINE_LATEST}")')
+        b.wait_visible(f'.pf-v6-c-menu__item:contains("{IMG_BUSYBOX_LATEST}")')
+        # Filter it down to just Busybox
+        b.set_input_text("#create-image-image input", IMG_BUSYBOX_LATEST)
+        b.wait_visible(f'.pf-v6-c-menu__item:contains("{IMG_BUSYBOX_LATEST}")')
+        b.wait_not_present(f'.pf-v6-c-menu__item:contains("{IMG_ALPINE_LATEST}")')
+        # Switch to another view; different images have different registries, so don't assume their name, just
+        # that at least one more exists
+        b.click('.image-search-footer .pf-v6-c-toggle-group__item:nth-of-type(3) button')
+        b.wait_in_text(".pf-v6-c-menu", "No images found")
+        # Back to local and let's select Busybox and create the container
+        b.click('.pf-v6-c-toggle-group__button:contains("Local")')
+        b.click(f'.pf-v6-c-menu__item:contains("{IMG_BUSYBOX_LATEST}")')
+        b.click('.pf-v6-c-modal-box__footer #create-image-create-run-btn')
+        b.wait_not_present("#run-image-dialog-name")
+
+        container_sha = self.execute(f"podman inspect --format '{{{{.Id}}}}' {container_name}", system=auth).strip()
+        self.waitContainer(container_sha, auth=auth, name=container_name, image=IMG_BUSYBOX, cmd='sh',
+                           state='Running', owner="system" if auth else "admin", pod=podname)
+
+        # Check that we correctly preselect owner
+        if auth:
+            self.execute("podman pod create --infra=false --name=system_pod", system=False)
+            b.click("#table-system_pod .create-container-in-pod")
+            b.wait_visible("#run-image-dialog-owner-admin:checked")
+            b.wait_visible("#run-image-dialog-owner-admin:disabled")
+            b.wait_visible("#run-image-dialog-owner-system:disabled")
+
+    def testCreateContainerInPodSystem(self) -> None:
+        self._testCreateContainerInPod(auth=True)
+
+    def testCreateContainerInPodUser(self) -> None:
+        self._testCreateContainerInPod(auth=False)
+
+    def testPauseResumeContainerSystem(self) -> None:
+        self._testPauseResumeContainer(auth=True)
+
+    def testPauseResumeContainerUser(self) -> None:
+        # rootless cgroupv1 containers do not support pausing
+        if not self.has_cgroupsV2:
+            return
+        self._testPauseResumeContainer(auth=False)
+
+    def _testPauseResumeContainer(self, *, auth: bool) -> None:
+        b = self.browser
+        container_name = "pauseresume"
+
+        self.execute(f"podman run -dt --name {container_name} --stop-timeout 0 {IMG_ALPINE}", system=auth)
+        self.login(system=auth)
+
+        self.waitContainerRow(container_name)
+        self.toggleExpandedContainer(container_name, system=auth)
+        b.wait_not_present(self.getContainerAction('Resume'))
+        self.performContainerAction(container_name, "Pause", system=auth)
+
+        # show all containers and check status
+        self.filter_containers('all')
+
+        # Check that container details are not lost when the container is paused
+        b.click(".pf-m-expanded button:contains('Integration')")
+        b.wait_in_text(f"{self.getContainerSelector(container_name, system=auth)} + tr", "Environment variables")
+
+        b.wait(lambda: self.getContainerAttr(container_name, "State", "", system=auth) == "Paused")
+        b.wait_not_present(self.getContainerAction('Pause'))
+        self.performContainerAction(container_name, "Resume", system=auth)
+        b.wait(lambda: self.getContainerAttr(container_name, "State", "", system=auth) == "Running")
+
+    def testRenameContainerSystem(self) -> None:
+        self._testRenameContainer(auth=True)
+
+    def testRenameContainerUser(self) -> None:
+        self._testRenameContainer(auth=False)
+
+    def _testRenameContainer(self, *, auth: bool) -> None:
+        b = self.browser
+        container_name = "rename"
+        container_name_new = "rename-new"
+
+        self.execute(f"podman container create -t --name {container_name} {IMG_BUSYBOX}", system=auth)
+        self.login(system=auth)
+
+        self.filter_containers('all')
+
+        self.waitContainerRow(container_name)
+        self.toggleExpandedContainer(container_name, system=auth)
+        self.performContainerAction(container_name, "Rename", system=auth)
+
+        # the container name should be in the "Rename container" header
+        b.wait_in_text("#pf-modal-part-1", container_name)
+        b.set_input_text("#rename-dialog-container-name", "")
+        b.wait_in_text("#commit-dialog-image-name-helper", "Container name is required")
+        b.set_input_text("#rename-dialog-container-name", "banana???")
+        b.wait_in_text("#commit-dialog-image-name-helper", "Name can only contain letters, numbers")
+
+        b.set_input_text("#rename-dialog-container-name", container_name_new)
+        b.assert_pixels(".pf-v6-c-modal-box", "rename-dialog", skip_layouts=["rtl"])
+        b.click('#btn-rename-dialog-container')
+        b.wait_not_present("#rename-dialog-container-name")
+
+        self.execute(f"podman inspect --format '{{{{.Id}}}}' {container_name_new}", system=auth).strip()
+        self.waitContainerRow(container_name_new)
+
+        # rename using the enter key
+        self.toggleExpandedContainer(container_name_new, system=auth)
+        self.performContainerAction(container_name_new, "Rename", system=auth)
+
+        container_name_new = "rename-new-enter"
+        b.set_input_text("#rename-dialog-container-name", "")
+        b.focus("#rename-dialog-container-name")
+        b.key("Enter")
+        b.wait_in_text("#commit-dialog-image-name-helper", "Container name is required")
+        b.set_input_text("#rename-dialog-container-name", container_name_new)
+        b.focus("#rename-dialog-container-name")
+        b.key("Enter")
+        b.wait_not_present("#rename-dialog-container-name")
+
+        self.execute(f"podman inspect --format '{{{{.Id}}}}' {container_name_new}", system=auth).strip()
+        self.waitContainerRow(container_name_new)
+
+        # service containers cannot be renamed
+        # HACK https://issues.redhat.com/browse/RHEL-5870
+        if self.machine.image == "rhel-8-10" and not auth:
+            return
+        service_name = "quadlet"
+        self.createQuadlet(service_name, containerName=service_name, auth=auth)
+        self.waitContainerRow(service_name)
+        b.wait_not_present(self.getContainerAction('Rename'))
+
+    def testMultipleContainers(self) -> None:
+        m = self.machine
+        self.login()
+
+        # Create 31 containers
+        for i in range(31):
+            m.execute(f"podman run -dt --name container{i} --stop-timeout 0 {IMG_BUSYBOX}")
+
+        self.waitContainerRow("container30")
+
+        # Generic cleanup takes too long and timeouts, so remove these container manually one by one
+        for i in range(31):
+            m.execute(f"podman rm -f container{i}")
+
+    def testSpecialContainers(self) -> None:
+        m = self.machine
+        b = self.browser
+
+        toolbox_label = "com.github.containers.toolbox=true"
+        distrobox_label = "manager=distrobox"
+
+        container_1_id = m.execute(f"podman run -d --name container_1 -l {toolbox_label} {IMG_BUSYBOX}").strip()
+        container_2_id = m.execute(f"podman run -d --name container_2 -l {distrobox_label} {IMG_BUSYBOX}").strip()
+
+        self.login()
+
+        self.waitContainerRow('container_1')
+        self.waitContainerRow('container_2')
+
+        container_1_sel = f"#containers-containers tbody tr[data-row-id=\"0-{container_1_id}\"]"
+        container_2_sel = f"#containers-containers tbody tr[data-row-id=\"0-{container_2_id}\"]"
+
+        b.wait_visible(container_1_sel + " .ct-badge-toolbox:contains('toolbox')")
+        b.wait_visible(container_2_sel + " .ct-badge-distrobox:contains('distrobox')")
+
+        self.createQuadlet("container_3", containerName="container_3", auth=True)
+        container_3_id = m.execute("podman container inspect --format '{{.Id}}' container_3").strip()
+        self.waitContainerRow('container_3')
+        container_3_sel = f"#containers-containers tbody tr[data-row-id=\"0-{container_3_id}\"]"
+        b.wait_visible(container_3_sel + " .ct-badge-service:contains('service')")
+
+        # Kube container, check that *-service container is hidden
+        self.createKubeDeployment("jellyfin", auth=True)
+        containerId = self.execute("podman inspect --format '{{.Id}}' jellyfin-pod-jellyfin", system=True).strip()
+        self.waitPodContainer("jellyfin-pod", [{"name": "jellyfin-pod-jellyfin", "image": IMG_BUSYBOX,
+                              "command": "", "state": "Running", "id": containerId}],
+                              system=True)
+        service_container = m.execute("podman ps --all --filter name=.*-service --format {{.Names}}").strip()
+        b.wait_not_present(f"#containers-containers tbody tr[data-row-id=\"{service_container}\"]")
+
+        # opencontainer annotations https://specs.opencontainers.org/image-spec/annotations/
+        label_image = "localhost/label-image:latest"
+        tmpdir = self.execute("mktemp -d", system=True).strip()
+        self.execute(f"echo 'FROM {IMG_REGISTRY}\nRUN ls' > {tmpdir}/Containerfile", system=True)
+        doc_label = "--label org.opencontainers.image.documentation='https://cockpit-project.org'"
+        desc_label = "--label org.opencontainers.image.description='The Cockpit container running cockpit-ws'"
+        version_label = "--label org.opencontainers.image.version='355'"
+        m.execute(f"""podman build -t {label_image} {doc_label} {desc_label} {version_label} {tmpdir}""")
+        checkImage(b, label_image, "system")
+        img_id = m.execute(f"podman inspect --format '{{{{ .Id }}}}' {label_image}").strip()
+        b.click(f"#containers-images tr[data-row-id='0-{img_id}'] td.pf-v6-c-table__toggle button")
+        b.wait_text("#containers-images tbody.pf-m-expanded tr .image-details [data-label='version']", "355")
+        b.wait_text("#containers-images tbody.pf-m-expanded tr .image-details [data-label='description']",
+                    "The Cockpit container running cockpit-ws")
+        self.assertEqual(b.attr(
+                            "#containers-images tbody.pf-m-expanded tr .image-details [data-label='documentation'] a",
+                            "href"
+                         ),
+                         "https://cockpit-project.org")
+        b.click(f"#containers-images tr[data-row-id='0-{img_id}'] td.pf-v6-c-table__toggle button")
+        b.wait_not_present("#containers-images tbody.pf-m-expanded tr .image-details [data-label='description']")
+
+        # External links can't execute JavaScript
+        doc_label = "--label org.opencontainers.image.documentation='javascript:alert(document.cookie)'"
+        version_label = "--label org.opencontainers.image.version='666'"
+        malicious_image = "localhost/invalid-url-image:latest"
+        m.execute(f"""podman build -t {malicious_image} {doc_label} {version_label} {tmpdir}""")
+        checkImage(b, malicious_image, "system")
+        img_id = m.execute(f"podman inspect --format '{{{{ .Id }}}}' {malicious_image}").strip()
+        b.click(f"#containers-images tr[data-row-id='0-{img_id}'] td.pf-v6-c-table__toggle button")
+        b.wait_text("#containers-images tbody.pf-m-expanded tr .image-details [data-label='version']", "666")
+        b.wait_not_present("#containers-images tbody.pf-m-expanded tr .image-details [data-label='documentation'] a")
+
+    def testCreatePodSystem(self) -> None:
+        self._createPod(auth=True)
+
+    def testCreatePodUser(self) -> None:
+        self._createPod(auth=False)
+
+    def _createPod(self, *, auth: bool) -> None:
+        b = self.browser
+        m = self.machine
+        pod_name = "testpod1"
+
+        self.login(system=auth)
+
+        b.click("#containers-containers-create-pod-btn")
+        b.set_input_text("#create-pod-dialog-name", "")
+        b.wait_visible(".pf-v6-c-modal-box__footer #create-pod-create-btn:disabled")
+        b.wait_in_text("#pod-name-group .pf-v6-c-helper-text__item-text", "Invalid characters")
+
+        b.set_input_text("#create-pod-dialog-name", pod_name)
+        b.wait_visible(".pf-v6-c-modal-box__footer #create-pod-create-btn:not(:disabled)")
+
+        b.click('.publish-port-form .btn-add')
+        b.set_input_text("#create-pod-dialog-publish-0-container-port-group input", "-1")
+        b.click(".pf-v6-c-modal-box__footer #create-pod-create-btn")
+        b.wait_in_text("#create-pod-dialog-publish-0-container-port-group .pf-v6-c-helper-text__item-text",
+                       "1 to 65535")
+        b.click("#create-pod-dialog-publish-0-btn-close")
+
+        if auth:
+            b.wait_visible("#create-pod-dialog-owner-system:checked")
+        else:
+            b.wait_not_present("#create-pod-dialog-owner-system")
+
+        # Ports
+        b.click('.publish-port-form .btn-add')
+        b.set_input_text('#create-pod-dialog-publish-1-host-port', '6000')
+        b.set_input_text('#create-pod-dialog-publish-1-container-port', '5000')
+        b.click('.publish-port-form .btn-add')
+        b.set_input_text('#create-pod-dialog-publish-2-ip-address', '127.0.0.1')
+        b.set_input_text('#create-pod-dialog-publish-2-host-port', '6001')
+        b.set_input_text('#create-pod-dialog-publish-2-container-port', '5001')
+        b.set_val('#create-pod-dialog-publish-2-protocol', "udp")
+        b.click('.publish-port-form .btn-add')
+        b.set_input_text('#create-pod-dialog-publish-3-ip-address', '127.0.0.2')
+        b.set_input_text('#create-pod-dialog-publish-3-container-port', '9001')
+
+        # Volumes
+        b.click('.volume-form .btn-add')
+        rodir, rwdir = m.execute("mktemp; mktemp").split('\n')[:2]
+        m.execute(f"chown admin:admin {rodir}")
+        m.execute(f"chown admin:admin {rwdir}")
+
+        if self.has_selinux:
+            b.set_val('#create-pod-dialog-volume-0-selinux', "z")
+        else:
+            b.wait_not_present('#create-pod-dialog-volume-0-selinux')
+
+        b.set_file_autocomplete_val("#create-pod-dialog-volume-0", rodir)
+        b.set_input_text('#create-pod-dialog-volume-0-container-path', '/tmp/ro')
+        b.click('.volume-form .btn-add')
+
+        b.set_file_autocomplete_val("#create-pod-dialog-volume-1", rwdir)
+        b.set_input_text('#create-pod-dialog-volume-1-container-path', '/tmp/rw')
+
+        if auth:
+            b.assert_pixels(".pf-v6-c-modal-box",
+                            "create-pod",
+                            ignore=["#create-pod-dialog-volume-0-host-path-group",
+                                    "#create-pod-dialog-volume-1-host-path-group"],
+                            skip_layouts=["rtl"])
+        b.click("#create-pod-create-btn")
+        b.set_val("#containers-containers-filter", "all")
+        self.waitPodContainer(pod_name, [])
+
+        container_name = 'test-pod-1-system' if auth else 'test-pod-1'
+        cmd = f"podman run -d --pod {pod_name} --name {container_name} --stop-timeout 0 {IMG_ALPINE} sleep 500"
+        containerId = self.execute(cmd, system=auth).strip()
+        self.waitPodContainer(pod_name,
+                              [{"name": container_name, "image": IMG_ALPINE,
+                                "command": "sleep 500", "state": "Running", "id": containerId}],
+                              system=auth)
+
+        self.toggleExpandedContainer(container_name, system=auth)
+        container_sel = self.getContainerSelector(container_name, system=auth)
+        b.click(".pf-m-expanded button:contains('Integration')")
+        b.wait_in_text(f'{container_sel} + tr .container-integration-volumes',
+                       f"{rodir} \u2194 /tmp/ro")
+        b.wait_in_text(f'{container_sel} + tr .container-integration-volumes',
+                       f"{rwdir} \u2194 /tmp/rw")
+
+        b.wait_in_text(f'{container_sel} + tr .container-integration-ports',
+                       '0.0.0.0:6000 \u2192 5000/tcp')
+        b.wait_in_text(f'{container_sel} + tr .container-integration-ports',
+                       '127.0.0.1:6001 \u2192 5001/udp')
+        b.wait_in_text(f'{container_sel} + tr .container-integration-ports',
+                       ' \u2192 9001/tcp')
+
+        # Create pod as admin
+        if auth:
+            pod_name = 'testpod2'
+            b.click("#containers-containers-create-pod-btn")
+            b.set_input_text("#create-pod-dialog-name", pod_name)
+            b.click("#create-pod-dialog-owner-admin")
+            b.click("#create-pod-create-btn")
+
+            b.set_val("#containers-containers-filter", "all")
+            self.waitPodContainer(pod_name, [])
+
+    @testlib.skipBrowser("WebGL2 is not supported in firefox headless mode", "firefox")
+    def testLogErrors(self) -> None:
+        b = self.browser
+        m = self.machine
+        container_name = "logissue"
+        self.login()
+
+        m.execute(f"podman run --log-driver=passthrough --name {container_name} -d {IMG_ALPINE} false </dev/null")
+        self.waitContainerRow(container_name)
+        self.toggleExpandedContainer(container_name)
+        b.click(".pf-m-expanded button:contains('Logs')")
+        b.wait_in_text(".pf-m-expanded .pf-v6-c-empty-state__content", "failed to obtain logs for Container")
+
+    def testManifest(self) -> None:
+        b = self.browser
+        m = self.machine
+        unitdir = m.execute("realpath $(dirname /lib/systemd/system/podman.socket)").strip()
+        self.restore_dir(unitdir, post_restore_action="systemctl daemon-reload")
+        m.execute(f"rm {unitdir}/podman.socket")
+        self.login_and_go(None)
+        b.wait_in_text("#host-apps .pf-m-current", "Overview")
+
+        if (m.image.startswith("rhel-8") or
+                m.image.startswith("centos-8")) and not m.ws_container:
+            # C bridge does not understand manifest conditions yet, and still shows the menu
+            self.assertIn("Podman", b.text("#host-apps"))
+        else:
+            # Python bridge understands manifest conditions, and hides the menu
+            self.assertNotIn("Podman", b.text("#host-apps"))
+
+    @testlib.skipImage("nginx not installed", "centos-*", "rhel-*", "debian-*", "ubuntu-*", "arch")
+    @testlib.skipOstree("nginx not installed")
+    def testNonSearchableRegistry(self) -> None:
+        b = self.browser
+        m = self.machine
+
+        self.setupRegistry()
+
+        # Nginx config simulates behavior of ghcr.io in terms of `podman search` and `podman manifest inspect`
+        self.write_file("/etc/nginx/conf.d/default.conf", NGINX_DEFAULT_CONF,
+                        post_restore_action="systemctl stop nginx.service; setsebool -P httpd_can_network_connect 0")
+        m.execute("""
+            setsebool -P httpd_can_network_connect 1
+            systemctl start nginx.service
+        """)
+
+        container_name = "localhost:80/my-busybox"
+        m.execute(f"""
+            podman manifest create my-busybox
+            podman manifest add my-busybox {IMG_BUSYBOX}
+            podman manifest push my-busybox {container_name}
+            podman manifest push my-busybox {container_name + ":nosearch-tag"}
+            podman manifest push my-busybox "localhost:5000/my-busybox:search-tag"
+        """)
+        # Untag busybox image which duplicates the image we are about to download
+        m.execute(f"""
+            podman manifest rm localhost/my-busybox
+            podman rmi -f {IMG_BUSYBOX}
+        """)
+
+        self.login()
+
+        b.click("#containers-containers button.pf-v6-c-button.pf-m-primary")
+        b.set_input_text("#run-image-dialog-name", "new-busybox")
+        # Searching for container by prefix fails
+        b.set_input_text("#create-image-image input", "localhost:80/my-busy")
+        b.wait_text(".pf-v6-c-menu__item[disabled]", "No images found")
+        b.wait_in_text(".pf-v6-c-alert.pf-m-danger", "couldn't search registry")
+
+        # Giving full image name finds valid manifest therefore image is pullable
+        b.set_input_text("#create-image-image input", container_name)
+        b.wait_text(".pf-v6-c-menu__item:not([disabled])", container_name)
+        # Select image and create a container
+        b.click(f".pf-v6-c-menu__item:contains('{container_name}')")
+        b.click("#create-image-create-btn")
+
+        # Wait for download to finish
+        sel = "span:not(.downloading)"
+        b.wait(lambda: self.getContainerAttr("new-busybox", "State", sel) in "Created")
+
+        checkImage(b, f"{container_name}:latest", "system")
+
+        b.click("#containers-containers button.pf-v6-c-button.pf-m-primary")
+        # "couldn't search registry" error is hidden when some local image is found
+        b.set_input_text("#create-image-image input", "")
+        b.set_input_text("#create-image-image input", "localhost:80/my-busy")
+        b.wait_text(".pf-v6-c-menu__item:not([disabled])", f"{container_name}:latest")
+        b.wait_not_present(".pf-v6-c-alert.pf-m-danger")
+        b.click('button.pf-v6-c-toggle-group__button:contains("Local")')
+
+        # Error is shown again when no image was found locally
+        b.set_input_text("#create-image-image input", "localhost:80/their-busy")
+        b.wait_text(".pf-v6-c-menu__item[disabled]", "No images found")
+        b.wait_in_text(".pf-v6-c-alert.pf-m-danger", "couldn't search registry")
+
+        # Searching for full container name with tag finds the image
+        b.set_input_text("#run-image-dialog-name", "tagged-busybox")
+        # Search should still work with spaces around image name
+        b.set_input_text("#create-image-image input", " localhost:80/my-busybox:nosearch-tag ")
+        b.click('button.pf-v6-c-toggle-group__button:contains("All")')
+        b.wait_text(".pf-v6-c-menu__item:not([disabled])", container_name + ":nosearch-tag")
+        b.wait_js_cond("document.querySelectorAll('.pf-v6-c-menu__item:not([disabled])').length === 1")
+        b.click(f"button.pf-v6-c-menu__item:contains('{container_name + ":nosearch-tag"}')")
+        b.click("#create-image-create-btn")
+
+        # Wait for download to finish
+        sel = "span:not(.downloading)"
+        b.wait(lambda: self.getContainerAttr("tagged-busybox", "State", sel) in "Created")
+        checkImage(b, f"{container_name}:nosearch-tag", "system")
+
+        # Check that manifest search with tag also works on searchable repository
+        b.click("#containers-containers button.pf-v6-c-button.pf-m-primary")
+        b.set_input_text("#create-image-image input", "localhost:5000/my-busybox:search-tag")
+        b.wait_text("button.pf-v6-c-menu__item:not([disabled])", "localhost:5000/my-busybox:search-tag")
+        b.wait_js_cond("document.querySelectorAll('.pf-v6-c-menu__item:not([disabled])').length === 1")
+
+    @testlib.skipImage("page does not survive this with the C bridge", "rhel-8-*")
+    def testReconnectStability(self) -> None:
+        # reloading the page reconnects to the podman services; make sure this works reliably
+        b = self.browser
+
+        self.execute(f"podman run -d --name sys1 --stop-timeout 0 {IMG_BUSYBOX} sleep infinity", system=True)
+        self.execute(f"podman run -d --name user1 --stop-timeout 0 {IMG_ALPINE} sleep infinity", system=False)
+        self.login()
+
+        for _ in range(10):
+            self.waitNumContainers(2, auth=True)
+            b.wait_text("#containers-containers tbody:nth-of-type(1) .container-name", "sys1")
+            b.wait_text("#containers-containers tbody:nth-of-type(2) .container-name", "user1")
+            b.wait(lambda: self.getContainerAttr("user1", "State", "", system=False) == "Running")
+            b.wait(lambda: self.getContainerAttr("sys1", "State") == "Running")
+
+            b.reload()
+            b.enter_page("/podman")
+            b.wait_visible("#app")
+
+        # system events still work
+        self.performContainerAction("sys1", "Force stop")
+        b.wait(lambda: self.getContainerAttr("sys1", "State") in NOT_RUNNING)
+        self.performContainerAction("sys1", "Start")
+        b.wait(lambda: self.getContainerAttr("sys1", "State") == "Running")
+
+        # user events still work
+        self.performContainerAction("user1", "Force stop", system=False)
+        b.wait(lambda: self.getContainerAttr("user1", "State", "", system=False) in NOT_RUNNING)
+        self.performContainerAction("user1", "Start", system=False)
+        b.wait(lambda: self.getContainerAttr("sys1", "State", "") == "Running")
+
+    def _testQuadlets(self, *, system: bool = False) -> None:
+        b = self.browser
+        self.login(system=system)
+
+        service_name = "quak"
+        systemctl_cmd = "systemctl" if system else "systemctl --user"
+        self.createQuadlet(service_name, containerName=service_name, auth=system)
+        self.waitContainerRow(service_name)
+        b.wait(lambda: self.getContainerAttr("quak", "State", "", system=system) == "Running")
+
+        # Cannot delete/commit a quadlet container, they are managed by .container units
+        with self.withContainerActionMenu(service_name, system=system):
+            b.wait_not_present(self.getContainerAction('Delete'))
+            b.wait_not_present(self.getContainerAction('Commit'))
+
+        # Can stop/start/restart a container
+        self.performContainerAction("quak", "Stop", system=system)
+        b.wait(lambda: self.getContainerAttr("quak", "State", "", system=system) == "Exited")
+        # Shows Command when exited
+        b.wait_in_text(f"tr[data-row-id='{'0' if system else 'user'}-quak.service'] small:last-child",
+                       "sleep infinity")
+        self.performContainerAction("quak", "Start", system=system)
+        b.wait(lambda: self.getContainerAttr("quak", "State", "", system=system) == "Running")
+        containerId = self.execute("podman inspect --format '{{.Id}}' quak", system=system).strip()
+        old_start = self.getStartTime("quak", auth=system)
+        data_row_id = ('0-' if system else 'user-') + containerId
+        self.performContainerAction("quak", "Restart", system=system)
+        # Wait for it to properly go away before waitRestart.
+        b.wait_not_present(f'#table-no-pod tr[data-row-id="{data_row_id}"]')
+        self.waitRestart("quak", old_start, auth=system, check=False)
+
+        # Quadlet pod support was introduced in podman 5.0.0
+        if self.podman_version() >= (5, 0, 0):
+            podName = "homeassistant"
+            self.createQuadletPod(podName, auth=system)
+            self.createQuadlet("zigbee", containerName="zigbee", podName=podName, auth=system)
+            self.waitPodRow(podName, present=True)
+            containerId = self.execute("podman inspect --format '{{.Id}}' zigbee", system=system).strip()
+            self.waitPodContainer("homeassistant", [{"name": "zigbee", "image": IMG_BUSYBOX,
+                                  "command": "sleep infinity", "state": "Running", "id": containerId}],
+                                  system=system)
+
+            # Cannot create a container in a pod
+            b.wait_not_present(".create-container-in-pod")
+
+            # Quadlet pods are shown as a service group
+            b.wait_text("#table-homeassistant .pf-v6-c-card__header .ct-badge-service", "service")
+
+            self.performPodAction("homeassistant", "system" if system else "user", "Stop")
+            self.waitPodContainer("homeassistant", [{"name": "zigbee", "image": IMG_BUSYBOX,
+                                  "command": "", "state": "Exited", "id": "zigbee.service"}],
+                                  system=system)
+
+        self.toggleExpandedContainer(service_name, system=system)
+
+        # Service link integration
+        container_sel = self.getContainerSelector(service_name, system=system)
+        b.wait_text(f"{container_sel} + tr .container-details-basic button", f"View {service_name}.service")
+        b.click(f"{container_sel} + tr .container-details-basic button")
+        b.switch_to_top()
+        if system:
+            b.wait_js_cond(f'window.location.hash === "#/{service_name}.service"')
+        else:
+            b.wait_js_cond(f'window.location.hash === "#/{service_name}.service?owner=user"')
+        b.wait_js_cond('window.location.pathname === "/system/services"')
+
+        # Logs page link integration
+        if system:
+            b.go("/podman")
+            b.enter_page("/podman")
+            b.wait_visible("#app")
+
+            b.click(".pf-m-expanded button:contains('Logs')")
+            b.click(f"#containers-containers tbody button:contains('View {service_name}.service logs')")
+            b.switch_to_top()
+            b.wait_js_cond('window.location.pathname === "/system/logs"')
+            b.wait_js_cond(f'window.location.hash === "#/?priority=info&_SYSTEMD_UNIT={service_name}.service"')
+
+        b.go("/podman")
+        b.enter_page("/podman")
+
+        # Stopped quadlets are listed as not running
+        self.execute(f"{systemctl_cmd} stop quak.service", system=system)
+        b.wait(lambda: self.getContainerAttr("quak", "State", "", system=system) in NOT_RUNNING)
+
+        # Quadlet pod support was introduced in podman 5.0.0
+        if self.podman_version() >= (5, 0, 0):
+            # Filtering supports services
+            self.createQuadletPod("immich", podName="media", auth=system)
+            self.createQuadlet("fancydb", containerName="database", podName="immich", auth=system)
+            self.waitPodRow("media", present=True)
+            containerId = self.execute("podman inspect --format '{{.Id}}' database", system=system).strip()
+            self.waitPodContainer("media", [{"name": "database", "image": IMG_BUSYBOX,
+                                  "command": "sleep infinity", "state": "Running", "id": containerId}],
+                                  system=system)
+
+            # Can restart a pod, a pod has no StartedAt so we watch if the container inside it restarts
+            old_start = self.getStartTime("database", auth=system)
+            self.performPodAction("media", "system" if system else "user", "Restart")
+            self.waitRestart("database", old_start, auth=system, check=False)
+
+            # Shows filtering on systemd unit
+            b.set_input_text('#containers-filter input', 'nothing')
+            self.waitContainerRow("database", present=False)
+            b.set_input_text('#containers-filter input', 'fancydb.service')
+            self.waitContainerRow("database", present=True)
+
+            # Filter still recognises the container name
+            b.set_input_text('#containers-filter input', 'nothing')
+            self.waitContainerRow("database", present=False)
+            b.set_input_text('#containers-filter input', 'database')
+            self.waitContainerRow("database", present=True)
+
+            # Filtering also works for pods
+            b.set_input_text('#containers-filter input', 'nothing')
+            self.waitPodRow("media", present=False)
+            b.set_input_text('#containers-filter input', 'immich-pod.service')
+            self.waitPodRow("media", present=True)
+            # Reset filtering
+            b.set_input_text('#containers-filter input', '')
+
+            # Stopping a container in a pod still shows them in the same pod group
+            self.performContainerAction("database", "Stop", system=system)
+            self.waitPodContainer("media", [{"name": "database", "image": IMG_BUSYBOX,
+                                  "command": "", "state": "Exited", "id": "fancydb.service"}],
+                                  system=system)
+
+            # An identical named pod should not cause confusion in the UI
+            if system:
+                self.createQuadletPod("immich", podName="media", auth=False)
+                self.createQuadlet("fancydb", containerName="database", podName="immich", auth=False)
+                b.wait_visible('#pod-media-user-action-toggle')
+                containerId = self.execute("podman inspect --format '{{.Id}}' database", system=False).strip()
+                self.waitPodContainer("media", [{"name": "database", "image": IMG_BUSYBOX,
+                                      "command": "sleep infinity", "state": "Running", "id": containerId}],
+                                      system=False)
+
+                self.performPodAction("media", "user", "Stop")
+                inactive_cmd = "systemctl --user is-active immich-pod.service"
+                self.execute(f'until [ $({inactive_cmd}) = inactive ]; do sleep 1; done',
+                             system=False)
+                # data-started-at="2025-10-13T14:21:51.387895622Z"
+                self.waitPodContainer("media", [{"name": "database", "image": IMG_BUSYBOX,
+                                      "command": "", "state": "Exited", "id": "fancydb.service"}],
+                                      system=False)
+
+                self.performPodAction("media", "user", "Start")
+                self.execute(f'until [ $({inactive_cmd}) = active ]; do sleep 1; done',
+                             system=False)
+                b.wait_visible('#pod-media-user-action-toggle')
+                containerId = self.execute("podman inspect --format '{{.Id}}' database", system=False).strip()
+                self.waitPodContainer("media", [{"name": "database", "image": IMG_BUSYBOX,
+                                      "command": "", "state": "Running", "id": containerId}],
+                                      system=False)
+
+        # Quadlet template does not show but an instance of it does.
+        self.createQuadlet("hostapd@", containerName=None, auth=system, autostart=False)
+        self.execute(f"{systemctl_cmd} start hostapd@test", system=system)
+        self.waitContainerRow("systemd-hostapd_test")
+        self.waitContainerRow("systemd-hostapd@", present=False)
+        self.performContainerAction("systemd-hostapd_test", "Stop", system=system)
+        self.execute(f'until [ $({systemctl_cmd} is-active systemd-hostapd_test) = inactive ]; do sleep 1; done',
+                    system=system)
+
+    # HACK: quadlets broken on RHEL-8 https://issues.redhat.com/browse/RHEL-5870
+    @testlib.skipImage("no quadlet support", "rhel-8-10")
+    def testQuadletsSystem(self) -> None:
+        self._testQuadlets(system=True)
+
+    # HACK: quadlets broken on RHEL-8 https://issues.redhat.com/browse/RHEL-5870
+    @testlib.skipImage("no quadlet support", "rhel-8-10")
+    def testQuadletsUsers(self) -> None:
+        self._testQuadlets(system=False)
+
+    def testOtherUsers(self) -> None:
+        m = self.machine
+        b = self.browser
+
+        # create two system users with running container
+        ssh: dict[str, ssh_connection.SSHConnection] = {}
+        uids: dict[str, str] = {}
+        with open(DEFAULT_IDENTITY_PUB_FILE) as f:
+            authorized_keys = f.read()
+        for user in ['guitar', 'piano']:
+            m.execute(f"useradd --create-home {user}; loginctl enable-linger {user}")
+            uids[user] = m.execute(f"id -u {user}").strip()
+            m.write(f"/home/{user}/.ssh/authorized_keys", authorized_keys, owner=f"{user}:{user}", perm="600")
+            self.addCleanup(m.execute, f"loginctl disable-linger {user}; rm -rf /home/{user}")
+
+            ssh[user] = ssh_connection.SSHConnection(user=user,
+                                                     address=m.ssh_address,
+                                                     ssh_port=m.ssh_port,
+                                                     identity_file=m.identity_file)
+            ssh[user].execute(f"""
+            podman load < /var/lib/test-images/localhosttest-busyboxlatest.tar
+            podman tag {IMG_BUSYBOX} example.com/{user}/myimg
+            podman rmi {IMG_BUSYBOX}
+            podman run -d --name {user}c1 --stop-timeout=0 example.com/{user}/myimg sleep infinity
+            """)
+            self.addCleanup(ssh[user].execute, """
+            systemctl --user stop podman.service podman.socket
+            podman system reset --force
+            """)
+
+        # add a system and admin user container into the mix
+        self.execute(f"podman run -d --name sysc1 --stop-timeout=0 {IMG_BUSYBOX} sleep infinity", system=True)
+        self.execute(f"podman run -d --name adminc1 --stop-timeout=0 {IMG_BUSYBOX} sleep infinity", system=False)
+
+        self.login_and_go("/podman")
+        b.wait_visible("#app")
+
+        # standard and both extra users get detected, with well-defined sorting
+        b.wait_text("#containers-containers-owner", "systemadminguitarpianoAll")
+        b.wait_val("#containers-containers-owner", "all")
+
+        # shows system + admin by default
+        self.waitNumImages(self.user_images_count + self.system_images_count)
+        self.waitNumContainers(2, auth=True)
+        b.wait_text("#containers-containers tbody:nth-of-type(1) .container-name", "adminc1")
+        b.wait_text("#containers-containers tbody:nth-of-type(2) .container-name", "sysc1")
+        showImages(b)
+
+        # switching to other user only shows its images and containers
+        for user in ['guitar', 'piano']:
+            b.set_val("#containers-containers-owner", uids[user])
+            self.waitNumContainers(1, auth=False)
+            b.wait_text("#containers-containers .container-name", f"{user}c1")
+            b.wait_text("#containers-containers [data-label='Owner']", f"user: {user}")
+
+            b.wait_text("#containers-images [data-label='Image']", f"example.com/{user}/myimg:latest")
+            b.wait_text("#containers-images [data-label='Owner']", f"user: {user}")
+
+            self.waitNumImages(1)
+
+        # switch to "all" disconnects other users
+        b.set_val("#containers-containers-owner", "all")
+        self.waitNumContainers(2, auth=True)
+        self.waitNumImages(self.user_images_count + self.system_images_count)
+
+        # reconnect to guitar
+        b.set_val("#containers-containers-owner", uids['guitar'])
+        self.waitNumContainers(1, auth=False)
+
+        # switch session user, disconnects from last other user guitar
+        b.set_val("#containers-containers-owner", "user")
+        self.waitNumContainers(1, auth=False)
+        self.waitNumImages(self.user_images_count)
+
+        b.set_val("#containers-containers-owner", "all")
+        self.waitNumContainers(2, auth=True)
+        self.waitNumImages(self.user_images_count + self.system_images_count)
+
+        # reconnect to guitar
+        b.set_val("#containers-containers-owner", uids["guitar"])
+        self.waitNumContainers(1, auth=False)
+        self.waitNumImages(1)
+
+        def performContainerAction(container: str, uid: str, cmd: str) -> None:
+            b.click(f"#containers-containers tr[data-row-name='{uid}-{container}'] .pf-v6-c-menu-toggle")
+            b.click(self.getContainerAction(cmd))
+
+        def getContainerAttr(container: str, uid: str, key: str) -> str:
+            return b.text(f"#containers-containers tr[data-row-name='{uid}-{container}'] td[data-label={key}]")
+
+        # container lifecycle actions
+        uid = uids["guitar"]
+        performContainerAction("guitarc1", uid, "Force stop")
+        b.wait(lambda: getContainerAttr("guitarc1", uid, "State") in NOT_RUNNING)
+        performContainerAction("guitarc1", uid, "Start")
+        b.wait(lambda: getContainerAttr("guitarc1", uid, "State") == "Running")
+
+        # container creation/removal
+        image = "example.com/guitar/myimg:latest"
+        b.click(f'#containers-images tbody tr[data-row-name="{uid}-{image}"] .ct-container-create')
+        b.set_input_text("#run-image-dialog-name", "new-guitar")
+        b.click("#create-image-create-btn")
+        b.wait_not_present("div.pf-v6-c-modal-box")
+        self.waitContainerRow("new-guitar")
+        performContainerAction("new-guitar", uid, "Delete")
+        b.click(".pf-v6-c-modal-box button:contains('Delete')")
+        self.waitContainerRow("new-guitar", present=False)
+
+        # switch user via URL
+        b.go(f"#/?owner={uids['piano']}")
+        b.wait_js_cond(f'window.location.hash === "#/?owner={uids["piano"]}"')
+        b.wait_text("#containers-containers .container-name", "pianoc1")
+
+        # changing to an unknown user keeps the current filter
+        b.go("#/?owner=99999")
+        b.wait_js_cond(f'window.location.hash === "#/?owner={uids["piano"]}"')
+        b.wait_text("#containers-containers .container-name", "pianoc1")
+
+        b.logout()
+
+        # check quadlet detection
+        # old podman versions don't have quadlet support
+        if m.image not in ["rhel-8-10"]:
+            ssh['guitar'].execute("podman rm -f --all")
+
+            quadlet = """[Container]
+Image=example.com/guitar/myimg
+Exec=sleep infinity
+ContainerName=guitarq1
+"""
+            ssh['guitar'].write("/home/guitar/.config/containers/systemd/guitarq1.container",
+                                quadlet, owner="guitar:guitar")
+            ssh['guitar'].execute("systemctl --user daemon-reload; systemctl --user start guitarq1")
+
+            self.login_and_go("/podman")
+            b.set_val("#containers-containers-owner", uids['guitar'])
+            self.waitNumContainers(1, auth=False)
+            b.wait_text("#containers-containers .container-name", "guitarq1")
+            b.wait_text("#containers-containers [data-label='Owner']", "user: guitar")
+            b.wait_visible("#containers-containers .ct-badge-service")
+            # Dropdown menu is disabled as no lifecycle actions are supported
+            b.wait_visible("#containers-containers td.pf-v6-c-table__action button:disabled")
+
+            # No systemd service link is shown for quadlets from other users as
+            # the services page doesn't support anything except the logged in/admin/root user.
+            sel = f"#containers-containers tbody tr[data-row-name='{uid}-guitarq1']"
+            b.click(f"{sel} .pf-v6-c-table__toggle button")
+
+            b.wait_in_text(f"{sel} + tr", "sleep infinity")
+            b.wait_not_in_text(f"{sel} + tr", "systemd service")
+
+
+if __name__ == '__main__':
+    testlib.test_main()

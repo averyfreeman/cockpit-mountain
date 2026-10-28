@@ -1,0 +1,39 @@
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "rootDir": ".",
+    "target": "esnext",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "typeRoots": [
+      "@types"
+    ],
+    "allowJs": true,
+    "declaration": true,
+    "sourceMap": true,
+    "outDir": "dist",
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "strict": false,
+    "skipLibCheck": true,
+    "lib": [
+      "es6",
+      "dom"
+    ],
+    "jsx": "react-jsx",
+    "paths": {
+      "@app/*": [
+        "src/*"
+      ],
+      "@assets/*": [
+        "node_modules/@patternfly/react-core/dist/styles/assets/*"
+      ]
+    }
+  },
+  "include": [
+    "src"
+  ],
+  "exclude": [
+    "node_modules"
+  ]
+}

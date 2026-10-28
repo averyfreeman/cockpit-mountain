@@ -1,0 +1,28 @@
+.um-header {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.75rem;
+  font-size: 0.875rem;
+}
+
+.um-status-running {
+  color: var(--pf-t--global--text--color--subtle);
+}
+
+.um-status-ok {
+  color: #56d364;
+  font-weight: 600;
+}
+
+.um-status-failed {
+  color: #f85149;
+  font-weight: 600;
+}
+
+
+.um-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 0.75rem;
+}

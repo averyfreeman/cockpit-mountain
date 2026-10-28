@@ -1,0 +1,33 @@
+{
+  "priority": 0,
+  "requires": {
+       "cockpit": "215"
+  },
+  "conditions": [
+      {"path-exists": "/usr/share/dbus-1/system.d/org.libvirt.conf"}
+  ],
+  "menu": {
+     "vms": {
+        "label": "Virtual machines",
+        "path": "index.html",
+        "order": 60,
+        "docs": [
+            {
+                "label": "Managing virtual machines",
+                "url": "https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/9/html/configuring_and_managing_virtualization/managing-virtual-machines-in-the-web-console_configuring-and-managing-virtualization"
+            }
+        ],
+        "keywords": [
+            {
+                "matches": ["iso", "pxe", "qcow2", "libvirt", "vm", "qemu"]
+            }
+        ]
+     }
+  },
+  "content-security-policy": "frame-src 'self' data:",
+  "config": {
+      "StorageMigrationSupported": {
+          "rhel": false
+      }
+  }
+}

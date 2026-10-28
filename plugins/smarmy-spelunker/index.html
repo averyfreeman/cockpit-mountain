@@ -1,0 +1,1441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <title>Explorer</title>
+    <link rel="stylesheet" href="css/bootstrap.min.css">
+    <link rel="stylesheet" href="css/prism.css">
+    <link rel="stylesheet" href="css/quill.snow.css">
+    <link rel="stylesheet" href="css/diff2html.min.css">
+    <link rel="stylesheet" href="css/xterm.css">
+    <link rel="stylesheet" href="css/explorer.css">
+    <script src="../base1/cockpit.js"></script>
+</head>
+<body x-data="explorer" @keydown.window="onKey($event)" @click.window="closeContextMenu()">
+
+<!-- ============== TAB BAR ============== -->
+<div class="tab-bar">
+    <div class="tab-list" x-sort="moveTab($item, $position)">
+    <template x-for="(tab, idx) in tabs" :key="tab.id">
+        <div class="tab"
+             :class="{ active: tab.id === activeTabId }"
+             @click="activateTab(tab.id)"
+             @contextmenu.prevent="openTabMenu($event, tab.id)"
+             @auxclick="$event.button === 1 && closeTabAsk(tab)"
+             x-sort:item="tab.id">
+            <template x-if="!tab._editingTitle">
+                <span class="tab-label" x-text="tabLabel(tab)" @dblclick.stop="startTabTitleEdit(tab)" title="Double-click to rename"></span>
+            </template>
+            <template x-if="tab._editingTitle">
+                <input class="tab-title-input" :value="tab._titleDraft"
+                       x-init="$nextTick(() => { $el.focus(); $el.select(); })"
+                       @click.stop @mousedown.stop @dblclick.stop @contextmenu.stop @auxclick.stop
+                       @keydown.enter.prevent.stop="commitTabTitle(tab, $event.target.value)"
+                       @keydown.escape.prevent.stop="cancelTabTitle(tab)"
+                       @blur="tab._editingTitle && commitTabTitle(tab, $event.target.value)">
+            </template>
+            <span class="tab-admin-badge" x-show="tab.kind === 'dir' && tab.listAdminPath === tab.path" title="Listing as administrator">root</span>
+            <span class="tab-git-badge" x-show="tab.gitInfo && tab.gitInfo.branch" :title="'git: ' + tab.gitInfo?.branch + (tab.gitInfo?.dirty ? ' (dirty)' : '')">⎇</span>
+            <button class="tab-close" @click.stop="closeTabAsk(tab)" title="Close">×</button>
+        </div>
+    </template>
+    </div>
+    <button class="tab-new" @click="newTab()" title="New folder tab (Ctrl+T)">+</button>
+    <button class="tab-new tab-new-term" @click="newTerminalTab()" title="New terminal tab">+▤</button>
+    <div class="tab-bar-spacer"></div>
+    <span class="explorer-version-badge" x-show="pluginVersion && !ui.phone"
+          :class="{ 'update-available': updateState.available }"
+          style="cursor:pointer"
+          @click="updateState.available ? startSelfUpdate() : checkForUpdate(true)"
+          :title="updateState.checking ? 'Checking for updates…' : (updateState.available ? ('Update to v' + updateState.available.version + ' available — click to install') : 'Click to check for updates')"
+          x-text="(updateState.available ? '↑ ' : '') + 'Explorer v' + pluginVersion"></span>
+    <button class="btn btn-sm btn-link tab-bar-btn" @click="openGlobalActions()" title="Run a global action (not tied to a file)">
+        <span>▶ Run</span>
+    </button>
+    <!-- tmux session manager (only when tmux is installed) -->
+    <div class="tmux-wrap" x-show="tmux.available && !ui.phone" @click.outside="tmux.open = false">
+        <button class="btn btn-sm btn-link tab-bar-btn" @click="toggleTmuxPanel($event)" :class="{ 'tmux-btn-active': tmux.open }" title="tmux sessions">
+            <span>▤ tmux</span>
+        </button>
+        <div class="tmux-panel" x-show="tmux.open" x-cloak :style="`top:${tmux.top}px;right:${tmux.right}px`">
+            <div class="tmux-panel-head">
+                <span>tmux sessions</span>
+                <button class="tmux-icon-btn" @click="refreshTmuxSessions()" title="Refresh">⟳</button>
+            </div>
+            <div class="tmux-panel-body">
+                <div class="tmux-empty" x-show="tmux.loading">Loading…</div>
+                <div class="tmux-empty text-danger" x-show="!tmux.loading && tmux.error" x-text="tmux.error"></div>
+                <div class="tmux-empty" x-show="!tmux.loading && !tmux.error && !tmux.sessions.length">No sessions yet.</div>
+                <template x-for="s in tmux.sessions" :key="s.name">
+                    <div class="tmux-row" :class="{ open: isTmuxSessionOpen(s.name) }">
+                        <button class="tmux-row-main" @click="openTmuxSession(s.name)" :title="'Open ' + s.name">
+                            <span class="tmux-row-name" x-text="s.name"></span>
+                            <span class="tmux-row-meta" x-text="s.windows + (s.windows === 1 ? ' window' : ' windows') + (s.attached ? ' · attached' : '')"></span>
+                            <span class="tmux-row-open" x-show="isTmuxSessionOpen(s.name)">open</span>
+                        </button>
+                        <button class="tmux-kill" @click.stop="killTmuxSession(s.name)" title="Kill session">✕</button>
+                    </div>
+                </template>
+            </div>
+            <div class="tmux-panel-foot">
+                <button class="tmux-new" @click="newTmuxSession()">＋ New session…</button>
+                <button class="tmux-new tmux-conf" x-show="tmux.hasConf" x-cloak @click="editTmuxConf()" title="Edit ~/.tmux.conf">⚙ Edit .tmux.conf</button>
+            </div>
+        </div>
+    </div>
+    <button class="btn btn-sm btn-link tab-bar-btn" @click="openMounts()" x-show="!ui.phone" title="Mounts / fstab editor">
+        <span>⛁ Mounts</span>
+    </button>
+    <button class="btn btn-sm btn-link tab-bar-btn" @click="openGrub()" x-show="grub.available && !ui.phone" x-cloak title="Edit /etc/default/grub and regenerate the boot config">
+        <span>⏻ GRUB</span>
+    </button>
+    <button class="btn btn-sm btn-link tab-bar-btn" @click="openActionsManager()" x-show="!ui.phone" title="Manage custom actions">
+        <span>⚙ Actions</span>
+    </button>
+    <button class="btn btn-sm btn-link tab-bar-btn" @click="openPluginUpdater()" x-show="!ui.phone" title="Plugin Manager — update or install your Cockpit plugins">
+        <span>⬆ Plugins</span>
+    </button>
+    <div class="ai-menu-wrap" x-show="(ai.have.claude || ai.have.codex) && !ui.phone" x-cloak @click.outside="ui.aiMenuOpen = false" style="position:relative">
+        <button class="btn btn-sm btn-link tab-bar-btn" @click="toggleAiMenu($event)" :class="{ 'tmux-btn-active': ui.aiMenuOpen }" title="Open an AI CLI (Claude / Codex) — pick the folder to start in">
+            <span>✦ AI ▾</span>
+        </button>
+        <div class="agent-add-menu agent-add-menu--toolbar" x-show="ui.aiMenuOpen" x-cloak :style="`top:${ui.aiMenuTop}px;right:${ui.aiMenuRight}px`">
+            <button x-show="ai.have.claude" @click="ui.aiMenuOpen=false; aiPickAndOpen('claude', currentPane().path)">✦ New Claude…</button>
+            <button x-show="ai.have.codex" @click="ui.aiMenuOpen=false; aiPickAndOpen('codex', currentPane().path)">◆ New Codex…</button>
+            <button @click="ui.aiMenuOpen=false; openAgentSessions()">⟲ Resume session…</button>
+        </div>
+    </div>
+    <button class="btn btn-sm btn-link tab-bar-btn" @click="openUsers()" x-show="!ui.phone" title="Users &amp; sudo — manage local accounts and sudo access">
+        <span>⛊ Users</span>
+    </button>
+    <button class="btn btn-sm btn-link tab-bar-btn" @click="openSettings()" x-show="!ui.phone" title="Settings">
+        <span>⚙</span>
+    </button>
+    <!-- Phone: collapse secondary toolbar actions into one menu -->
+    <div class="toolbar-more" x-show="ui.phone" x-cloak @click.outside="ui.moreOpen = false">
+        <button class="btn btn-sm btn-link tab-bar-btn" @click="ui.moreOpen = !ui.moreOpen" title="More">
+            <span>⋯</span>
+        </button>
+        <div class="toolbar-more-panel" x-show="ui.moreOpen" x-cloak>
+            <button class="toolbar-more-item" @click="ui.moreOpen=false; openMounts()">⛁ Mounts</button>
+            <button class="toolbar-more-item" x-show="grub.available" @click="ui.moreOpen=false; openGrub()">⏻ GRUB</button>
+            <button class="toolbar-more-item" @click="ui.moreOpen=false; openActionsManager()">⚙ Actions</button>
+            <button class="toolbar-more-item" @click="ui.moreOpen=false; openPluginUpdater()">⬆ Plugins</button>
+            <button class="toolbar-more-item" x-show="ai.have.claude" @click="ui.moreOpen=false; aiPickAndOpen('claude', currentPane().path)">✦ New Claude…</button>
+            <button class="toolbar-more-item" x-show="ai.have.codex" @click="ui.moreOpen=false; aiPickAndOpen('codex', currentPane().path)">◆ New Codex…</button>
+            <button class="toolbar-more-item" x-show="ai.have.claude || ai.have.codex" @click="ui.moreOpen=false; openAgentSessions()">⟲ Resume AI session</button>
+            <button class="toolbar-more-item" @click="ui.moreOpen=false; openUsers()">⛊ Users &amp; sudo</button>
+            <button class="toolbar-more-item" @click="ui.moreOpen=false; openSettings()">⚙ Settings</button>
+            <button class="toolbar-more-item" x-show="pluginVersion"
+                    @click="ui.moreOpen=false; updateState.available ? startSelfUpdate() : checkForUpdate(true)"
+                    x-text="(updateState.available ? '↑ ' : '') + 'Explorer v' + pluginVersion"></button>
+        </div>
+    </div>
+</div>
+
+<!-- ============== TABS CONTENT ============== -->
+<template x-for="tab in tabs" :key="tab.id">
+    <div class="tab-pane" x-show="tab.id === activeTabId">
+      <!-- ===== DIRECTORY TAB ===== -->
+      <template x-if="tab.kind === 'dir'">
+       <div class="tab-pane-inner d-flex flex-column flex-grow-1" style="min-height:0">
+        <!-- Toolbar -->
+        <div class="toolbar">
+            <div class="btn-group btn-group-sm me-2 toolbar-nav">
+                <button class="btn btn-outline-secondary" @click="goBack(activePane(tab))" :disabled="activePane(tab).historyIdx <= 0" title="Back (Alt+Left)">←</button>
+                <button class="btn btn-outline-secondary" @click="goForward(activePane(tab))" :disabled="activePane(tab).historyIdx >= activePane(tab).history.length - 1" title="Forward (Alt+Right)">→</button>
+                <button class="btn btn-outline-secondary" @click="goUp(activePane(tab))" title="Up">↑</button>
+                <button class="btn btn-outline-secondary" @click="goHome(activePane(tab))" title="Home">⌂</button>
+                <button class="btn btn-outline-secondary" @click="reload(activePane(tab))" title="Reload (F5)">⟳</button>
+            </div>
+
+            <!-- Dual-pane toggle (Midnight Commander style) -->
+            <button class="btn btn-sm me-2" :class="tab.dual ? 'btn-primary' : 'btn-outline-secondary'"
+                    @click="toggleDualPane(tab)" :title="tab.dual ? 'Switch to single pane' : 'Split into two panes'">⊞ <span x-text="tab.dual ? 'Single' : 'Split'"></span></button>
+
+            <!-- Selection indicator (active pane) — compact echo of the status-bar
+                 breakdown, placed where the user is already looking. Reads the
+                 same tab.selection array as statusText()/selectionSummary() in
+                 the status bar (single source of truth, no separate count).
+                 Hidden on phones: the per-tab toolbar already wraps heavily
+                 there and the status bar still carries the full breakdown, so
+                 skipping it avoids any risk of crowding the phone layout. -->
+            <span class="toolbar-selection me-2" x-show="!ui.phone && !tab.dual && activePane(tab).selection.length > 0" x-cloak
+                  :title="selectionSummary(activePane(tab)) + ' — click to clear'"
+                  @click="clearSelection(activePane(tab))"
+                  x-text="activePane(tab).selection.length + ' selected'"></span>
+
+            <!-- Breadcrumbs / path input (active pane) -->
+            <!-- Uses tab.editingPathTop (not the pane's editingPath) so that in
+                 dual mode the top bar and the active pane's per-pane bar never
+                 render two focus-stealing inputs for the same flag. -->
+            <div class="path-bar flex-grow-1" @dblclick="tab.editingPathTop = true">
+                <template x-if="!tab.editingPathTop">
+                    <div class="breadcrumbs" @click="tab.editingPathTop = true">
+                        <a href="#" class="breadcrumb-root" @click.prevent.stop="navigate(activePane(tab), '/')">/</a><template x-for="(seg, i) in pathSegments(activePane(tab).path)" :key="i"><span><a href="#" @click.prevent.stop="navigate(activePane(tab), seg.path)" x-text="seg.label"></a><span x-show="i < pathSegments(activePane(tab).path).length - 1" class="sep">/</span></span></template>
+                    </div>
+                </template>
+                <template x-if="tab.editingPathTop">
+                    <input type="text" class="form-control form-control-sm path-input"
+                           :value="activePane(tab).path"
+                           @keydown.enter="navigate(activePane(tab), $event.target.value); tab.editingPathTop = false"
+                           @keydown.escape="tab.editingPathTop = false"
+                           @blur="tab.editingPathTop = false"
+                           x-init="$nextTick(() => $el.focus())">
+                </template>
+            </div>
+
+            <!-- Search (active pane) -->
+            <div class="search-box ms-2">
+                <input type="text" class="form-control form-control-sm" placeholder="Search…"
+                       x-model="activePane(tab).search.query"
+                       @keydown.enter="runSearch(activePane(tab))"
+                       @keydown.escape="clearSearch(activePane(tab))">
+                <div class="search-opts dropdown">
+                    <button class="btn btn-sm btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown">⚙</button>
+                    <ul class="dropdown-menu dropdown-menu-end">
+                        <li><label class="dropdown-item"><input type="radio" :name="'srch-mode-' + tab.id" value="name" x-model="activePane(tab).search.mode"> Filename match</label></li>
+                        <li><label class="dropdown-item"><input type="radio" :name="'srch-mode-' + tab.id" value="content" x-model="activePane(tab).search.mode"> Content (grep)</label></li>
+                        <li><hr class="dropdown-divider"></li>
+                        <li><label class="dropdown-item"><input type="checkbox" x-model="activePane(tab).search.recursive"> Search subfolders</label></li>
+                        <li><label class="dropdown-item"><input type="checkbox" x-model="activePane(tab).search.regex"> Regular expression</label></li>
+                        <li><label class="dropdown-item"><input type="checkbox" x-model="activePane(tab).search.caseInsensitive"> Case-insensitive</label></li>
+                        <li><hr class="dropdown-divider"></li>
+                        <li><button class="dropdown-item" @click="runSearch(activePane(tab))">Search</button></li>
+                        <li><button class="dropdown-item" @click="clearSearch(activePane(tab))" x-show="activePane(tab).search.active">Clear results</button></li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- View options -->
+            <div class="ms-2 dropdown">
+                <button class="btn btn-sm btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown">View</button>
+                <ul class="dropdown-menu dropdown-menu-end">
+                    <li><label class="dropdown-item"><input type="checkbox" x-model="settings.showHidden" @change="saveSettings(); reload(tab)"> Hidden files</label></li>
+                    <li><hr class="dropdown-divider"></li>
+                    <li><h6 class="dropdown-header">Columns</h6></li>
+                    <li><label class="dropdown-item"><input type="checkbox" x-model="settings.columns.size" @change="saveSettings()"> Size</label></li>
+                    <li><label class="dropdown-item"><input type="checkbox" x-model="settings.columns.modified" @change="saveSettings()"> Modified</label></li>
+                    <li><label class="dropdown-item"><input type="checkbox" x-model="settings.columns.perms" @change="saveSettings()"> Permissions</label></li>
+                    <li><label class="dropdown-item"><input type="checkbox" x-model="settings.columns.owner" @change="saveSettings()"> Owner / Group</label></li>
+                    <li><label class="dropdown-item"><input type="checkbox" x-model="settings.columns.type" @change="saveSettings()"> Type</label></li>
+                </ul>
+            </div>
+
+            <!-- Run command -->
+            <button class="btn btn-sm btn-outline-secondary ms-1" @click="openRunCommand(activePane(tab))" title="Run command (in shell)">⌨ Run…</button>
+
+            <!-- Integrated split terminal (v1.2) -->
+            <button class="btn btn-sm btn-outline-secondary ms-1" @click="openIntegratedTerminal(tab, activePane(tab).path)" title="Open integrated terminal at this directory">▤ Term</button>
+
+            <!-- Open in Cockpit terminal -->
+            <button class="btn btn-sm btn-outline-secondary ms-1" @click="openInTerminal(activePane(tab).path)" title="Open Cockpit terminal page at this directory">▭ Cockpit term</button>
+
+            <!-- Cached repos dropdown (v1.2) -->
+            <div class="dropdown ms-1" x-show="cachedRepoList().length > 0">
+                <button class="btn btn-sm btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" :title="cachedRepoList().length + ' cached repositories'">
+                    <span style="font-weight:bold">⌂</span> Repos
+                </button>
+                <ul class="dropdown-menu dropdown-menu-end cached-repos-dropdown">
+                    <li><h6 class="dropdown-header">Cached local repositories</h6></li>
+                    <template x-for="r in cachedRepoList()" :key="r.key + '|' + r.path">
+                        <li class="cached-repo-row">
+                            <a class="dropdown-item" href="#" @click.prevent="navigateToCachedRepo(activePane(tab), r.path)" :title="r.path">
+                                <span class="repo-title" x-text="r.title"></span>
+                                <span class="repo-key ms-2" x-text="r.key"></span>
+                                <span class="repo-path" x-text="r.path"></span>
+                            </a>
+                            <button class="cached-repo-btn" @click.stop.prevent="setRepoTitle(r.key, r.path)" title="Rename">✎</button>
+                            <button class="cached-repo-btn cached-repo-forget" @click.stop.prevent="forgetCheckout(r.key, r.path)" title="Unregister (remove from cache; files are NOT deleted)">✕</button>
+                        </li>
+                    </template>
+                    <li><hr class="dropdown-divider"></li>
+                    <li><a class="dropdown-item small text-muted" href="#" @click.prevent="openGithubPanel(tab)">Manage cache in GitHub panel…</a></li>
+                </ul>
+            </div>
+
+            <!-- GitHub menu -->
+            <button class="btn btn-sm btn-outline-secondary ms-1" @click="openGithubPanel(tab)" title="GitHub"><span style="font-weight:bold">GH</span></button>
+        </div>
+
+        <!-- Current-repo strip (active pane's git work-tree) -->
+        <div class="repo-strip" x-show="activePane(tab).gitInfo && activePane(tab).gitInfo.branch">
+            <span class="repo-strip-branch">
+                <span class="dropdown d-inline-block">
+                    <a class="branch-dd-toggle" href="#" data-bs-toggle="dropdown" data-bs-auto-close="true" @click.prevent="loadRepoBranches(activePane(tab))" title="Switch branch">
+                        <strong x-text="activePane(tab).gitInfo?.branch"></strong> <span class="branch-dd-caret">▾</span>
+                    </a>
+                    <ul class="dropdown-menu branch-dd-menu">
+                        <li><h6 class="dropdown-header">Switch branch</h6></li>
+                        <li x-show="branchSwitcher.loading"><span class="dropdown-item-text text-muted small">Loading…</span></li>
+                        <template x-for="b in branchSwitcher.locals" :key="b">
+                            <li><a class="dropdown-item" :class="{ active: b === branchSwitcher.current }" href="#" @click.prevent="switchRepoBranch(activePane(tab), b, false)" x-text="b"></a></li>
+                        </template>
+                        <template x-if="!branchSwitcher.loading && branchSwitcher.remotes.length">
+                            <li><h6 class="dropdown-header">Remote branches</h6></li>
+                        </template>
+                        <template x-for="b in branchSwitcher.remotes" :key="'r:' + b">
+                            <li><a class="dropdown-item small" href="#" @click.prevent="switchRepoBranch(activePane(tab), b, true)"><span x-text="b"></span></a></li>
+                        </template>
+                        <li x-show="!branchSwitcher.loading && !branchSwitcher.locals.length && !branchSwitcher.remotes.length"><span class="dropdown-item-text text-muted small">No branches.</span></li>
+                        <template x-if="branchSwitcher.copies.length">
+                            <li><hr class="dropdown-divider"></li>
+                        </template>
+                        <template x-if="branchSwitcher.copies.length">
+                            <li><h6 class="dropdown-header">Local copies of this repo</h6></li>
+                        </template>
+                        <template x-for="c in branchSwitcher.copies" :key="'c:' + c.path">
+                            <li>
+                                <a class="dropdown-item branch-copy-item" :class="{ active: c.current }" href="#" @click.prevent="navigateToCachedRepo(activePane(tab), c.path)" :title="c.path">
+                                    <span class="branch-copy-title" x-text="c.title"></span>
+                                    <span class="branch-copy-path" x-text="c.path"></span>
+                                </a>
+                            </li>
+                        </template>
+                    </ul>
+                </span>
+                <span x-show="activePane(tab).gitInfo?.dirty" class="badge bg-warning text-dark ms-1" :title="'Uncommitted changes: ' + (activePane(tab).gitInfo?.dirtyCount || 0)">●</span>
+                <span x-show="activePane(tab).gitInfo?.ahead > 0" class="badge bg-info text-dark ms-1" :title="'Ahead of ' + activePane(tab).gitInfo?.remoteBranch + ' by ' + activePane(tab).gitInfo?.ahead + ' commit(s)'">↑<span x-text="activePane(tab).gitInfo?.ahead"></span></span>
+                <span x-show="activePane(tab).gitInfo?.behind > 0" class="badge bg-info text-dark ms-1" :title="'Behind ' + activePane(tab).gitInfo?.remoteBranch + ' by ' + activePane(tab).gitInfo?.behind + ' commit(s)'">↓<span x-text="activePane(tab).gitInfo?.behind"></span></span>
+                <span class="text-muted ms-2 small" x-text="activePane(tab).gitInfo?.remote?.ownerRepo"></span>
+                <button class="btn btn-sm btn-link p-0 ms-2"
+                        x-show="activePane(tab).gitInfo?.remote?.ownerRepo && !pathInCachedRepo(activePane(tab).gitInfo.remote.ownerRepo, activePane(tab).path)"
+                        @click="registerCurrentTab(activePane(tab))" title="Register this checkout in the repo cache">+ Register</button>
+                <span class="badge bg-success ms-2 small"
+                      x-show="activePane(tab).gitInfo?.remote?.ownerRepo && pathInCachedRepo(activePane(tab).gitInfo.remote.ownerRepo, activePane(tab).path)">cached</span>
+            </span>
+            <span class="ms-auto btn-group btn-group-sm">
+                <button class="btn btn-outline-secondary" x-show="gh.state === 'authed'" @click="repoFetch(activePane(tab))" title="Fetch (git fetch --all --prune)">Fetch</button>
+                <button class="btn btn-outline-secondary" x-show="gh.state === 'authed'" @click="repoPull(activePane(tab))" title="Pull (fast-forward only)">Pull</button>
+                <button class="btn btn-outline-secondary" @click="repoStageCommit(activePane(tab), false)" :disabled="!activePane(tab).gitInfo?.dirty" title="Commit staged changes locally (no network)">Commit…</button>
+                <button class="btn btn-outline-secondary" x-show="gh.state === 'authed'" @click="repoStageCommit(activePane(tab), true)" :disabled="!activePane(tab).gitInfo?.dirty">Commit &amp; Push…</button>
+                <button class="btn btn-outline-primary" x-show="gh.state === 'authed'" @click="repoPush(activePane(tab))">Push</button>
+                <button class="btn btn-outline-danger" x-show="activePane(tab).gitInfo?.dirty" @click="repoRollback(activePane(tab))" title="Discard ALL uncommitted changes (reset --hard + remove untracked files)">Rollback</button>
+                <button class="btn btn-outline-warning" x-show="gh.state !== 'authed'" @click="openGithubPanel(tab)" title="Set up GitHub (gh CLI) to enable Fetch / Pull / Push">Set up GitHub…</button>
+            </span>
+        </div>
+
+        <!-- Not-a-repo strip: offer to publish to GitHub -->
+        <div class="publish-strip" x-show="activePane(tab).gitChecked && !activePane(tab).gitInfo && !insideAnyRepoCache(activePane(tab).path)">
+            <span class="text-muted">This folder isn't version-controlled.</span>
+            <button class="btn btn-sm btn-outline-primary ms-auto" @click="openPublishDialog(activePane(tab))">Publish to GitHub…</button>
+        </div>
+
+        <!-- File panes (1 or 2, MC-style) + optional integrated terminal split -->
+        <div class="tab-split-body" :class="{ 'dual-horizontal': tab.dual }">
+        <div class="panes-container">
+        <template x-for="p in paneList(tab)" :key="p.paneId || p.id">
+          <div class="file-pane" :class="{ 'pane-active': tab.dual && isActivePane(tab, p), dual: tab.dual }"
+               @mousedown="_activatePaneRef(tab, p)">
+            <!-- per-pane path header (dual mode only) -->
+            <div class="pane-head" x-show="tab.dual">
+                <div class="btn-group btn-group-sm">
+                    <button class="btn btn-outline-secondary" @click="goUp(p)" title="Up">↑</button>
+                    <button class="btn btn-outline-secondary" @click="reload(p)" title="Reload">⟳</button>
+                </div>
+                <div class="pane-path breadcrumbs ms-2 flex-grow-1" @dblclick="p.editingPath = true">
+                    <template x-if="!p.editingPath">
+                        <span><a href="#" class="breadcrumb-root" @click.prevent.stop="navigate(p, '/')">/</a><template x-for="(seg, i) in pathSegments(p.path)" :key="i"><span><a href="#" @click.prevent.stop="navigate(p, seg.path)" x-text="seg.label"></a><span x-show="i < pathSegments(p.path).length - 1" class="sep">/</span></span></template></span>
+                    </template>
+                    <template x-if="p.editingPath">
+                        <input type="text" class="form-control form-control-sm path-input"
+                               :value="p.path"
+                               @keydown.enter="navigate(p, $event.target.value); p.editingPath = false"
+                               @keydown.escape="p.editingPath = false"
+                               @blur="p.editingPath = false"
+                               x-init="$nextTick(() => $el.focus())">
+                    </template>
+                </div>
+                <!-- per-pane selection indicator — this pane's own count, so
+                     dual-mode selections can never be confused between panes.
+                     Reuses .toolbar-selection styling and the same
+                     statusText()/selectionSummary() source as the footer below. -->
+                <span class="toolbar-selection ms-2" x-show="p.selection.length > 0" x-cloak
+                      :title="selectionSummary(p) + ' — click to clear'"
+                      @click="clearSelection(p)"
+                      x-text="p.selection.length + ' selected'"></span>
+            </div>
+
+            <!-- per-pane error -->
+            <div x-show="p.error" class="alert alert-warning alert-sm mb-0" role="alert">
+                <span x-text="p.error"></span>
+                <button x-show="p.errorRetryAsAdmin" class="btn btn-sm btn-warning ms-2" @click="reload(p, { admin: true })">Retry as administrator</button>
+                <button class="btn-close float-end" @click="p.error = null"></button>
+            </div>
+
+            <!-- per-pane search results header -->
+            <div x-show="p.search.active" class="search-results-bar">
+                <span>Search results for <strong x-text="p.search.query"></strong>
+                      (<span x-text="p.search.mode === 'content' ? 'content' : 'filename'"></span><span
+                       x-show="p.search.regex">, regex</span><span
+                       x-show="p.search.caseInsensitive">, case-insensitive</span>,
+                      <span x-text="p.files.length"></span> results)</span>
+                <button class="btn btn-sm btn-link" @click="clearSearch(p)">Clear</button>
+            </div>
+
+            <div class="file-list-wrap"
+                 @click.self="clearSelection(p)"
+                 @contextmenu.self.prevent="openContextMenu($event, p, null)"
+                 @dragover.prevent="onDragOver($event, p)"
+                 @drop.prevent="onDrop($event, p)">
+                <table class="file-list table table-sm table-hover">
+                    <thead>
+                        <tr>
+                            <th class="col-check"><input type="checkbox" @change="toggleSelectAll(p, $event.target.checked)"></th>
+                            <th class="col-name sortable" @click="setSort(p, 'name')">Name <span x-text="sortIndicator(p, 'name')"></span></th>
+                            <th class="col-size sortable" x-show="settings.columns.size" @click="setSort(p, 'size')">Size <span x-text="sortIndicator(p, 'size')"></span></th>
+                            <th class="col-modified sortable" x-show="settings.columns.modified" @click="setSort(p, 'mtime')">Modified <span x-text="sortIndicator(p, 'mtime')"></span></th>
+                            <th class="col-perms" x-show="settings.columns.perms">Permissions</th>
+                            <th class="col-owner" x-show="settings.columns.owner">Owner</th>
+                            <th class="col-type" x-show="settings.columns.type">Type</th>
+                            <th class="col-menu" aria-label="Actions"></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <template x-for="file in sortedFiles(p)" :key="file.path">
+                            <tr :class="{ selected: p.selection.includes(file.path), 'cut-file': clipboard.op === 'cut' && clipboard.paths.includes(file.path) }"
+                                :data-path="file.path"
+                                @click="onRowClick($event, p, file)"
+                                @dblclick="openFile(p, file)"
+                                @contextmenu.prevent="onRowContextMenu($event, p, file)"
+                                draggable="true"
+                                @dragstart="onDragStart($event, p, file)"
+                                @dragover="onRowDragOver($event, file)"
+                                @dragleave="onRowDragLeave($event)"
+                                @drop.prevent.stop="onDrop($event, p, file)">
+                                <td class="col-check" @click.stop><input type="checkbox" :checked="p.selection.includes(file.path)" @change="toggleSelect(p, file)"></td>
+                                <td class="col-name">
+                                    <span class="file-icon" x-text="fileIcon(file)"></span>
+                                    <span class="file-name" x-text="file.name"></span>
+                                    <span x-show="file.symlinkTarget" class="symlink-target" x-text="'→ ' + file.symlinkTarget"></span>
+                                </td>
+                                <td class="col-size" x-show="settings.columns.size" x-text="file.type === 'd' ? '—' : humanSize(file.size)"></td>
+                                <td class="col-modified" x-show="settings.columns.modified" x-text="formatDate(file.mtime)"></td>
+                                <td class="col-perms" x-show="settings.columns.perms" x-text="file.perms"></td>
+                                <td class="col-owner" x-show="settings.columns.owner" x-text="file.owner + ':' + file.group"></td>
+                                <td class="col-type" x-show="settings.columns.type" x-text="typeLabel(file)"></td>
+                                <td class="col-menu" @click.stop @dblclick.stop>
+                                    <button type="button" class="row-menu-btn" title="Actions"
+                                            aria-label="Open actions menu"
+                                            @click.stop="onRowContextMenu($event, p, file)" @dblclick.stop>⋮</button>
+                                </td>
+                            </tr>
+                        </template>
+                        <tr x-show="!p.loading && p.files.length === 0">
+                            <td :colspan="visibleColumnCount()" class="empty-state">
+                                <span x-show="p.search.active">No results found.</span>
+                                <span x-show="!p.search.active">This folder is empty.</span>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+                <div x-show="p.loading" class="loading-overlay">Loading…</div>
+            </div>
+
+            <!-- per-pane status footer (dual mode only) — this pane's own
+                 totals/selection, styled like the shared .status-bar so it
+                 reads as the same UI element but is unambiguous per pane.
+                 Reuses statusText()/selectionSummary() (single source of
+                 truth, same as the shared bar) so counts can't drift. -->
+            <div class="status-bar" x-show="tab.dual">
+                <span x-text="statusText(p)"></span>
+                <span class="ms-auto status-selection" x-text="p.selection.length > 0 ? selectionSummary(p) : ''"></span>
+            </div>
+          </div>
+        </template>
+        </div>
+        <!-- Integrated terminal split — vertical (right) normally, horizontal (bottom) in dual mode.
+             x-if (not x-show): the pane also carries a reactive :style, and toggling Split re-applies
+             that :style, which wiped the inline display:none x-show had set — leaving an empty pane
+             stuck visible. x-if adds/removes the elements from the DOM, so an empty split can't linger. -->
+        <template x-if="tab.splitOpen && tab.terminals && tab.terminals.length > 0">
+            <div class="term-resizer" :class="{ horizontal: tab.dual }"
+                 @mousedown="_startTermResize($event, tab)"></div>
+        </template>
+        <template x-if="tab.splitOpen && tab.terminals && tab.terminals.length > 0">
+        <div class="term-pane"
+             :style="tab.dual ? `height:${tab.splitHeight || 260}px` : `width:${tab.splitWidth || 480}px`">
+            <div class="term-stack">
+                <div class="term-tabbar">
+                    <div class="term-subtab-list" x-sort="moveTerminal(tab, $item, $position)">
+                    <template x-for="t in (tab.terminals || [])" :key="t.id">
+                        <div class="term-subtab"
+                             :class="{ active: tab.activeTermId === t.id }"
+                             @click="selectTerminal(tab, t.id)"
+                             @auxclick="$event.button === 1 && closeTerminal(tab, t.id)"
+                             @mouseenter="showTermPath($event, t)" @mouseleave="hideTermPath()" @dblclick.stop="startTermTitleEdit(t)"
+                             x-sort:item="t.id">
+                            <template x-if="!t._editingTitle">
+                                <span class="term-subtab-label" x-text="termLabel(t)"></span>
+                            </template>
+                            <template x-if="t._editingTitle">
+                                <input class="term-subtab-input" :value="t._titleDraft"
+                                       x-init="$nextTick(() => { $el.focus(); $el.select(); })"
+                                       @click.stop @mousedown.stop @dblclick.stop @auxclick.stop
+                                       @keydown.enter.prevent.stop="commitTermTitle(t, $event.target.value)"
+                                       @keydown.escape.prevent.stop="cancelTermTitle(t)"
+                                       @blur="t._editingTitle && commitTermTitle(t, $event.target.value)">
+                            </template>
+                            <button class="term-subtab-close" @click.stop="closeTerminal(tab, t.id)" title="Close terminal (middle-click also)">×</button>
+                        </div>
+                    </template>
+                    </div>
+                    <button class="term-subtab-add" @click="addTerminalToTab(tab, activePane(tab).path)" title="New terminal at current folder">+</button>
+                    <span class="term-tabbar-spacer"></span>
+                    <div class="term-tabbar-actions">
+                        <button @click="closeSplit(tab)" title="Close split pane (all terminals)">×</button>
+                    </div>
+                </div>
+                <div class="term-containers">
+                    <template x-for="t in (tab.terminals || [])" :key="t.id">
+                        <div class="term-container"
+                             :id="'term-container-' + t.id"
+                             x-show="tab.activeTermId === t.id"></div>
+                    </template>
+                </div>
+            </div>
+        </div>
+        </template>
+                <!-- Inline Diff + code-census panel for a git-repo dir tab -->
+                <button class="repo-reveal" x-show="tab.kind==='dir' && activePane(tab).gitInfo && !tab.repoPanelOpen" @click="aiToggleRepoPanel(tab)" title="Show repository diff + code census">◈ repo</button>
+                <div class="repo-panel" x-show="tab.repoPanelOpen">
+                    <div class="repo-panel-head">
+                        <div class="btn-group btn-group-sm">
+                            <button class="btn btn-outline-secondary" :class="{active: tab.repoView==='diff'}" @click="aiRepoSetView(tab,'diff')">Diff</button>
+                            <button class="btn btn-outline-secondary" :class="{active: tab.repoView==='census'}" @click="aiRepoSetView(tab,'census')">Census</button>
+                        </div>
+                        <button class="btn btn-sm btn-outline-secondary ms-auto agent-diff-collapse" @click="aiToggleRepoPanel(tab)" title="Close">▶</button>
+                    </div>
+                    <div class="repo-panel-body">
+                    <div class="agent-diff" x-show="tab.repoView==='diff'">
+                    <div class="agent-diff-head">
+                        <div class="btn-group btn-group-sm">
+                            <button class="btn btn-outline-secondary" :class="{active: paneSession(tab) && paneSession(tab).diff.mode==='all'}" @click="aiSetDiffMode(paneSession(tab),'all')">All</button>
+                            <button class="btn btn-outline-secondary" :class="{active: paneSession(tab) && paneSession(tab).diff.mode==='unstaged'}" @click="aiSetDiffMode(paneSession(tab),'unstaged')">Unstaged</button>
+                            <button class="btn btn-outline-secondary" :class="{active: paneSession(tab) && paneSession(tab).diff.mode==='staged'}" @click="aiSetDiffMode(paneSession(tab),'staged')">Staged</button>
+                        </div>
+                        <button class="btn btn-sm btn-outline-secondary ms-1" @click="aiRefreshDiff(paneSession(tab))" title="Refresh">⟳</button>
+                        <span class="agent-diff-note text-muted small ms-2" x-show="paneSession(tab) && paneSession(tab).diff.note" x-text="paneSession(tab) ? paneSession(tab).diff.note : ''"></span>
+                    </div>
+                    <template x-if="paneSession(tab) && !paneSession(tab).diff.repo">
+                        <div class="agent-diff-empty text-muted p-3">Not a git repository — the terminal still works.</div>
+                    </template>
+                    <template x-if="paneSession(tab) && paneSession(tab).diff.repo">
+                        <div class="agent-diff-wrap">
+                            <!-- Changed-files strip: click a file to show only its diff
+                                 (click more to add them, back-to-back); ✎ opens it in the editor. -->
+                            <div class="agent-diff-files" x-show="paneSession(tab).diff.files.length">
+                                <div class="agent-diff-filter small" x-show="paneSession(tab).diff.selected && paneSession(tab).diff.selected.length">
+                                    <span x-text="'Showing ' + paneSession(tab).diff.selected.length + ' of ' + paneSession(tab).diff.files.length + ' files'"></span>
+                                    <a href="#" @click.prevent="aiDiffClearSelection(paneSession(tab))">Show all</a>
+                                </div>
+                                <template x-for="f in paneSession(tab).diff.files" :key="f.file">
+                                    <div class="agent-diff-file" :class="{ sel: aiDiffFileSelected(paneSession(tab), f.file) }"
+                                         @click="aiDiffToggleFile(paneSession(tab), f.file)"
+                                         :title="'Click to show only this file’s diff'">
+                                        <span class="add" x-text="'+'+f.added"></span> <span class="rem" x-text="'−'+f.removed"></span>
+                                        <span class="fn" x-text="f.file"></span>
+                                        <button class="agent-diff-edit" @click.stop="aiPreviewDiffFile(paneSession(tab), f.file)" title="Preview">👁</button>
+                                        <button class="agent-diff-edit" @click.stop="aiOpenDiffFile(paneSession(tab), f.file)" title="Open in editor">✎</button>
+                                    </div>
+                                </template>
+                            </div>
+                            <div class="agent-diff-body" x-show="paneSession(tab).diff.text" x-html="aiDiffHtml(paneSession(tab))"></div>
+                            <div class="agent-diff-empty text-muted p-3" x-show="!paneSession(tab).diff.text">No changes.</div>
+                        </div>
+                    </template>
+                </div>
+                    <div class="agent-scc" x-show="tab.repoView==='census'">
+                    <div class="agent-scc-head">
+                        <select class="form-select form-select-sm agent-scc-sel" x-show="aiSccActive(tab) && aiSccActive(tab).scc"
+                                @change="aiSccSetSub(aiSccActive(tab), $event.target.value)"
+                                x-effect="if (aiSccActive(tab) && aiSccActive(tab).scc) $el.value = aiSccActive(tab).scc.sub">
+                            <optgroup label="scc">
+                                <option value="table">Language table</option>
+                                <option value="cx">Complexity</option>
+                                <option value="hot">Hotspots (churn × cx)</option>
+                            </optgroup>
+                            <optgroup label="Quality">
+                                <option value="cov">Coverage (lcov)</option>
+                                <option value="todo">TODO / FIXME</option>
+                            </optgroup>
+                            <optgroup label="Scanners">
+                                <option value="secrets">Secrets (gitleaks)</option>
+                                <option value="deps">Dependencies (osv-scanner)</option>
+                                <option value="dup">Duplication (jscpd)</option>
+                                <option value="fn">Function complexity (lizard)</option>
+                            </optgroup>
+                        </select>
+                        <button class="btn btn-sm btn-outline-secondary ms-1" @click="aiSccRefreshActive(aiSccActive(tab))" :disabled="aiSccActive(tab) && aiSccBusy(aiSccActive(tab))" title="Re-run analysis">⟳</button>
+                        <button class="btn btn-sm ms-1" :class="aiSccActive(tab) && aiSccActive(tab).scc.auto && aiSccActive(tab).scc.auto.enabled ? 'btn-success' : 'btn-outline-secondary'" @click="aiSccToggleAuto(aiSccActive(tab))" title="Background auto-refresh (systemd timer)">⏱</button>
+                        <button class="btn btn-sm btn-outline-secondary ms-1" @click="aiSccReport(aiSccActive(tab))" :disabled="!!(aiSccActive(tab) && aiSccActive(tab).scc && aiSccActive(tab).scc.reporting)" title="Generate report"><span x-show="!(aiSccActive(tab) && aiSccActive(tab).scc && aiSccActive(tab).scc.reporting)">Report</span><span x-show="aiSccActive(tab) && aiSccActive(tab).scc && aiSccActive(tab).scc.reporting">Generating…</span></button>
+                        <button class="btn btn-sm btn-outline-secondary ms-1" @click="aiSccExport(aiSccActive(tab))" :disabled="!aiSccCanExport(aiSccActive(tab))" title="Export this table as JSON">JSON</button>
+                        <button class="btn btn-sm btn-outline-secondary ms-1" @click="aiSccExportAll(aiSccActive(tab))" :disabled="!!(aiSccActive(tab) && aiSccActive(tab).scc && aiSccActive(tab).scc.exporting)" title="Export ALL census tables as a JSON zip"><span x-show="!(aiSccActive(tab) && aiSccActive(tab).scc && aiSccActive(tab).scc.exporting)">Zip all</span><span x-show="aiSccActive(tab) && aiSccActive(tab).scc && aiSccActive(tab).scc.exporting">Zipping…</span></button>
+                    </div>
+                    <template x-if="aiSccActive(tab) && aiSccActive(tab).scc && aiSccActive(tab).scc.installed === false && aiSccActive(tab).scc.hint">
+                        <div class="agent-scc-install">
+                            <p class="mb-1"><strong>scc</strong> isn't installed. Install it in one click (<span x-text="aiSccActive(tab).scc.hint.label"></span>):</p>
+                            <button class="btn btn-sm btn-primary mb-2" @click="aiSccInstall(aiSccActive(tab))" :disabled="aiSccActive(tab).scc.installing">
+                                <span x-show="!aiSccActive(tab).scc.installing">Install scc</span>
+                                <span x-show="aiSccActive(tab).scc.installing">Installing…</span>
+                            </button>
+                            <pre class="agent-scc-cmd" x-show="aiSccActive(tab).scc.installLog" x-text="aiSccActive(tab).scc.installLog"></pre>
+                            <details class="agent-scc-manual">
+                                <summary>Manual steps</summary>
+                                <pre class="agent-scc-cmd" x-text="aiSccActive(tab).scc.hint.primary"></pre>
+                                <template x-for="a in aiSccActive(tab).scc.hint.alt" :key="a"><div class="agent-scc-alt" x-text="a"></div></template>
+                            </details>
+                            <a href="https://github.com/boyter/scc" target="_blank" rel="noopener" class="small">About scc ↗</a>
+                        </div>
+                    </template>
+                    <template x-if="aiSccActive(tab) && aiSccActive(tab).scc && aiSccActive(tab).scc.installed">
+                        <div class="agent-scc-body">
+                            <!-- TABLE sub-pane -->
+                            <div class="agent-scc-scroll" x-show="aiSccActive(tab).scc.sub==='table'">
+                                <div class="agent-scc-loading" x-show="aiSccActive(tab).scc.table.loading">Running scc…</div>
+                                <div class="agent-diff-empty text-muted p-2" x-show="!aiSccActive(tab).scc.table.loading && !aiSccActive(tab).scc.table.total && !aiSccActive(tab).scc.table.err">Not analyzed yet — press ⟳ to run.</div>
+                                <div class="agent-diff-empty text-danger p-2" x-show="aiSccActive(tab).scc.table.err" x-text="aiSccActive(tab).scc.table.err"></div>
+                                <table class="agent-scc-table" x-show="!aiSccActive(tab).scc.table.loading && aiSccActive(tab).scc.table.total">
+                                    <thead><tr>
+                                        <th @click="aiSccSort(aiSccActive(tab),'name')">Language</th>
+                                        <th class="num" @click="aiSccSort(aiSccActive(tab),'files')">Files</th>
+                                        <th class="num" @click="aiSccSort(aiSccActive(tab),'lines')">Lines</th>
+                                        <th class="num" @click="aiSccSort(aiSccActive(tab),'comments')">Comments</th>
+                                        <th class="num" @click="aiSccSort(aiSccActive(tab),'code')">Code</th>
+                                        <th class="num" @click="aiSccSort(aiSccActive(tab),'complexity')">Cx</th>
+                                    </tr></thead>
+                                    <tbody>
+                                        <template x-for="r in aiSccActive(tab).scc.table.rows" :key="r.name">
+                                            <tr><td class="lang"><span x-text="r.name"></span><span class="scc-kind" x-show="r.kind==='data'">data</span></td>
+                                                <td class="num" x-text="r.files.toLocaleString()"></td>
+                                                <td class="num" x-text="r.lines.toLocaleString()"></td>
+                                                <td class="num" x-text="r.comments.toLocaleString()"></td>
+                                                <td class="num code" x-text="r.code.toLocaleString()"></td>
+                                                <td class="num" x-text="r.complexity.toLocaleString()"></td>
+                                            </tr>
+                                        </template>
+                                        <template x-if="aiSccActive(tab).scc.table.total">
+                                        <tr class="scc-total"><td class="lang">Total</td>
+                                            <td class="num" x-text="aiSccActive(tab).scc.table.total.files.toLocaleString()"></td>
+                                            <td class="num" x-text="aiSccActive(tab).scc.table.total.lines.toLocaleString()"></td>
+                                            <td class="num" x-text="aiSccActive(tab).scc.table.total.comments.toLocaleString()"></td>
+                                            <td class="num code" x-text="aiSccActive(tab).scc.table.total.code.toLocaleString()"></td>
+                                            <td class="num" x-text="aiSccActive(tab).scc.table.total.complexity.toLocaleString()"></td>
+                                        </tr>
+                                        </template>
+                                    </tbody>
+                                </table>
+                            </div>
+                            <!-- COMPLEXITY sub-pane -->
+                            <div class="agent-scc-scroll" x-show="aiSccActive(tab).scc.sub==='cx'">
+                                <div class="agent-scc-loading" x-show="aiSccActive(tab).scc.cx.loading">Computing complexity…</div>
+                                <div class="agent-diff-empty text-danger p-2" x-show="aiSccActive(tab).scc.cx.err" x-text="aiSccActive(tab).scc.cx.err"></div>
+                                <table class="agent-scc-table" x-show="!aiSccActive(tab).scc.cx.loading && aiSccActive(tab).scc.cx.top.length">
+                                    <thead><tr><th @click="aiSccSortBy(aiSccActive(tab),'cx','filename')">File</th><th class="num" @click="aiSccSortBy(aiSccActive(tab),'cx','code')">Code</th><th class="num" @click="aiSccSortBy(aiSccActive(tab),'cx','complexity')">Cx</th><th class="num" @click="aiSccSortBy(aiSccActive(tab),'cx','cxPerKloc')">Cx/kloc</th></tr></thead>
+                                    <tbody>
+                                        <template x-for="f in aiSccList(aiSccActive(tab),'cx')" :key="f.location">
+                                            <tr><td class="lang" :title="f.location"><span class="scc-fn" x-text="f.filename"></span><span class="scc-lang" x-text="f.language"></span><span class="scc-fa"><button @click.stop="aiSccPreviewFile(aiSccActive(tab), f.location)" title="Preview">👁</button><button @click.stop="aiSccOpenFile(aiSccActive(tab), f.location)" title="Open in editor">✎</button></span></td>
+                                                <td class="num" x-text="f.code.toLocaleString()"></td>
+                                                <td class="num code" x-text="f.complexity.toLocaleString()"></td>
+                                                <td class="num" x-text="f.cxPerKloc.toLocaleString()"></td>
+                                            </tr>
+                                        </template>
+                                    </tbody>
+                                </table>
+                                <div class="agent-diff-empty text-muted p-2" x-show="!aiSccActive(tab).scc.cx.loading && !aiSccActive(tab).scc.cx.ranAt && !aiSccActive(tab).scc.cx.err">Not analyzed yet — press ⟳ to run.</div>
+                            </div>
+                            <!-- HOTSPOTS sub-pane: churn × complexity -->
+                            <div class="agent-scc-scroll" x-show="aiSccActive(tab).scc.sub==='hot'">
+                                <div class="agent-scc-loading" x-show="aiSccActive(tab).scc.hot.loading">Computing churn × complexity…</div>
+                                <div class="agent-diff-empty text-danger p-2" x-show="aiSccActive(tab).scc.hot.err" x-text="aiSccActive(tab).scc.hot.err"></div>
+                                <table class="agent-scc-table" x-show="!aiSccActive(tab).scc.hot.loading && aiSccActive(tab).scc.hot.files.length">
+                                    <thead><tr><th @click="aiSccSortBy(aiSccActive(tab),'hot','filename')">File</th><th class="num" title="commits touching the file, last year" @click="aiSccSortBy(aiSccActive(tab),'hot','churn')">Churn</th><th class="num" @click="aiSccSortBy(aiSccActive(tab),'hot','complexity')">Cx</th><th class="num" title="churn × complexity" @click="aiSccSortBy(aiSccActive(tab),'hot','score')">Score</th></tr></thead>
+                                    <tbody>
+                                        <template x-for="f in aiSccList(aiSccActive(tab),'hot')" :key="f.location">
+                                            <tr><td class="lang" :title="f.location"><span class="scc-fn" x-text="f.filename"></span><span class="scc-lang" x-text="f.language"></span><span class="scc-fa"><button @click.stop="aiSccPreviewFile(aiSccActive(tab), f.location)" title="Preview">👁</button><button @click.stop="aiSccOpenFile(aiSccActive(tab), f.location)" title="Open in editor">✎</button></span></td>
+                                                <td class="num" x-text="f.churn.toLocaleString()"></td>
+                                                <td class="num" x-text="f.complexity.toLocaleString()"></td>
+                                                <td class="num code" x-text="f.score.toLocaleString()"></td>
+                                            </tr>
+                                        </template>
+                                    </tbody>
+                                </table>
+                                <div class="agent-diff-empty text-muted p-2" x-show="!aiSccActive(tab).scc.hot.loading && aiSccActive(tab).scc.hot.ranAt && !aiSccActive(tab).scc.hot.files.length && !aiSccActive(tab).scc.hot.err">No hotspots — nothing is both frequently changed and complex in this window.</div>
+                                <div class="agent-diff-empty text-muted p-2" x-show="!aiSccActive(tab).scc.hot.loading && !aiSccActive(tab).scc.hot.ranAt && !aiSccActive(tab).scc.hot.err">Not analyzed yet — press ⟳ to run.</div>
+                            </div>
+                            <!-- COVERAGE sub-pane: from an existing lcov file -->
+                            <div class="agent-scc-scroll" x-show="aiSccActive(tab).scc.sub==='cov'">
+                                <div class="agent-scc-loading" x-show="aiSccActive(tab).scc.cov.loading">Reading coverage…</div>
+                                <div class="agent-diff-empty text-muted p-2" x-show="!aiSccActive(tab).scc.cov.loading && !aiSccActive(tab).scc.cov.ranAt && !aiSccActive(tab).scc.cov.err">Not analyzed yet — press ⟳ to run.</div>
+                                <div class="agent-diff-empty text-muted p-2" x-show="aiSccActive(tab).scc.cov.err" x-text="aiSccActive(tab).scc.cov.err"></div>
+                                <div class="agent-scc-covtotal" x-show="aiSccActive(tab).scc.cov.total" x-text="aiSccActive(tab).scc.cov.total ? (aiSccActive(tab).scc.cov.total.pct + '% lines covered · ' + aiSccActive(tab).scc.cov.total.files + ' files · ' + aiSccActive(tab).scc.cov.path) : ''"></div>
+                                <table class="agent-scc-table" x-show="!aiSccActive(tab).scc.cov.loading && aiSccActive(tab).scc.cov.files.length">
+                                    <thead><tr><th @click="aiSccSortBy(aiSccActive(tab),'cov','filename')">File</th><th class="num" @click="aiSccSortBy(aiSccActive(tab),'cov','lines')">Lines</th><th class="num" @click="aiSccSortBy(aiSccActive(tab),'cov','hit')">Hit</th><th class="num" @click="aiSccSortBy(aiSccActive(tab),'cov','pct')">%</th></tr></thead>
+                                    <tbody>
+                                        <template x-for="f in aiSccList(aiSccActive(tab),'cov')" :key="f.location">
+                                            <tr><td class="lang" :title="f.location"><span class="scc-fn" x-text="f.filename"></span><span class="scc-fa"><button @click.stop="aiSccPreviewFile(aiSccActive(tab), f.location)" title="Preview">👁</button><button @click.stop="aiSccOpenFile(aiSccActive(tab), f.location)" title="Open in editor">✎</button></span></td>
+                                                <td class="num" x-text="f.lines.toLocaleString()"></td>
+                                                <td class="num" x-text="f.hit.toLocaleString()"></td>
+                                                <td class="num code" :class="{'cov-low': f.pct<50, 'cov-mid': f.pct>=50&&f.pct<80, 'cov-high': f.pct>=80}" x-text="f.pct + '%'"></td>
+                                            </tr>
+                                        </template>
+                                    </tbody>
+                                </table>
+                            </div>
+                            <!-- TODO / FIXME census -->
+                            <div class="agent-scc-scroll" x-show="aiSccActive(tab).scc.sub==='todo'">
+                                <div class="agent-scc-loading" x-show="aiSccActive(tab).scc.todo.loading">Scanning…</div>
+                                <div class="agent-diff-empty text-muted p-2" x-show="!aiSccActive(tab).scc.todo.loading && !aiSccActive(tab).scc.todo.ranAt && !aiSccActive(tab).scc.todo.err">Not analyzed yet — press ⟳ to run.</div>
+                                <div class="agent-diff-empty text-danger p-2" x-show="aiSccActive(tab).scc.todo.err" x-text="aiSccActive(tab).scc.todo.err"></div>
+                                <div class="agent-scc-covtotal" x-show="aiSccActive(tab).scc.todo.ranAt" x-text="Object.keys(aiSccActive(tab).scc.todo.counts).map(k=>k+' '+aiSccActive(tab).scc.todo.counts[k]).join(' · ') || 'None found ✓'"></div>
+                                <table class="agent-scc-table" x-show="aiSccActive(tab).scc.todo.items.length">
+                                    <thead><tr><th @click="aiSccSortBy(aiSccActive(tab),'todo','marker')">Marker</th><th @click="aiSccSortBy(aiSccActive(tab),'todo','file')">File</th><th class="num" @click="aiSccSortBy(aiSccActive(tab),'todo','line')">Line</th><th @click="aiSccSortBy(aiSccActive(tab),'todo','text')">Text</th></tr></thead>
+                                    <tbody><template x-for="(t,i) in aiSccList(aiSccActive(tab),'todo')" :key="i">
+                                        <tr><td class="code" x-text="t.marker"></td><td class="lang" :title="t.file"><span class="scc-fn" x-text="t.file.split('/').pop()"></span><span class="scc-fa"><button @click.stop="aiSccPreviewFile(aiSccActive(tab), t.file)" title="Preview">👁</button><button @click.stop="aiSccOpenFile(aiSccActive(tab), t.file)" title="Open in editor">✎</button></span></td><td class="num" x-text="t.line"></td><td class="lang" :title="t.text" x-text="t.text"></td></tr>
+                                    </template></tbody>
+                                </table>
+                            </div>
+                            <!-- Secrets (gitleaks) -->
+                            <div class="agent-scc-scroll" x-show="aiSccActive(tab).scc.sub==='secrets'" x-data="{t:'secrets',bin:'gitleaks'}">
+                                <template x-if="aiSccActive(tab).scc.tools.secrets.installed === false">
+                                    <div class="agent-scc-install">
+                                        <p class="mb-1"><strong>gitleaks</strong> isn't installed. Scan for committed secrets:</p>
+                                        <button class="btn btn-sm btn-primary mb-2" @click="aiSccInstallTool(aiSccActive(tab),'secrets')" :disabled="aiSccActive(tab).scc.tools.secrets.installing"><span x-show="!aiSccActive(tab).scc.tools.secrets.installing">Install gitleaks</span><span x-show="aiSccActive(tab).scc.tools.secrets.installing">Installing…</span></button>
+                                        <pre class="agent-scc-cmd" x-show="aiSccActive(tab).scc.tools.secrets.installLog" x-text="aiSccActive(tab).scc.tools.secrets.installLog"></pre>
+                                        <details class="agent-scc-manual"><summary>Command</summary><pre class="agent-scc-cmd" x-text="aiSccActive(tab).scc.tools.secrets.installCmd"></pre></details>
+                                    </div>
+                                </template>
+                                <div class="agent-scc-loading" x-show="aiSccActive(tab).scc.tools.secrets.loading">Scanning for secrets…</div>
+                                <div class="agent-diff-empty text-muted p-2" x-show="aiSccActive(tab).scc.tools.secrets.installed && !aiSccActive(tab).scc.tools.secrets.loading && !aiSccActive(tab).scc.tools.secrets.ranAt && !aiSccActive(tab).scc.tools.secrets.err">Not analyzed yet — press ⟳ to run.</div>
+                                <div class="agent-diff-empty text-danger p-2" x-show="aiSccActive(tab).scc.tools.secrets.err" x-text="aiSccActive(tab).scc.tools.secrets.err"></div>
+                                <div class="agent-scc-covtotal" x-show="aiSccActive(tab).scc.tools.secrets.ranAt" x-text="aiSccActive(tab).scc.tools.secrets.summary"></div>
+                                <table class="agent-scc-table" x-show="aiSccActive(tab).scc.tools.secrets.findings.length">
+                                    <thead><tr><th @click="aiSccSortBy(aiSccActive(tab),'secrets','file')">File</th><th class="num" @click="aiSccSortBy(aiSccActive(tab),'secrets','line')">Line</th><th @click="aiSccSortBy(aiSccActive(tab),'secrets','rule')">Rule</th></tr></thead>
+                                    <tbody><template x-for="(f,i) in aiSccList(aiSccActive(tab),'secrets')" :key="i"><tr><td class="lang" :title="f.file"><span class="scc-fn" x-text="f.file.split('/').pop()"></span><span class="scc-fa"><button @click.stop="aiSccPreviewFile(aiSccActive(tab), f.file)" title="Preview">👁</button><button @click.stop="aiSccOpenFile(aiSccActive(tab), f.file)" title="Open in editor">✎</button></span></td><td class="num" x-text="f.line"></td><td class="lang" :title="f.desc" x-text="f.rule"></td></tr></template></tbody>
+                                </table>
+                                <div class="agent-diff-empty text-muted p-2" x-show="aiSccActive(tab).scc.tools.secrets.ranAt && !aiSccActive(tab).scc.tools.secrets.findings.length && !aiSccActive(tab).scc.tools.secrets.err">No secrets found ✓</div>
+                            </div>
+                            <!-- Dependencies (osv-scanner) -->
+                            <div class="agent-scc-scroll" x-show="aiSccActive(tab).scc.sub==='deps'">
+                                <template x-if="aiSccActive(tab).scc.tools.deps.installed === false">
+                                    <div class="agent-scc-install">
+                                        <p class="mb-1"><strong>osv-scanner</strong> isn't installed. Check dependencies for known vulnerabilities:</p>
+                                        <button class="btn btn-sm btn-primary mb-2" @click="aiSccInstallTool(aiSccActive(tab),'deps')" :disabled="aiSccActive(tab).scc.tools.deps.installing"><span x-show="!aiSccActive(tab).scc.tools.deps.installing">Install osv-scanner</span><span x-show="aiSccActive(tab).scc.tools.deps.installing">Installing…</span></button>
+                                        <pre class="agent-scc-cmd" x-show="aiSccActive(tab).scc.tools.deps.installLog" x-text="aiSccActive(tab).scc.tools.deps.installLog"></pre>
+                                        <details class="agent-scc-manual"><summary>Command</summary><pre class="agent-scc-cmd" x-text="aiSccActive(tab).scc.tools.deps.installCmd"></pre></details>
+                                    </div>
+                                </template>
+                                <div class="agent-scc-loading" x-show="aiSccActive(tab).scc.tools.deps.loading">Scanning dependencies…</div>
+                                <div class="agent-diff-empty text-muted p-2" x-show="aiSccActive(tab).scc.tools.deps.installed && !aiSccActive(tab).scc.tools.deps.loading && !aiSccActive(tab).scc.tools.deps.ranAt && !aiSccActive(tab).scc.tools.deps.err">Not analyzed yet — press ⟳ to run.</div>
+                                <div class="agent-diff-empty text-danger p-2" x-show="aiSccActive(tab).scc.tools.deps.err" x-text="aiSccActive(tab).scc.tools.deps.err"></div>
+                                <div class="agent-scc-covtotal" x-show="aiSccActive(tab).scc.tools.deps.ranAt" x-text="aiSccActive(tab).scc.tools.deps.summary"></div>
+                                <table class="agent-scc-table scc-wide" x-show="aiSccActive(tab).scc.tools.deps.findings.length">
+                                    <thead><tr><th @click="aiSccSortBy(aiSccActive(tab),'deps','package')">Package</th><th @click="aiSccSortBy(aiSccActive(tab),'deps','version')">Version</th><th @click="aiSccSortBy(aiSccActive(tab),'deps','id')">Vuln</th><th @click="aiSccSortBy(aiSccActive(tab),'deps','severity')">Severity</th></tr></thead>
+                                    <tbody><template x-for="(f,i) in aiSccList(aiSccActive(tab),'deps')" :key="i"><tr><td class="lang" :title="f.ecosystem" x-text="f.package"></td><td x-text="f.version"></td><td class="lang" :title="f.summary" x-text="f.id"></td><td x-text="f.severity"></td></tr></template></tbody>
+                                </table>
+                                <div class="agent-diff-empty text-muted p-2" x-show="aiSccActive(tab).scc.tools.deps.ranAt && !aiSccActive(tab).scc.tools.deps.findings.length && !aiSccActive(tab).scc.tools.deps.err">No known vulnerabilities ✓</div>
+                            </div>
+                            <!-- Duplication (jscpd) -->
+                            <div class="agent-scc-scroll" x-show="aiSccActive(tab).scc.sub==='dup'">
+                                <template x-if="aiSccActive(tab).scc.tools.dup.installed === false">
+                                    <div class="agent-scc-install">
+                                        <p class="mb-1"><strong>jscpd</strong> isn't installed (needs npm). Find copy-pasted code:</p>
+                                        <button class="btn btn-sm btn-primary mb-2" @click="aiSccInstallTool(aiSccActive(tab),'dup')" :disabled="aiSccActive(tab).scc.tools.dup.installing"><span x-show="!aiSccActive(tab).scc.tools.dup.installing">Install jscpd</span><span x-show="aiSccActive(tab).scc.tools.dup.installing">Installing…</span></button>
+                                        <pre class="agent-scc-cmd" x-show="aiSccActive(tab).scc.tools.dup.installLog" x-text="aiSccActive(tab).scc.tools.dup.installLog"></pre>
+                                        <details class="agent-scc-manual"><summary>Command</summary><pre class="agent-scc-cmd" x-text="aiSccActive(tab).scc.tools.dup.installCmd"></pre></details>
+                                    </div>
+                                </template>
+                                <div class="agent-scc-loading" x-show="aiSccActive(tab).scc.tools.dup.loading">Finding duplicates…</div>
+                                <div class="agent-diff-empty text-muted p-2" x-show="aiSccActive(tab).scc.tools.dup.installed && !aiSccActive(tab).scc.tools.dup.loading && !aiSccActive(tab).scc.tools.dup.ranAt && !aiSccActive(tab).scc.tools.dup.err">Not analyzed yet — press ⟳ to run.</div>
+                                <div class="agent-diff-empty text-danger p-2" x-show="aiSccActive(tab).scc.tools.dup.err" x-text="aiSccActive(tab).scc.tools.dup.err"></div>
+                                <div class="agent-scc-covtotal" x-show="aiSccActive(tab).scc.tools.dup.ranAt" x-text="aiSccActive(tab).scc.tools.dup.summary"></div>
+                                <table class="agent-scc-table scc-wide" x-show="aiSccActive(tab).scc.tools.dup.findings.length">
+                                    <thead><tr><th @click="aiSccSortBy(aiSccActive(tab),'dup','fileA')">File A</th><th @click="aiSccSortBy(aiSccActive(tab),'dup','fileB')">File B</th><th class="num" @click="aiSccSortBy(aiSccActive(tab),'dup','lines')">Lines</th></tr></thead>
+                                    <tbody><template x-for="(f,i) in aiSccList(aiSccActive(tab),'dup')" :key="i"><tr><td class="lang" :title="f.fileA"><span class="scc-fn" x-text="f.fileA.split('/').pop()"></span><span class="scc-fa"><button @click.stop="aiSccPreviewFile(aiSccActive(tab), f.fileA)" title="Preview">👁</button><button @click.stop="aiSccOpenFile(aiSccActive(tab), f.fileA)" title="Open in editor">✎</button></span></td><td class="lang" :title="f.fileB"><span class="scc-fn" x-text="f.fileB.split('/').pop()"></span><span class="scc-fa"><button @click.stop="aiSccPreviewFile(aiSccActive(tab), f.fileB)" title="Preview">👁</button><button @click.stop="aiSccOpenFile(aiSccActive(tab), f.fileB)" title="Open in editor">✎</button></span></td><td class="num code" x-text="f.lines"></td></tr></template></tbody>
+                                </table>
+                                <div class="agent-diff-empty text-muted p-2" x-show="aiSccActive(tab).scc.tools.dup.ranAt && !aiSccActive(tab).scc.tools.dup.findings.length && !aiSccActive(tab).scc.tools.dup.err">No significant duplication ✓</div>
+                            </div>
+                            <!-- Function complexity (lizard) -->
+                            <div class="agent-scc-scroll" x-show="aiSccActive(tab).scc.sub==='fn'">
+                                <template x-if="aiSccActive(tab).scc.tools.fn.installed === false">
+                                    <div class="agent-scc-install">
+                                        <p class="mb-1"><strong>lizard</strong> isn't installed (needs pip). Per-function cyclomatic complexity:</p>
+                                        <button class="btn btn-sm btn-primary mb-2" @click="aiSccInstallTool(aiSccActive(tab),'fn')" :disabled="aiSccActive(tab).scc.tools.fn.installing"><span x-show="!aiSccActive(tab).scc.tools.fn.installing">Install lizard</span><span x-show="aiSccActive(tab).scc.tools.fn.installing">Installing…</span></button>
+                                        <pre class="agent-scc-cmd" x-show="aiSccActive(tab).scc.tools.fn.installLog" x-text="aiSccActive(tab).scc.tools.fn.installLog"></pre>
+                                        <details class="agent-scc-manual"><summary>Command</summary><pre class="agent-scc-cmd" x-text="aiSccActive(tab).scc.tools.fn.installCmd"></pre></details>
+                                    </div>
+                                </template>
+                                <div class="agent-scc-loading" x-show="aiSccActive(tab).scc.tools.fn.loading">Analyzing functions…</div>
+                                <div class="agent-diff-empty text-muted p-2" x-show="aiSccActive(tab).scc.tools.fn.installed && !aiSccActive(tab).scc.tools.fn.loading && !aiSccActive(tab).scc.tools.fn.ranAt && !aiSccActive(tab).scc.tools.fn.err">Not analyzed yet — press ⟳ to run.</div>
+                                <div class="agent-diff-empty text-danger p-2" x-show="aiSccActive(tab).scc.tools.fn.err" x-text="aiSccActive(tab).scc.tools.fn.err"></div>
+                                <div class="agent-scc-covtotal" x-show="aiSccActive(tab).scc.tools.fn.ranAt" x-text="aiSccActive(tab).scc.tools.fn.summary"></div>
+                                <table class="agent-scc-table" x-show="aiSccActive(tab).scc.tools.fn.findings.length">
+                                    <thead><tr><th @click="aiSccSortBy(aiSccActive(tab),'fn','func')">Function</th><th @click="aiSccSortBy(aiSccActive(tab),'fn','file')">File</th><th class="num" @click="aiSccSortBy(aiSccActive(tab),'fn','ccn')">CCN</th><th class="num" @click="aiSccSortBy(aiSccActive(tab),'fn','nloc')">NLOC</th></tr></thead>
+                                    <tbody><template x-for="(f,i) in aiSccList(aiSccActive(tab),'fn')" :key="i"><tr><td class="lang" :title="f.func" x-text="f.func"></td><td class="lang" :title="f.file"><span class="scc-fn" x-text="f.file.split('/').pop()"></span><span class="scc-fa"><button @click.stop="aiSccPreviewFile(aiSccActive(tab), f.file)" title="Preview">👁</button><button @click.stop="aiSccOpenFile(aiSccActive(tab), f.file)" title="Open in editor">✎</button></span></td><td class="num code" :class="{'cov-low': f.ccn>50, 'cov-mid': f.ccn>15&&f.ccn<=50}" x-text="f.ccn"></td><td class="num" x-text="f.nloc"></td></tr></template></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </template>
+                </div>
+                    </div>
+                </div>
+        </div>
+
+        <!-- Status bar (active pane). Hidden in dual mode: each pane now has
+             its own footer below, so this shared bar would just repeat one
+             pane's numbers with the same "whose count is this?" ambiguity
+             the per-pane footers exist to fix. x-show (not a CSS-only hide)
+             so its 24px flex-basis is removed from layout too — panes-container
+             is flex:1 1 auto, so the file lists simply gain that space back
+             rather than leaving a gap. -->
+        <div class="status-bar" x-show="!tab.dual">
+            <span x-text="statusText(activePane(tab))"></span>
+            <span class="ms-auto status-selection" x-text="activePane(tab).selection.length > 0 ? selectionSummary(activePane(tab)) : ''"></span>
+        </div>
+       </div>
+      </template>
+      <!-- ===== OUTPUT TAB (custom action streaming) ===== -->
+      <template x-if="tab.kind === 'output'">
+        <div class="output-pane">
+            <div class="output-pane-header">
+                <span><strong x-text="tab.outputActionLabel"></strong> — <span x-text="tab.outputChannel ? 'running command' : tab.outputStatus"></span></span>
+                <div>
+                    <button class="btn btn-sm" :class="tab.follow ? 'btn-success' : 'btn-outline-light'" @click="tab.follow = !tab.follow" :title="tab.follow ? 'Following new output — click to stop' : 'Click to follow output (stay at the bottom)'">
+                        <span x-text="(tab.follow ? '⤓ Following' : '⤓ Follow')"></span>
+                    </button>
+                    <button class="btn btn-sm btn-outline-light ms-1" @click="tab.outputChannel && tab.outputChannel.close('cancelled')" x-show="tab.outputChannel">Stop</button>
+                    <button class="btn btn-sm btn-outline-light ms-1" @click="closeTab(tab.id)">Close</button>
+                </div>
+            </div>
+            <div class="output-pane-body"
+                 x-init="_initOutputPane($el, tab)"
+                 x-effect="tab.outputLines.length; tab.follow; if (tab.follow) _scheduleOutputScroll($el, tab)"
+                 x-text="tab.outputLines.join('\n')"></div>
+            <div class="output-pane-status">
+                <code x-text="tab.outputCommand"></code>
+                <span x-text="tab.outputStatus"></span>
+            </div>
+        </div>
+      </template>
+      <!-- ===== TERMINAL TAB (full-pane multi-terminal) (v1.2) ===== -->
+      <template x-if="tab.kind === 'terminal'">
+        <div class="terminal-tab-body">
+            <div class="term-stack" :class="'term-stack--' + termKindOf(tab)">
+                <div class="term-tabbar">
+                    <div class="term-subtab-list" x-sort="moveTerminal(tab, $item, $position)">
+                    <template x-for="t in (tab.terminals || [])" :key="t.id">
+                        <div class="term-subtab"
+                             :class="{ active: tab.activeTermId === t.id }"
+                             @click="selectTerminal(tab, t.id)"
+                             @auxclick="$event.button === 1 && closeTerminal(tab, t.id)"
+                             @mouseenter="showTermPath($event, t)" @mouseleave="hideTermPath()" @dblclick.stop="startTermTitleEdit(t)"
+                             x-sort:item="t.id">
+                            <template x-if="!t._editingTitle">
+                                <span class="term-subtab-label" x-text="termLabel(t)"></span>
+                            </template>
+                            <template x-if="t._editingTitle">
+                                <input class="term-subtab-input" :value="t._titleDraft"
+                                       x-init="$nextTick(() => { $el.focus(); $el.select(); })"
+                                       @click.stop @mousedown.stop @dblclick.stop @auxclick.stop
+                                       @keydown.enter.prevent.stop="commitTermTitle(t, $event.target.value)"
+                                       @keydown.escape.prevent.stop="cancelTermTitle(t)"
+                                       @blur="t._editingTitle && commitTermTitle(t, $event.target.value)">
+                            </template>
+                            <button class="term-subtab-close" @click.stop="closeTerminal(tab, t.id)" title="Close terminal">×</button>
+                        </div>
+                    </template>
+                    </div>
+                    <button class="term-subtab-add" @click="addPaneToTab(tab)"
+                            :title="termKindOf(tab) === 'tmux' ? 'New tmux session' : 'New terminal here'">+</button>
+                    <span class="term-tabbar-spacer"></span>
+                    <button class="term-paste-img" @click="moveTerminalToAiView(tab, tab.activeTermId)"
+                            x-show="tab.terminals && tab.terminals.length"
+                            title="Move this session to AI view — keeps it running and adds a live git-diff pane beside it">✦</button>
+                    <button class="term-paste-img" @click="pasteClipboardImageToTerminal(tab)"
+                            title="Paste clipboard image or video → upload to temp folder and send its path">📋</button>
+                </div>
+                <div class="term-containers">
+                    <template x-for="t in (tab.terminals || [])" :key="t.id">
+                        <div class="term-container"
+                             :id="'term-container-' + t.id"
+                             x-show="tab.activeTermId === t.id"></div>
+                    </template>
+                </div>
+            </div>
+        </div>
+      </template>
+      <!-- ===== AI TAB (claude / codex — terminal + live git diff) ===== -->
+      <template x-if="tab.kind === 'agent'">
+        <div class="agent-tab-body">
+            <div class="term-tabbar agent-tabbar">
+                <div class="term-subtab-list">
+                    <template x-for="t in (tab.terminals || [])" :key="t.id">
+                        <div class="term-subtab" :class="{ active: tab.activeTermId === t.id }"
+                             @click="aiSelectSession(tab, t.id)"
+                             @auxclick="$event.button === 1 && aiCloseSession(tab, t.id)"
+                             @dblclick.stop="startTermTitleEdit(t)">
+                            <template x-if="!t._editingTitle">
+                                <span class="term-subtab-label">
+                                    <template x-if="t.customTitle"><span x-text="t.customTitle"></span></template>
+                                    <template x-if="!t.customTitle"><span><span x-text="t.tool === 'codex' ? '◆' : '✦'"></span> <span x-text="t.label"></span></span></template>
+                                </span>
+                            </template>
+                            <template x-if="t._editingTitle">
+                                <input class="term-subtab-input" :value="t._titleDraft"
+                                       x-init="$nextTick(() => { $el.focus(); $el.select(); })"
+                                       @click.stop @mousedown.stop @dblclick.stop @auxclick.stop
+                                       @keydown.enter.prevent.stop="commitTermTitle(t, $event.target.value)"
+                                       @keydown.escape.prevent.stop="cancelTermTitle(t)"
+                                       @blur="t._editingTitle && commitTermTitle(t, $event.target.value)">
+                            </template>
+                            <button class="term-subtab-close" @click.stop="aiCloseSession(tab, t.id)" title="Close session">×</button>
+                        </div>
+                    </template>
+                </div>
+                <div class="agent-add-wrap" @click.outside="ui.agentAddOpen = false">
+                    <button class="term-subtab-add" @click="toggleAgentAddMenu($event)" title="New session">＋▾</button>
+                    <div class="agent-add-menu" x-show="ui.agentAddOpen" x-cloak :style="`top:${ui.agentAddTop}px;left:${ui.agentAddLeft}px`">
+                        <button x-show="ai.have.claude" @click="ui.agentAddOpen=false; aiPickAndAdd(tab,'claude',tab.path)">✦ New Claude…</button>
+                        <button x-show="ai.have.codex" @click="ui.agentAddOpen=false; aiPickAndAdd(tab,'codex',tab.path)">◆ New Codex…</button>
+                        <button @click="ui.agentAddOpen=false; openAgentSessions()">⟲ Resume…</button>
+                    </div>
+                </div>
+            </div>
+            <div class="agent-split">
+                <div class="agent-term term-containers">
+                    <template x-for="t in (tab.terminals || [])" :key="t.id">
+                        <div class="term-container" :id="'term-container-' + t.id" x-show="tab.activeTermId === t.id"></div>
+                    </template>
+                </div>
+                <!-- Repo tree column (Terminal | Tree | Diff). Collapsed by default;
+                     a thin strip reveals it. Git status colors each entry; a file
+                     row shows its diff, ✎ opens it in the editor. -->
+                <button class="agent-tree-reveal" x-show="tab.aiTreeCollapsed !== false" @click="aiToggleTree(tab)" title="Show repo tree">tree ▶</button>
+                <div class="agent-tree" x-show="tab.aiTreeCollapsed === false" :style="`width:${settings.aiTreeWidth || 220}px`">
+                    <div class="agent-tree-head">
+                        <span class="agent-tree-title">Repo</span>
+                        <button class="btn btn-sm btn-outline-secondary agent-diff-collapse" @click="aiToggleTree(tab)" title="Hide repo tree">◀</button>
+                    </div>
+                    <template x-if="aiActiveSession(tab) && !aiActiveSession(tab).diff.repo">
+                        <div class="agent-diff-empty text-muted p-3">Not a git repository.</div>
+                    </template>
+                    <template x-if="aiActiveSession(tab) && aiActiveSession(tab).diff.repo">
+                        <div class="agent-tree-body">
+                            <template x-for="node in aiTreeNodes(aiActiveSession(tab))" :key="node.path">
+                                <div class="agent-tree-row" :class="node.cls"
+                                     :style="'padding-left:' + (node.depth * 12 + 4) + 'px'"
+                                     @click="node.type==='d' ? aiTreeToggleDir(aiActiveSession(tab), node) : aiTreeShowDiff(tab, aiActiveSession(tab), node)">
+                                    <span class="tw" x-show="node.type==='d'" x-text="node.expanded ? '▾' : '▸'"></span>
+                                    <span class="tw tw-file" x-show="node.type!=='d'"></span>
+                                    <span class="tn" x-text="node.name" :title="node.name"></span>
+                                    <span class="tcx" x-show="node.cx" x-text="node.cx" title="cyclomatic complexity (scc)"></span>
+                                    <span class="ta">
+                                        <button class="agent-tree-btn" x-show="node.type!=='d' && aiTreeHasDiff(aiActiveSession(tab), node)"
+                                                @click.stop="aiTreeShowDiff(tab, aiActiveSession(tab), node)" title="Show diff">±</button>
+                                        <button class="agent-tree-btn" x-show="node.type!=='d'"
+                                                @click.stop="aiTreePreview(aiActiveSession(tab), node)" title="Preview">👁</button>
+                                        <button class="agent-tree-btn" x-show="node.type!=='d'"
+                                                @click.stop="aiTreeEdit(aiActiveSession(tab), node)" title="Open in editor">✎</button>
+                                    </span>
+                                </div>
+                            </template>
+                        </div>
+                    </template>
+                </div>
+                <!-- Drag to resize the repo-tree column (persisted). -->
+                <div class="col-resizer" x-show="tab.aiTreeCollapsed === false" @mousedown="_startColResize($event, 'aiTreeWidth', 1)" title="Drag to resize"></div>
+                <!-- Collapsed: a thin strip on the right to bring the diff back. -->
+                <button class="agent-diff-reveal" x-show="tab.aiDiffCollapsed" @click="aiToggleDiff(tab)" title="Show diff pane">◀ diff</button>
+                <div class="agent-diff" x-show="!tab.aiDiffCollapsed">
+                    <div class="agent-diff-head">
+                        <div class="btn-group btn-group-sm">
+                            <button class="btn btn-outline-secondary" :class="{active: aiActiveSession(tab) && aiActiveSession(tab).diff.mode==='all'}" @click="aiSetDiffMode(aiActiveSession(tab),'all')">All</button>
+                            <button class="btn btn-outline-secondary" :class="{active: aiActiveSession(tab) && aiActiveSession(tab).diff.mode==='unstaged'}" @click="aiSetDiffMode(aiActiveSession(tab),'unstaged')">Unstaged</button>
+                            <button class="btn btn-outline-secondary" :class="{active: aiActiveSession(tab) && aiActiveSession(tab).diff.mode==='staged'}" @click="aiSetDiffMode(aiActiveSession(tab),'staged')">Staged</button>
+                        </div>
+                        <button class="btn btn-sm btn-outline-secondary ms-1" @click="aiStartDiffPoll(tab, aiActiveSession(tab))" title="Refresh">⟳</button>
+                        <span class="agent-diff-note text-muted small ms-2" x-show="aiActiveSession(tab) && aiActiveSession(tab).diff.note" x-text="aiActiveSession(tab) ? aiActiveSession(tab).diff.note : ''"></span>
+                        <button class="btn btn-sm btn-outline-secondary ms-auto agent-diff-collapse" @click="aiToggleDiff(tab)" title="Hide diff pane (widen the terminal)">▶</button>
+                    </div>
+                    <template x-if="aiActiveSession(tab) && !aiActiveSession(tab).diff.repo">
+                        <div class="agent-diff-empty text-muted p-3">Not a git repository — the terminal still works.</div>
+                    </template>
+                    <template x-if="aiActiveSession(tab) && aiActiveSession(tab).diff.repo">
+                        <div class="agent-diff-wrap">
+                            <!-- Changed-files strip: click a file to show only its diff
+                                 (click more to add them, back-to-back); ✎ opens it in the editor. -->
+                            <div class="agent-diff-files" x-show="aiActiveSession(tab).diff.files.length">
+                                <div class="agent-diff-filter small" x-show="aiActiveSession(tab).diff.selected && aiActiveSession(tab).diff.selected.length">
+                                    <span x-text="'Showing ' + aiActiveSession(tab).diff.selected.length + ' of ' + aiActiveSession(tab).diff.files.length + ' files'"></span>
+                                    <a href="#" @click.prevent="aiDiffClearSelection(aiActiveSession(tab))">Show all</a>
+                                </div>
+                                <template x-for="f in aiActiveSession(tab).diff.files" :key="f.file">
+                                    <div class="agent-diff-file" :class="{ sel: aiDiffFileSelected(aiActiveSession(tab), f.file) }"
+                                         @click="aiDiffToggleFile(aiActiveSession(tab), f.file)"
+                                         :title="'Click to show only this file’s diff'">
+                                        <span class="add" x-text="'+'+f.added"></span> <span class="rem" x-text="'−'+f.removed"></span>
+                                        <span class="fn" x-text="f.file"></span>
+                                        <button class="agent-diff-edit" @click.stop="aiPreviewDiffFile(aiActiveSession(tab), f.file)" title="Preview">👁</button>
+                                        <button class="agent-diff-edit" @click.stop="aiOpenDiffFile(aiActiveSession(tab), f.file)" title="Open in editor">✎</button>
+                                    </div>
+                                </template>
+                            </div>
+                            <div class="agent-diff-body" x-show="aiActiveSession(tab).diff.text" x-html="aiDiffHtml(aiActiveSession(tab))"></div>
+                            <div class="agent-diff-empty text-muted p-3" x-show="!aiActiveSession(tab).diff.text">No changes.</div>
+                        </div>
+                    </template>
+                </div>
+                <!-- scc code-census pane (sloc + cyclomatic complexity). Collapsed
+                     by default; the "scc ▶" strip reveals it. Table sub-pane =
+                     sortable language breakdown; Complexity sub-pane = top-50 files. -->
+                <button class="agent-scc-reveal" x-show="tab.aiSccCollapsed !== false" @click="aiToggleScc(tab)" title="Show code census (scc)">scc ▶</button>
+                <!-- Drag to resize the census column (persisted). -->
+                <div class="col-resizer" x-show="tab.aiSccCollapsed === false" @mousedown="_startColResize($event, 'aiSccWidth', -1)" title="Drag to resize"></div>
+                <div class="agent-scc" x-show="tab.aiSccCollapsed === false" :style="`width:${settings.aiSccWidth || 340}px`">
+                    <div class="agent-scc-head">
+                        <select class="form-select form-select-sm agent-scc-sel" x-show="aiSccActive(tab) && aiSccActive(tab).scc"
+                                @change="aiSccSetSub(aiSccActive(tab), $event.target.value)"
+                                x-effect="if (aiSccActive(tab) && aiSccActive(tab).scc) $el.value = aiSccActive(tab).scc.sub">
+                            <optgroup label="scc">
+                                <option value="table">Language table</option>
+                                <option value="cx">Complexity</option>
+                                <option value="hot">Hotspots (churn × cx)</option>
+                            </optgroup>
+                            <optgroup label="Quality">
+                                <option value="cov">Coverage (lcov)</option>
+                                <option value="todo">TODO / FIXME</option>
+                            </optgroup>
+                            <optgroup label="Scanners">
+                                <option value="secrets">Secrets (gitleaks)</option>
+                                <option value="deps">Dependencies (osv-scanner)</option>
+                                <option value="dup">Duplication (jscpd)</option>
+                                <option value="fn">Function complexity (lizard)</option>
+                            </optgroup>
+                        </select>
+                        <button class="btn btn-sm btn-outline-secondary ms-1" @click="aiSccRefreshActive(aiSccActive(tab))" :disabled="aiSccActive(tab) && aiSccBusy(aiSccActive(tab))" title="Re-run analysis">⟳</button>
+                        <button class="btn btn-sm ms-1" :class="aiSccActive(tab) && aiSccActive(tab).scc.auto && aiSccActive(tab).scc.auto.enabled ? 'btn-success' : 'btn-outline-secondary'" @click="aiSccToggleAuto(aiSccActive(tab))" title="Background auto-refresh (systemd timer)">⏱</button>
+                        <button class="btn btn-sm btn-outline-secondary ms-1" @click="aiSccReport(aiSccActive(tab))" :disabled="!!(aiSccActive(tab) && aiSccActive(tab).scc && aiSccActive(tab).scc.reporting)" title="Generate report"><span x-show="!(aiSccActive(tab) && aiSccActive(tab).scc && aiSccActive(tab).scc.reporting)">Report</span><span x-show="aiSccActive(tab) && aiSccActive(tab).scc && aiSccActive(tab).scc.reporting">Generating…</span></button>
+                        <button class="btn btn-sm btn-outline-secondary ms-1" @click="aiSccExport(aiSccActive(tab))" :disabled="!aiSccCanExport(aiSccActive(tab))" title="Export this table as JSON">JSON</button>
+                        <button class="btn btn-sm btn-outline-secondary ms-1" @click="aiSccExportAll(aiSccActive(tab))" :disabled="!!(aiSccActive(tab) && aiSccActive(tab).scc && aiSccActive(tab).scc.exporting)" title="Export ALL census tables as a JSON zip"><span x-show="!(aiSccActive(tab) && aiSccActive(tab).scc && aiSccActive(tab).scc.exporting)">Zip all</span><span x-show="aiSccActive(tab) && aiSccActive(tab).scc && aiSccActive(tab).scc.exporting">Zipping…</span></button>
+                        <button class="btn btn-sm btn-outline-secondary ms-auto agent-diff-collapse" @click="aiToggleScc(tab)" title="Hide scc pane">▶</button>
+                    </div>
+                    <template x-if="aiSccActive(tab) && aiSccActive(tab).scc && aiSccActive(tab).scc.installed === false && aiSccActive(tab).scc.hint">
+                        <div class="agent-scc-install">
+                            <p class="mb-1"><strong>scc</strong> isn't installed. Install it in one click (<span x-text="aiSccActive(tab).scc.hint.label"></span>):</p>
+                            <button class="btn btn-sm btn-primary mb-2" @click="aiSccInstall(aiSccActive(tab))" :disabled="aiSccActive(tab).scc.installing">
+                                <span x-show="!aiSccActive(tab).scc.installing">Install scc</span>
+                                <span x-show="aiSccActive(tab).scc.installing">Installing…</span>
+                            </button>
+                            <pre class="agent-scc-cmd" x-show="aiSccActive(tab).scc.installLog" x-text="aiSccActive(tab).scc.installLog"></pre>
+                            <details class="agent-scc-manual">
+                                <summary>Manual steps</summary>
+                                <pre class="agent-scc-cmd" x-text="aiSccActive(tab).scc.hint.primary"></pre>
+                                <template x-for="a in aiSccActive(tab).scc.hint.alt" :key="a"><div class="agent-scc-alt" x-text="a"></div></template>
+                            </details>
+                            <a href="https://github.com/boyter/scc" target="_blank" rel="noopener" class="small">About scc ↗</a>
+                        </div>
+                    </template>
+                    <template x-if="aiSccActive(tab) && aiSccActive(tab).scc && aiSccActive(tab).scc.installed">
+                        <div class="agent-scc-body">
+                            <!-- TABLE sub-pane -->
+                            <div class="agent-scc-scroll" x-show="aiSccActive(tab).scc.sub==='table'">
+                                <div class="agent-scc-loading" x-show="aiSccActive(tab).scc.table.loading">Running scc…</div>
+                                <div class="agent-diff-empty text-muted p-2" x-show="!aiSccActive(tab).scc.table.loading && !aiSccActive(tab).scc.table.total && !aiSccActive(tab).scc.table.err">Not analyzed yet — press ⟳ to run.</div>
+                                <div class="agent-diff-empty text-danger p-2" x-show="aiSccActive(tab).scc.table.err" x-text="aiSccActive(tab).scc.table.err"></div>
+                                <table class="agent-scc-table" x-show="!aiSccActive(tab).scc.table.loading && aiSccActive(tab).scc.table.total">
+                                    <thead><tr>
+                                        <th @click="aiSccSort(aiSccActive(tab),'name')">Language</th>
+                                        <th class="num" @click="aiSccSort(aiSccActive(tab),'files')">Files</th>
+                                        <th class="num" @click="aiSccSort(aiSccActive(tab),'lines')">Lines</th>
+                                        <th class="num" @click="aiSccSort(aiSccActive(tab),'comments')">Comments</th>
+                                        <th class="num" @click="aiSccSort(aiSccActive(tab),'code')">Code</th>
+                                        <th class="num" @click="aiSccSort(aiSccActive(tab),'complexity')">Cx</th>
+                                    </tr></thead>
+                                    <tbody>
+                                        <template x-for="r in aiSccActive(tab).scc.table.rows" :key="r.name">
+                                            <tr><td class="lang"><span x-text="r.name"></span><span class="scc-kind" x-show="r.kind==='data'">data</span></td>
+                                                <td class="num" x-text="r.files.toLocaleString()"></td>
+                                                <td class="num" x-text="r.lines.toLocaleString()"></td>
+                                                <td class="num" x-text="r.comments.toLocaleString()"></td>
+                                                <td class="num code" x-text="r.code.toLocaleString()"></td>
+                                                <td class="num" x-text="r.complexity.toLocaleString()"></td>
+                                            </tr>
+                                        </template>
+                                        <template x-if="aiSccActive(tab).scc.table.total">
+                                        <tr class="scc-total"><td class="lang">Total</td>
+                                            <td class="num" x-text="aiSccActive(tab).scc.table.total.files.toLocaleString()"></td>
+                                            <td class="num" x-text="aiSccActive(tab).scc.table.total.lines.toLocaleString()"></td>
+                                            <td class="num" x-text="aiSccActive(tab).scc.table.total.comments.toLocaleString()"></td>
+                                            <td class="num code" x-text="aiSccActive(tab).scc.table.total.code.toLocaleString()"></td>
+                                            <td class="num" x-text="aiSccActive(tab).scc.table.total.complexity.toLocaleString()"></td>
+                                        </tr>
+                                        </template>
+                                    </tbody>
+                                </table>
+                            </div>
+                            <!-- COMPLEXITY sub-pane -->
+                            <div class="agent-scc-scroll" x-show="aiSccActive(tab).scc.sub==='cx'">
+                                <div class="agent-scc-loading" x-show="aiSccActive(tab).scc.cx.loading">Computing complexity…</div>
+                                <div class="agent-diff-empty text-danger p-2" x-show="aiSccActive(tab).scc.cx.err" x-text="aiSccActive(tab).scc.cx.err"></div>
+                                <table class="agent-scc-table" x-show="!aiSccActive(tab).scc.cx.loading && aiSccActive(tab).scc.cx.top.length">
+                                    <thead><tr><th @click="aiSccSortBy(aiSccActive(tab),'cx','filename')">File</th><th class="num" @click="aiSccSortBy(aiSccActive(tab),'cx','code')">Code</th><th class="num" @click="aiSccSortBy(aiSccActive(tab),'cx','complexity')">Cx</th><th class="num" @click="aiSccSortBy(aiSccActive(tab),'cx','cxPerKloc')">Cx/kloc</th></tr></thead>
+                                    <tbody>
+                                        <template x-for="f in aiSccList(aiSccActive(tab),'cx')" :key="f.location">
+                                            <tr><td class="lang" :title="f.location"><span class="scc-fn" x-text="f.filename"></span><span class="scc-lang" x-text="f.language"></span><span class="scc-fa"><button @click.stop="aiSccPreviewFile(aiSccActive(tab), f.location)" title="Preview">👁</button><button @click.stop="aiSccOpenFile(aiSccActive(tab), f.location)" title="Open in editor">✎</button></span></td>
+                                                <td class="num" x-text="f.code.toLocaleString()"></td>
+                                                <td class="num code" x-text="f.complexity.toLocaleString()"></td>
+                                                <td class="num" x-text="f.cxPerKloc.toLocaleString()"></td>
+                                            </tr>
+                                        </template>
+                                    </tbody>
+                                </table>
+                                <div class="agent-diff-empty text-muted p-2" x-show="!aiSccActive(tab).scc.cx.loading && !aiSccActive(tab).scc.cx.ranAt && !aiSccActive(tab).scc.cx.err">Not analyzed yet — press ⟳ to run.</div>
+                            </div>
+                            <!-- HOTSPOTS sub-pane: churn × complexity -->
+                            <div class="agent-scc-scroll" x-show="aiSccActive(tab).scc.sub==='hot'">
+                                <div class="agent-scc-loading" x-show="aiSccActive(tab).scc.hot.loading">Computing churn × complexity…</div>
+                                <div class="agent-diff-empty text-danger p-2" x-show="aiSccActive(tab).scc.hot.err" x-text="aiSccActive(tab).scc.hot.err"></div>
+                                <table class="agent-scc-table" x-show="!aiSccActive(tab).scc.hot.loading && aiSccActive(tab).scc.hot.files.length">
+                                    <thead><tr><th @click="aiSccSortBy(aiSccActive(tab),'hot','filename')">File</th><th class="num" title="commits touching the file, last year" @click="aiSccSortBy(aiSccActive(tab),'hot','churn')">Churn</th><th class="num" @click="aiSccSortBy(aiSccActive(tab),'hot','complexity')">Cx</th><th class="num" title="churn × complexity" @click="aiSccSortBy(aiSccActive(tab),'hot','score')">Score</th></tr></thead>
+                                    <tbody>
+                                        <template x-for="f in aiSccList(aiSccActive(tab),'hot')" :key="f.location">
+                                            <tr><td class="lang" :title="f.location"><span class="scc-fn" x-text="f.filename"></span><span class="scc-lang" x-text="f.language"></span><span class="scc-fa"><button @click.stop="aiSccPreviewFile(aiSccActive(tab), f.location)" title="Preview">👁</button><button @click.stop="aiSccOpenFile(aiSccActive(tab), f.location)" title="Open in editor">✎</button></span></td>
+                                                <td class="num" x-text="f.churn.toLocaleString()"></td>
+                                                <td class="num" x-text="f.complexity.toLocaleString()"></td>
+                                                <td class="num code" x-text="f.score.toLocaleString()"></td>
+                                            </tr>
+                                        </template>
+                                    </tbody>
+                                </table>
+                                <div class="agent-diff-empty text-muted p-2" x-show="!aiSccActive(tab).scc.hot.loading && aiSccActive(tab).scc.hot.ranAt && !aiSccActive(tab).scc.hot.files.length && !aiSccActive(tab).scc.hot.err">No hotspots — nothing is both frequently changed and complex in this window.</div>
+                                <div class="agent-diff-empty text-muted p-2" x-show="!aiSccActive(tab).scc.hot.loading && !aiSccActive(tab).scc.hot.ranAt && !aiSccActive(tab).scc.hot.err">Not analyzed yet — press ⟳ to run.</div>
+                            </div>
+                            <!-- COVERAGE sub-pane: from an existing lcov file -->
+                            <div class="agent-scc-scroll" x-show="aiSccActive(tab).scc.sub==='cov'">
+                                <div class="agent-scc-loading" x-show="aiSccActive(tab).scc.cov.loading">Reading coverage…</div>
+                                <div class="agent-diff-empty text-muted p-2" x-show="!aiSccActive(tab).scc.cov.loading && !aiSccActive(tab).scc.cov.ranAt && !aiSccActive(tab).scc.cov.err">Not analyzed yet — press ⟳ to run.</div>
+                                <div class="agent-diff-empty text-muted p-2" x-show="aiSccActive(tab).scc.cov.err" x-text="aiSccActive(tab).scc.cov.err"></div>
+                                <div class="agent-scc-covtotal" x-show="aiSccActive(tab).scc.cov.total" x-text="aiSccActive(tab).scc.cov.total ? (aiSccActive(tab).scc.cov.total.pct + '% lines covered · ' + aiSccActive(tab).scc.cov.total.files + ' files · ' + aiSccActive(tab).scc.cov.path) : ''"></div>
+                                <table class="agent-scc-table" x-show="!aiSccActive(tab).scc.cov.loading && aiSccActive(tab).scc.cov.files.length">
+                                    <thead><tr><th @click="aiSccSortBy(aiSccActive(tab),'cov','filename')">File</th><th class="num" @click="aiSccSortBy(aiSccActive(tab),'cov','lines')">Lines</th><th class="num" @click="aiSccSortBy(aiSccActive(tab),'cov','hit')">Hit</th><th class="num" @click="aiSccSortBy(aiSccActive(tab),'cov','pct')">%</th></tr></thead>
+                                    <tbody>
+                                        <template x-for="f in aiSccList(aiSccActive(tab),'cov')" :key="f.location">
+                                            <tr><td class="lang" :title="f.location"><span class="scc-fn" x-text="f.filename"></span><span class="scc-fa"><button @click.stop="aiSccPreviewFile(aiSccActive(tab), f.location)" title="Preview">👁</button><button @click.stop="aiSccOpenFile(aiSccActive(tab), f.location)" title="Open in editor">✎</button></span></td>
+                                                <td class="num" x-text="f.lines.toLocaleString()"></td>
+                                                <td class="num" x-text="f.hit.toLocaleString()"></td>
+                                                <td class="num code" :class="{'cov-low': f.pct<50, 'cov-mid': f.pct>=50&&f.pct<80, 'cov-high': f.pct>=80}" x-text="f.pct + '%'"></td>
+                                            </tr>
+                                        </template>
+                                    </tbody>
+                                </table>
+                            </div>
+                            <!-- TODO / FIXME census -->
+                            <div class="agent-scc-scroll" x-show="aiSccActive(tab).scc.sub==='todo'">
+                                <div class="agent-scc-loading" x-show="aiSccActive(tab).scc.todo.loading">Scanning…</div>
+                                <div class="agent-diff-empty text-muted p-2" x-show="!aiSccActive(tab).scc.todo.loading && !aiSccActive(tab).scc.todo.ranAt && !aiSccActive(tab).scc.todo.err">Not analyzed yet — press ⟳ to run.</div>
+                                <div class="agent-diff-empty text-danger p-2" x-show="aiSccActive(tab).scc.todo.err" x-text="aiSccActive(tab).scc.todo.err"></div>
+                                <div class="agent-scc-covtotal" x-show="aiSccActive(tab).scc.todo.ranAt" x-text="Object.keys(aiSccActive(tab).scc.todo.counts).map(k=>k+' '+aiSccActive(tab).scc.todo.counts[k]).join(' · ') || 'None found ✓'"></div>
+                                <table class="agent-scc-table" x-show="aiSccActive(tab).scc.todo.items.length">
+                                    <thead><tr><th @click="aiSccSortBy(aiSccActive(tab),'todo','marker')">Marker</th><th @click="aiSccSortBy(aiSccActive(tab),'todo','file')">File</th><th class="num" @click="aiSccSortBy(aiSccActive(tab),'todo','line')">Line</th><th @click="aiSccSortBy(aiSccActive(tab),'todo','text')">Text</th></tr></thead>
+                                    <tbody><template x-for="(t,i) in aiSccList(aiSccActive(tab),'todo')" :key="i">
+                                        <tr><td class="code" x-text="t.marker"></td><td class="lang" :title="t.file"><span class="scc-fn" x-text="t.file.split('/').pop()"></span><span class="scc-fa"><button @click.stop="aiSccPreviewFile(aiSccActive(tab), t.file)" title="Preview">👁</button><button @click.stop="aiSccOpenFile(aiSccActive(tab), t.file)" title="Open in editor">✎</button></span></td><td class="num" x-text="t.line"></td><td class="lang" :title="t.text" x-text="t.text"></td></tr>
+                                    </template></tbody>
+                                </table>
+                            </div>
+                            <!-- Secrets (gitleaks) -->
+                            <div class="agent-scc-scroll" x-show="aiSccActive(tab).scc.sub==='secrets'" x-data="{t:'secrets',bin:'gitleaks'}">
+                                <template x-if="aiSccActive(tab).scc.tools.secrets.installed === false">
+                                    <div class="agent-scc-install">
+                                        <p class="mb-1"><strong>gitleaks</strong> isn't installed. Scan for committed secrets:</p>
+                                        <button class="btn btn-sm btn-primary mb-2" @click="aiSccInstallTool(aiSccActive(tab),'secrets')" :disabled="aiSccActive(tab).scc.tools.secrets.installing"><span x-show="!aiSccActive(tab).scc.tools.secrets.installing">Install gitleaks</span><span x-show="aiSccActive(tab).scc.tools.secrets.installing">Installing…</span></button>
+                                        <pre class="agent-scc-cmd" x-show="aiSccActive(tab).scc.tools.secrets.installLog" x-text="aiSccActive(tab).scc.tools.secrets.installLog"></pre>
+                                        <details class="agent-scc-manual"><summary>Command</summary><pre class="agent-scc-cmd" x-text="aiSccActive(tab).scc.tools.secrets.installCmd"></pre></details>
+                                    </div>
+                                </template>
+                                <div class="agent-scc-loading" x-show="aiSccActive(tab).scc.tools.secrets.loading">Scanning for secrets…</div>
+                                <div class="agent-diff-empty text-muted p-2" x-show="aiSccActive(tab).scc.tools.secrets.installed && !aiSccActive(tab).scc.tools.secrets.loading && !aiSccActive(tab).scc.tools.secrets.ranAt && !aiSccActive(tab).scc.tools.secrets.err">Not analyzed yet — press ⟳ to run.</div>
+                                <div class="agent-diff-empty text-danger p-2" x-show="aiSccActive(tab).scc.tools.secrets.err" x-text="aiSccActive(tab).scc.tools.secrets.err"></div>
+                                <div class="agent-scc-covtotal" x-show="aiSccActive(tab).scc.tools.secrets.ranAt" x-text="aiSccActive(tab).scc.tools.secrets.summary"></div>
+                                <table class="agent-scc-table" x-show="aiSccActive(tab).scc.tools.secrets.findings.length">
+                                    <thead><tr><th @click="aiSccSortBy(aiSccActive(tab),'secrets','file')">File</th><th class="num" @click="aiSccSortBy(aiSccActive(tab),'secrets','line')">Line</th><th @click="aiSccSortBy(aiSccActive(tab),'secrets','rule')">Rule</th></tr></thead>
+                                    <tbody><template x-for="(f,i) in aiSccList(aiSccActive(tab),'secrets')" :key="i"><tr><td class="lang" :title="f.file"><span class="scc-fn" x-text="f.file.split('/').pop()"></span><span class="scc-fa"><button @click.stop="aiSccPreviewFile(aiSccActive(tab), f.file)" title="Preview">👁</button><button @click.stop="aiSccOpenFile(aiSccActive(tab), f.file)" title="Open in editor">✎</button></span></td><td class="num" x-text="f.line"></td><td class="lang" :title="f.desc" x-text="f.rule"></td></tr></template></tbody>
+                                </table>
+                                <div class="agent-diff-empty text-muted p-2" x-show="aiSccActive(tab).scc.tools.secrets.ranAt && !aiSccActive(tab).scc.tools.secrets.findings.length && !aiSccActive(tab).scc.tools.secrets.err">No secrets found ✓</div>
+                            </div>
+                            <!-- Dependencies (osv-scanner) -->
+                            <div class="agent-scc-scroll" x-show="aiSccActive(tab).scc.sub==='deps'">
+                                <template x-if="aiSccActive(tab).scc.tools.deps.installed === false">
+                                    <div class="agent-scc-install">
+                                        <p class="mb-1"><strong>osv-scanner</strong> isn't installed. Check dependencies for known vulnerabilities:</p>
+                                        <button class="btn btn-sm btn-primary mb-2" @click="aiSccInstallTool(aiSccActive(tab),'deps')" :disabled="aiSccActive(tab).scc.tools.deps.installing"><span x-show="!aiSccActive(tab).scc.tools.deps.installing">Install osv-scanner</span><span x-show="aiSccActive(tab).scc.tools.deps.installing">Installing…</span></button>
+                                        <pre class="agent-scc-cmd" x-show="aiSccActive(tab).scc.tools.deps.installLog" x-text="aiSccActive(tab).scc.tools.deps.installLog"></pre>
+                                        <details class="agent-scc-manual"><summary>Command</summary><pre class="agent-scc-cmd" x-text="aiSccActive(tab).scc.tools.deps.installCmd"></pre></details>
+                                    </div>
+                                </template>
+                                <div class="agent-scc-loading" x-show="aiSccActive(tab).scc.tools.deps.loading">Scanning dependencies…</div>
+                                <div class="agent-diff-empty text-muted p-2" x-show="aiSccActive(tab).scc.tools.deps.installed && !aiSccActive(tab).scc.tools.deps.loading && !aiSccActive(tab).scc.tools.deps.ranAt && !aiSccActive(tab).scc.tools.deps.err">Not analyzed yet — press ⟳ to run.</div>
+                                <div class="agent-diff-empty text-danger p-2" x-show="aiSccActive(tab).scc.tools.deps.err" x-text="aiSccActive(tab).scc.tools.deps.err"></div>
+                                <div class="agent-scc-covtotal" x-show="aiSccActive(tab).scc.tools.deps.ranAt" x-text="aiSccActive(tab).scc.tools.deps.summary"></div>
+                                <table class="agent-scc-table scc-wide" x-show="aiSccActive(tab).scc.tools.deps.findings.length">
+                                    <thead><tr><th @click="aiSccSortBy(aiSccActive(tab),'deps','package')">Package</th><th @click="aiSccSortBy(aiSccActive(tab),'deps','version')">Version</th><th @click="aiSccSortBy(aiSccActive(tab),'deps','id')">Vuln</th><th @click="aiSccSortBy(aiSccActive(tab),'deps','severity')">Severity</th></tr></thead>
+                                    <tbody><template x-for="(f,i) in aiSccList(aiSccActive(tab),'deps')" :key="i"><tr><td class="lang" :title="f.ecosystem" x-text="f.package"></td><td x-text="f.version"></td><td class="lang" :title="f.summary" x-text="f.id"></td><td x-text="f.severity"></td></tr></template></tbody>
+                                </table>
+                                <div class="agent-diff-empty text-muted p-2" x-show="aiSccActive(tab).scc.tools.deps.ranAt && !aiSccActive(tab).scc.tools.deps.findings.length && !aiSccActive(tab).scc.tools.deps.err">No known vulnerabilities ✓</div>
+                            </div>
+                            <!-- Duplication (jscpd) -->
+                            <div class="agent-scc-scroll" x-show="aiSccActive(tab).scc.sub==='dup'">
+                                <template x-if="aiSccActive(tab).scc.tools.dup.installed === false">
+                                    <div class="agent-scc-install">
+                                        <p class="mb-1"><strong>jscpd</strong> isn't installed (needs npm). Find copy-pasted code:</p>
+                                        <button class="btn btn-sm btn-primary mb-2" @click="aiSccInstallTool(aiSccActive(tab),'dup')" :disabled="aiSccActive(tab).scc.tools.dup.installing"><span x-show="!aiSccActive(tab).scc.tools.dup.installing">Install jscpd</span><span x-show="aiSccActive(tab).scc.tools.dup.installing">Installing…</span></button>
+                                        <pre class="agent-scc-cmd" x-show="aiSccActive(tab).scc.tools.dup.installLog" x-text="aiSccActive(tab).scc.tools.dup.installLog"></pre>
+                                        <details class="agent-scc-manual"><summary>Command</summary><pre class="agent-scc-cmd" x-text="aiSccActive(tab).scc.tools.dup.installCmd"></pre></details>
+                                    </div>
+                                </template>
+                                <div class="agent-scc-loading" x-show="aiSccActive(tab).scc.tools.dup.loading">Finding duplicates…</div>
+                                <div class="agent-diff-empty text-muted p-2" x-show="aiSccActive(tab).scc.tools.dup.installed && !aiSccActive(tab).scc.tools.dup.loading && !aiSccActive(tab).scc.tools.dup.ranAt && !aiSccActive(tab).scc.tools.dup.err">Not analyzed yet — press ⟳ to run.</div>
+                                <div class="agent-diff-empty text-danger p-2" x-show="aiSccActive(tab).scc.tools.dup.err" x-text="aiSccActive(tab).scc.tools.dup.err"></div>
+                                <div class="agent-scc-covtotal" x-show="aiSccActive(tab).scc.tools.dup.ranAt" x-text="aiSccActive(tab).scc.tools.dup.summary"></div>
+                                <table class="agent-scc-table scc-wide" x-show="aiSccActive(tab).scc.tools.dup.findings.length">
+                                    <thead><tr><th @click="aiSccSortBy(aiSccActive(tab),'dup','fileA')">File A</th><th @click="aiSccSortBy(aiSccActive(tab),'dup','fileB')">File B</th><th class="num" @click="aiSccSortBy(aiSccActive(tab),'dup','lines')">Lines</th></tr></thead>
+                                    <tbody><template x-for="(f,i) in aiSccList(aiSccActive(tab),'dup')" :key="i"><tr><td class="lang" :title="f.fileA"><span class="scc-fn" x-text="f.fileA.split('/').pop()"></span><span class="scc-fa"><button @click.stop="aiSccPreviewFile(aiSccActive(tab), f.fileA)" title="Preview">👁</button><button @click.stop="aiSccOpenFile(aiSccActive(tab), f.fileA)" title="Open in editor">✎</button></span></td><td class="lang" :title="f.fileB"><span class="scc-fn" x-text="f.fileB.split('/').pop()"></span><span class="scc-fa"><button @click.stop="aiSccPreviewFile(aiSccActive(tab), f.fileB)" title="Preview">👁</button><button @click.stop="aiSccOpenFile(aiSccActive(tab), f.fileB)" title="Open in editor">✎</button></span></td><td class="num code" x-text="f.lines"></td></tr></template></tbody>
+                                </table>
+                                <div class="agent-diff-empty text-muted p-2" x-show="aiSccActive(tab).scc.tools.dup.ranAt && !aiSccActive(tab).scc.tools.dup.findings.length && !aiSccActive(tab).scc.tools.dup.err">No significant duplication ✓</div>
+                            </div>
+                            <!-- Function complexity (lizard) -->
+                            <div class="agent-scc-scroll" x-show="aiSccActive(tab).scc.sub==='fn'">
+                                <template x-if="aiSccActive(tab).scc.tools.fn.installed === false">
+                                    <div class="agent-scc-install">
+                                        <p class="mb-1"><strong>lizard</strong> isn't installed (needs pip). Per-function cyclomatic complexity:</p>
+                                        <button class="btn btn-sm btn-primary mb-2" @click="aiSccInstallTool(aiSccActive(tab),'fn')" :disabled="aiSccActive(tab).scc.tools.fn.installing"><span x-show="!aiSccActive(tab).scc.tools.fn.installing">Install lizard</span><span x-show="aiSccActive(tab).scc.tools.fn.installing">Installing…</span></button>
+                                        <pre class="agent-scc-cmd" x-show="aiSccActive(tab).scc.tools.fn.installLog" x-text="aiSccActive(tab).scc.tools.fn.installLog"></pre>
+                                        <details class="agent-scc-manual"><summary>Command</summary><pre class="agent-scc-cmd" x-text="aiSccActive(tab).scc.tools.fn.installCmd"></pre></details>
+                                    </div>
+                                </template>
+                                <div class="agent-scc-loading" x-show="aiSccActive(tab).scc.tools.fn.loading">Analyzing functions…</div>
+                                <div class="agent-diff-empty text-muted p-2" x-show="aiSccActive(tab).scc.tools.fn.installed && !aiSccActive(tab).scc.tools.fn.loading && !aiSccActive(tab).scc.tools.fn.ranAt && !aiSccActive(tab).scc.tools.fn.err">Not analyzed yet — press ⟳ to run.</div>
+                                <div class="agent-diff-empty text-danger p-2" x-show="aiSccActive(tab).scc.tools.fn.err" x-text="aiSccActive(tab).scc.tools.fn.err"></div>
+                                <div class="agent-scc-covtotal" x-show="aiSccActive(tab).scc.tools.fn.ranAt" x-text="aiSccActive(tab).scc.tools.fn.summary"></div>
+                                <table class="agent-scc-table" x-show="aiSccActive(tab).scc.tools.fn.findings.length">
+                                    <thead><tr><th @click="aiSccSortBy(aiSccActive(tab),'fn','func')">Function</th><th @click="aiSccSortBy(aiSccActive(tab),'fn','file')">File</th><th class="num" @click="aiSccSortBy(aiSccActive(tab),'fn','ccn')">CCN</th><th class="num" @click="aiSccSortBy(aiSccActive(tab),'fn','nloc')">NLOC</th></tr></thead>
+                                    <tbody><template x-for="(f,i) in aiSccList(aiSccActive(tab),'fn')" :key="i"><tr><td class="lang" :title="f.func" x-text="f.func"></td><td class="lang" :title="f.file"><span class="scc-fn" x-text="f.file.split('/').pop()"></span><span class="scc-fa"><button @click.stop="aiSccPreviewFile(aiSccActive(tab), f.file)" title="Preview">👁</button><button @click.stop="aiSccOpenFile(aiSccActive(tab), f.file)" title="Open in editor">✎</button></span></td><td class="num code" :class="{'cov-low': f.ccn>50, 'cov-mid': f.ccn>15&&f.ccn<=50}" x-text="f.ccn"></td><td class="num" x-text="f.nloc"></td></tr></template></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </template>
+                </div>
+            </div>
+        </div>
+      </template>
+    </div>
+</template>
+
+<!-- ============== CONTEXT MENUS ============== -->
+<div class="context-menu" x-show="ctxMenu.open" :style="`left:${ctxMenu.x}px;top:${ctxMenu.y}px`" @click.stop>
+    <template x-if="ctxMenu.kind === 'file' || ctxMenu.kind === 'empty'">
+        <ul class="ctx-list" @click="closeContextMenu()">
+            <!-- Custom actions, kept at the TOP. Flat when ≤3 total; split into
+                 User / System flyout submenus when there are more than 3, so a
+                 long list isn't clipped off the bottom of the viewport. -->
+            <template x-if="!ctxActionGroups(ctxMenu.target).grouped">
+                <template x-for="action in ctxActionGroups(ctxMenu.target).all" :key="action.id">
+                    <li @click="(action.requiresGh && gh.state !== 'authed') ? null : runCustomAction(action)"
+                        class="ctx-action-item"
+                        :class="{ 'ctx-action-disabled': action.requiresGh && gh.state !== 'authed' }"
+                        :title="(action.requiresGh && gh.state !== 'authed') ? 'Requires GitHub (gh) — set it up first' : ''">
+                        <span class="ctx-action-label" x-text="action.label"></span>
+                        <span x-show="action.requiresGh" class="ca-badge ca-badge-system" title="Requires GitHub (gh)">gh</span>
+                        <span class="ca-badge" :class="action._source === 'user' ? 'ca-badge-user' : 'ca-badge-system'" x-text="action._source"></span>
+                    </li>
+                </template>
+            </template>
+            <template x-if="ctxActionGroups(ctxMenu.target).grouped">
+                <template x-for="grp in [
+                        { key: 'user',   label: 'User custom actions',   items: ctxActionGroups(ctxMenu.target).user },
+                        { key: 'system', label: 'System custom actions', items: ctxActionGroups(ctxMenu.target).system }
+                    ]" :key="grp.key">
+                    <li class="ctx-submenu" :class="{ 'fly-left': ctxMenu.flyLeft }" x-show="grp.items.length" @click.stop>
+                        <span class="ctx-action-label" x-text="grp.label + ' (' + grp.items.length + ')'"></span>
+                        <span class="ctx-submenu-arrow" x-text="ctxMenu.flyLeft ? '◂' : '▸'"></span>
+                        <ul class="ctx-flyout">
+                            <template x-for="action in grp.items" :key="action.id">
+                                <li @click="(action.requiresGh && gh.state !== 'authed') ? null : (runCustomAction(action), closeContextMenu())"
+                                    class="ctx-action-item"
+                                    :class="{ 'ctx-action-disabled': action.requiresGh && gh.state !== 'authed' }"
+                                    :title="(action.requiresGh && gh.state !== 'authed') ? 'Requires GitHub (gh) — set it up first' : ''">
+                                    <span class="ctx-action-label" x-text="action.label"></span>
+                                    <span x-show="action.requiresGh" class="ca-badge ca-badge-system" title="Requires GitHub (gh)">gh</span>
+                                    <span class="ca-badge" :class="action._source === 'user' ? 'ca-badge-user' : 'ca-badge-system'" x-text="action._source"></span>
+                                </li>
+                            </template>
+                        </ul>
+                    </li>
+                </template>
+            </template>
+            <li class="ctx-sep" x-show="ctxActionGroups(ctxMenu.target).total"></li>
+            <li x-show="ctxMenu.kind === 'file'" @click="openSelected()">Open</li>
+            <li x-show="ctxMenu.kind === 'file' && isTextLike(ctxMenu.target)" @click="openEditor(ctxMenu.target)">Edit</li>
+            <li x-show="ctxMenu.kind === 'file' && isPreviewable(ctxMenu.target)" @click="openPreview(ctxMenu.target)">Preview (Space)</li>
+            <li class="ctx-sep" x-show="ctxMenu.kind === 'file'"></li>
+            <li x-show="ctxMenu.kind === 'file'" @click="copyToClipboard('copy')">Copy</li>
+            <li x-show="ctxMenu.kind === 'file'" @click="copyToClipboard('cut')">Cut</li>
+            <li x-show="ctxMenu.kind === 'file'" @click="copyPathToClipboard()" x-text="selectedFiles().length > 1 ? 'Copy paths' : 'Copy path'"></li>
+            <li @click="paste()" :class="{ disabled: !clipboard.paths.length }">Paste</li>
+            <li class="ctx-sep" x-show="ctxMenu.kind === 'file'"></li>
+            <li x-show="ctxMenu.kind === 'file' && currentPane() && currentPane().selection.length === 1" @click="renameSelected()">Rename…</li>
+            <li x-show="ctxMenu.kind === 'file'" @click="deleteSelected()">Delete…</li>
+            <li class="ctx-sep"></li>
+            <li @click="newFolderPrompt()">New folder</li>
+            <li @click="newFilePrompt()">New file</li>
+            <li class="ctx-sep" x-show="ctxMenu.kind === 'file'"></li>
+            <li x-show="ctxMenu.kind === 'file'" @click="downloadSelected()">Download</li>
+            <li @click="uploadPrompt()">Upload here…</li>
+            <li class="ctx-sep" x-show="ctxMenu.kind === 'file'"></li>
+            <li x-show="ctxMenu.kind === 'file'" @click="compressSelected()">Compress…</li>
+            <li x-show="ctxMenu.kind === 'file' && isArchive(ctxMenu.target)" @click="extractHere(ctxMenu.target)">Extract here</li>
+            <li x-show="ctxMenu.kind === 'file' && isArchive(ctxMenu.target)" @click="extractTo(ctxMenu.target)">Extract to…</li>
+            <li class="ctx-sep"></li>
+            <li x-show="ctxMenu.kind === 'file' && ctxMenu.target && ctxMenu.target.type === 'd'" @click="openInNewTab(ctxMenu.target)">Open in new tab</li>
+            <li @click="openIntegratedTerminal(currentTab(), (ctxMenu.kind === 'file' && ctxMenu.target && ctxMenu.target.type === 'd') ? ctxMenu.target.path : currentPane()?.path)"
+                x-text="(ctxMenu.kind === 'file' && ctxMenu.target && ctxMenu.target.type === 'd') ? 'Open terminal in folder (split)' : 'Open terminal here (split)'"></li>
+            <li @click="newTerminalTab((ctxMenu.kind === 'file' && ctxMenu.target && ctxMenu.target.type === 'd') ? ctxMenu.target.path : currentPane()?.path)"
+                x-text="(ctxMenu.kind === 'file' && ctxMenu.target && ctxMenu.target.type === 'd') ? 'Open folder in new terminal tab' : 'Open in new terminal tab'"></li>
+            <li @click="openInTerminal((ctxMenu.kind === 'file' && ctxMenu.target && ctxMenu.target.type === 'd') ? ctxMenu.target.path : currentPane()?.path)">Open in Cockpit terminal</li>
+            <li class="ctx-sep" x-show="ai.have.claude || ai.have.codex"></li>
+            <li x-show="ai.have.claude" @click="openAgentTab('claude', (ctxMenu.kind === 'file' && ctxMenu.target && ctxMenu.target.type === 'd') ? ctxMenu.target.path : currentPane()?.path)">✦ Open Claude here</li>
+            <li x-show="ai.have.codex" @click="openAgentTab('codex', (ctxMenu.kind === 'file' && ctxMenu.target && ctxMenu.target.type === 'd') ? ctxMenu.target.path : currentPane()?.path)">◆ Open Codex here</li>
+            <li x-show="ctxMenu.kind === 'file' && selectedFiles().length === 1" @click="propertiesSelected()">Permissions…</li>
+            <li class="ctx-sep"></li>
+            <li @click="reloadActions()" title="Re-read custom actions from disk (after editing actions.json)">↻ Reload actions</li>
+        </ul>
+    </template>
+    <template x-if="ctxMenu.kind === 'tab'">
+        <ul class="ctx-list" @click="closeContextMenu()">
+            <li @click="duplicateTab(ctxMenu.tabId)">Duplicate tab</li>
+            <li class="ctx-sep"></li>
+            <li @click="closeTab(ctxMenu.tabId)">Close</li>
+            <li @click="closeOtherTabs(ctxMenu.tabId)">Close others</li>
+            <li @click="closeTabsLeft(ctxMenu.tabId)">Close to the left</li>
+            <li @click="closeTabsRight(ctxMenu.tabId)">Close to the right</li>
+        </ul>
+    </template>
+</div>
+
+<!-- ============== TERMINAL PATH POPOVER ============== -->
+<div class="term-path-pop" x-show="termPathPop.open"
+     :style="`top:${termPathPop.top}px;left:${termPathPop.left}px`"
+     @mouseenter="keepTermPath()" @mouseleave="hideTermPath()" x-cloak>
+    <code class="term-path-pop-text" x-text="termPathPop.path"></code>
+    <button class="btn btn-sm btn-outline-light term-path-pop-copy" @click="copyTermPath()">Copy path</button>
+</div>
+
+<!-- ============== OPERATIONS TRAY ============== -->
+<div class="ops-tray" x-show="operations.length > 0">
+    <div class="ops-header">
+        <span>Operations (<span x-text="operations.filter(o => o.status === 'running').length"></span> running)</span>
+        <button class="btn-close" @click="clearFinishedOperations()" title="Clear finished"></button>
+    </div>
+    <div class="ops-body">
+        <template x-for="op in operations" :key="op.id">
+            <div class="op-row" :class="'op-' + op.status">
+                <span class="op-label" x-text="op.label"></span>
+                <div class="progress" x-show="op.status === 'running'">
+                    <div class="progress-bar"
+                         :class="op.indeterminate ? 'progress-bar-striped progress-bar-animated' : ''"
+                         :style="op.indeterminate ? 'width:100%' : ('width:' + (op.progress || 0) + '%')"
+                         x-text="op.indeterminate ? '' : ((op.progress || 0) + '%')"></div>
+                </div>
+                <span class="op-status" x-text="op.statusText || op.status"></span>
+                <button class="btn btn-sm btn-link" x-show="op.status === 'running' && op.canCancel" @click="cancelOp(op)">Cancel</button>
+                <button class="btn btn-sm btn-link" x-show="op.status === 'error' && op.canRetryAsAdmin" @click="retryAsAdmin(op)">Retry as admin</button>
+                <button class="btn btn-sm btn-link" x-show="op.outputPaneId" @click="activateTab(op.outputPaneId)">View output</button>
+            </div>
+        </template>
+    </div>
+</div>
+
+<!-- ============== MODALS ============== -->
+<!-- Window host (shows the active preview/editor window) -->
+<div id="ex-partials"></div>
+
+<!-- Toasts -->
+<div class="toast-container position-fixed top-0 end-0 p-3" style="z-index:2000">
+    <template x-for="t in toasts" :key="t.id">
+        <div class="toast show" :class="'text-bg-' + (t.kind || 'secondary')" role="alert">
+            <div class="d-flex">
+                <div class="toast-body" x-text="t.message"></div>
+                <button type="button" class="btn-close btn-close-white me-2 m-auto" @click="dismissToast(t.id)"></button>
+            </div>
+        </div>
+    </template>
+</div>
+
+<!-- Hidden file input for uploads -->
+<input type="file" id="uploadInput" multiple style="display:none" @change="onUploadFiles($event)">
+
+<!-- ============== SCRIPTS ============== -->
+<script src="js/bootstrap.bundle.min.js"></script>
+<script src="js/prism.js" data-manual></script>
+<!-- Load common prism languages -->
+<script>
+  // Async-load language components from prism-components on demand
+  window.__prismLoaded = new Set(['markup', 'css', 'clike', 'javascript']);
+  window.loadPrismLanguage = function(lang) {
+    if (!lang || window.__prismLoaded.has(lang)) return Promise.resolve();
+    return new Promise((resolve) => {
+      const s = document.createElement('script');
+      s.src = 'js/prism-components/prism-' + lang + '.min.js';
+      s.onload = () => { window.__prismLoaded.add(lang); resolve(); };
+      s.onerror = () => resolve();
+      document.head.appendChild(s);
+    });
+  };
+</script>
+<script src="js/utils.js"></script>
+<script src="js/fs.js"></script>
+<script src="js/git.js"></script>
+<script src="js/runtime.js"></script>
+<script src="js/features/grub.js"></script>
+<script src="js/features/mounts.js"></script>
+<script src="js/features/github.js"></script>
+<script src="js/features/actions.js"></script>
+<script src="js/features/terminal.js"></script>
+<script src="js/features/upload.js"></script>
+<script src="js/features/editor.js"></script>
+<script src="js/features/videoplayer.js"></script>
+<script src="js/features/deeplink.js"></script>
+<script src="js/features/plugins.js"></script>
+<script src="js/features/sudoers.js"></script>
+<script src="js/features/agent-sessions.js"></script>
+<script src="js/features/agent.js"></script>
+<script src="js/features/scc.js"></script>
+<script src="js/core/tabs.js"></script>
+<script src="js/core/filelist.js"></script>
+<script src="js/core/fileops.js"></script>
+<script src="js/core/output.js"></script>
+<script src="js/core/dialogs.js"></script>
+<script src="js/core/settings.js"></script>
+<script src="js/js-yaml.min.js"></script>
+<!-- xterm.js for integrated split terminal (v1.1) -->
+<script src="js/xterm.js"></script>
+<script src="js/xterm-addon-fit.js"></script>
+<!-- Monaco AMD loader + worker config (Monaco itself is lazy-loaded by app.js when editor opens) -->
+<script>
+  // Defer Monaco's globals; loader.js sets window.require / window.define.
+  window.MonacoEnvironment = {
+    getWorkerUrl: function (moduleId, label) { return 'js/monaco/worker-wrapper.js'; }
+  };
+</script>
+<script src="js/monaco/vs/loader.js"></script>
+<script>
+  // Configure AMD baseUrl for Monaco
+  if (window.require && window.require.config) {
+    window.require.config({ paths: { vs: 'js/monaco/vs' } });
+  }
+</script>
+<script src="js/app.js"></script>
+<script src="js/boot.js"></script>
+
+</body>
+</html>

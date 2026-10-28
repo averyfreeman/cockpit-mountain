@@ -1,0 +1,47 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
+.podman-search .pf-v6-c-modal-box__body {
+    display: grid;
+    grid-auto-flow: row;
+    overflow: hidden;
+    grid-template-rows: auto auto 1fr;
+    gap: var(--pf-t--global--spacer--sm);
+}
+
+.image-list-item {
+    display: grid;
+    gap: 0 1rem;
+}
+
+.image-list-item + .image-list-item {
+    border-block-start: 1px solid var(--pf-t--global--border--color--default);
+}
+
+.image-list-item > .image-name {
+    color: var(--pf-t--global--background--color--primary--default);
+}
+
+@media (min-width: 768px) {
+    .image-list-item {
+        grid-template-columns: 1fr max-content;
+    }
+}
+
+.image-tag-entry {
+    max-inline-size: 15rem;
+}
+
+.image-search-tag-form {
+    margin-block-end: var(--pf-t--global--spacer--md);
+}
+
+.podman-search .pf-v6-c-modal-box__footer {
+    display: initial;
+}
+
+.podman-search .pf-v6-c-data-list {
+    overflow-y: auto;
+}
+
+.podman-search .pf-v6-l-flex .pf-v6-c-form__group:nth-child(2) {
+    grid-template-columns: 2rem var(--pf-v6-c-form--m-horizontal__group-control--md--GridColumnWidth);
+}

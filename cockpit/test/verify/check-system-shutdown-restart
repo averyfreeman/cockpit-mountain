@@ -1,0 +1,215 @@
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
+
+#
+# Copyright (C) 2013 Red Hat, Inc.
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
+
+import testlib
+
+
+@testlib.skipBeiboot("host switching disabled in beiboot mode")
+class TestShutdownRestart(testlib.MachineCase):
+    provision = {
+        "machine1": {"address": "10.111.113.1/20"},
+        "machine2": {"address": "10.111.113.2/20"}
+    }
+
+    def setUp(self):
+        super().setUp()
+        self.setup_provisioned_hosts()
+
+    def testBasic(self):
+        m = self.machine
+        b = self.browser
+
+        m2 = self.machines['machine2']
+        b2 = self.new_browser(m2)
+
+        # Disable pre-loading packagekit, dnf needs-restarting (dnf 4) consumes tons of cpu/memory on RHEL-10-1
+        self.disable_preload("packagekit")
+        self.disable_preload("packagekit", machine=m2)
+
+        self.enable_multihost(m2)
+
+        m.start_cockpit()
+
+        self.login_and_go("/system")
+
+        # Reboot
+        b.click("#reboot-button")
+        b.wait_popup("shutdown-dialog")
+        b.wait_in_text(f"#shutdown-dialog button{self.danger_btn_class}", 'Reboot')
+        b.set_input_text("#message", "Rebooting for maintenance")
+        b.click("#delay")
+        b.click("button:contains('No delay')")
+        b.wait_text("#delay .pf-v6-c-menu-toggle__text", "No delay")
+        b.click(f"#shutdown-dialog button{self.danger_btn_class}")
+        b.switch_to_top()
+
+        b.wait_in_text(".curtains-ct h1", "Disconnected")
+
+        self.wait_reboot()
+        m.start_cockpit()
+        b.click("#machine-reconnect")
+        b.wait_visible("#login")
+
+        self.allow_journal_messages("Shutdown scheduled for .*")
+        self.check_journal_messages()
+
+        m2.start_cockpit()
+        b2.login_and_go("/system")
+
+        # Add machine with static IP to m2
+        b2.add_machine("10.111.113.1")
+        b2.wait_text("#system_information_hostname_text", "machine1")
+
+        # Check auto reconnect on reboot
+        b2.become_superuser()
+        b2.click("#reboot-button")
+        b2.wait_popup("shutdown-dialog")
+        b2.wait_in_text(f"#shutdown-dialog button{self.danger_btn_class}", 'Reboot')
+        b2.click("#delay")
+        b2.click("button:contains('No delay')")
+        b2.wait_text("#delay .pf-v6-c-menu-toggle__text", "No delay")
+        b2.click(f"#shutdown-dialog button{self.danger_btn_class}")
+        b2.switch_to_top()
+
+        b2.wait_visible(".curtains-ct")
+        b2.wait_visible(".curtains-ct .pf-v6-c-spinner")
+        b2.wait_in_text(".curtains-ct h1", "rebooting")
+
+        self.wait_reboot()
+
+        with b2.wait_timeout(30):
+            b2.wait_visible("#machine-troubleshoot")
+        b2.start_machine_troubleshoot(password="foobar", expect_warning=False)
+
+        b2.enter_page("/system", host="10.111.113.1", reconnect=False)
+
+        # Try to insert an invalid time
+        self.login_and_go("/system")
+        b.enter_page("/system")
+        b.click("#shutdown-group")  # caret
+        b.click("#shutdown")
+        b.wait_popup("shutdown-dialog")
+        b.wait_not_present("#delay-helper")
+        b.click("#delay")
+        b.click("button:contains('Specific time')")
+        b.wait_text("#delay .pf-v6-c-menu-toggle__text", "Specific time")
+        b.wait_not_val("#shutdown-time-input", "")
+        b.wait_not_present("#delay-helper")
+        old = b.val("#shutdown-time-input")
+        b.set_input_text("#shutdown-time-input", "blah")
+        b.wait_text("#delay-helper", "Invalid time format")
+        b.wait_visible(f"#shutdown-dialog button{self.danger_btn_class}:disabled")
+
+        # Now set a correct time
+        b.set_input_text("#shutdown-time-input", old)
+        b.wait_visible(f"#shutdown-dialog button{self.danger_btn_class}:not(disabled)")
+        b.wait_not_present("#delay-helper")
+
+        # Try to insert an invalid date
+        old_date = b.val(".shutdown-date-picker input")
+        b.set_input_text(".shutdown-date-picker input", "20/0x/2021")
+        b.wait_val(".shutdown-date-picker input", "20/0x/2021")
+        b.wait_text("#delay-helper", "Invalid date format")
+        b.wait_visible(f"#shutdown-dialog button{self.danger_btn_class}:disabled")
+
+        # Restore the valid date before opening the picker, to avoid
+        # https://github.com/cockpit-project/cockpit/issues/23205
+        b.set_input_text(".shutdown-date-picker input", old_date)
+        b.wait_not_present("#delay-helper")
+
+        # Insert a date using the widget dropdown
+        b.click("button[aria-label='Toggle date picker']")
+        today_label = m.execute("date +'%-d %B %Y'").strip()
+        today_format = m.execute("date +'%Y-%m-%d'").strip()
+        b.click(f".pf-v6-c-calendar-month__dates-cell:not(.pf-m-adjacent-month) button[aria-label='{today_label}']")
+        b.wait_val(".shutdown-date-picker input", today_format)
+        b.blur(".shutdown-date-picker input")
+
+        # Power off
+        b.click(f"#shutdown-dialog button{self.danger_btn_class}")
+        b.switch_to_top()
+
+        # we don't need to wait for the dialog to close here, just the disconnect
+        b.wait_in_text(".curtains-ct h1", "Disconnected")
+
+        m.wait_poweroff()
+
+
+class TestUncleanShutdownStatus(testlib.MachineCase):
+
+    def _cleanReboot(self):
+        m = self.machine
+        b = self.browser
+        b.click("#reboot-button")
+        b.wait_popup("shutdown-dialog")
+        b.wait_in_text(f"#shutdown-dialog button{self.danger_btn_class}", 'Reboot')
+        b.set_input_text("#message", "Rebooting for maintenance")
+        b.click("#delay")
+        b.click("button:contains('No delay')")
+        b.wait_text("#delay .pf-v6-c-menu-toggle__text", "No delay")
+        b.click(f"#shutdown-dialog button{self.danger_btn_class}")
+
+        b.switch_to_top()
+        b.wait_in_text(".curtains-ct h1", "Disconnected")
+
+        self.wait_reboot()
+        m.start_cockpit()
+        b.click("#machine-reconnect")
+        b.wait_visible("#login")
+        self.login_and_go("/system")
+
+    def _uncleanReboot(self):
+        m = self.machine
+        b = self.browser
+        m.spawn("reboot -f", "reboot")
+
+        b.switch_to_top()
+        with b.wait_timeout(30):
+            b.wait_in_text(".curtains-ct h1", "Disconnected")
+
+        self.wait_reboot()
+        m.start_cockpit()
+        b.click("#machine-reconnect")
+        b.wait_visible("#login")
+        self.login_and_go("/system")
+
+    def testBasic(self):
+        m = self.machine
+        b = self.browser
+
+        # Disable pre-loading packagekit, dnf needs-restarting (dnf 4) consumes tons of cpu/memory on RHEL-10-1
+        self.disable_preload("packagekit")
+
+        m.start_cockpit()
+        self.login_and_go("/system")
+        b.wait_visible('#system_information_os_text')
+        b.wait_not_present("#unclean-shutdown-status")
+
+        # Unclean reboot
+        self._uncleanReboot()
+        b.wait_visible("#unclean-shutdown-status")
+        b.wait_in_text("#unclean-shutdown-status", "Unclean shutdown")
+
+        # Link to logs page
+        b.click("#unclean-shutdown-status button:contains('View logs')")
+        b.switch_to_top()
+        b.wait_js_cond('window.location.pathname == "/system/logs"')
+        b.wait_js_cond('window.location.hash == "#/?boot=-1"')
+
+        # Dismiss
+        b.go("/system")
+        b.enter_page("/system")
+        b.click("#unclean-shutdown-status-dismiss")
+        b.wait_not_present("#unclean-shutdown-status")
+
+        # Clean reboot
+        self._cleanReboot()
+        b.wait_not_present("#unclean-shutdown-status")
+
+
+if __name__ == '__main__':
+    testlib.test_main()

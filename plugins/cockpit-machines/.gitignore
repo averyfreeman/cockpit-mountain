@@ -1,0 +1,39 @@
+# Please keep this file sorted (LC_COLLATE=C.UTF-8),
+# grouped into the 3 categories below:
+#  - general patterns (match in all directories)
+#  - patterns to match files at the toplevel
+#  - patterns to match files in subdirs
+
+# general patterns
+*.pyc
+*.rpm
+
+# toplevel (/...)
+/Test*.html
+/Test*.json
+/Test*.log
+/Test*.log.gz
+/Test*.png
+/Test*.xml
+/*.whl
+/bots
+/cockpit-*.tar.xz
+/cockpit-machines.spec
+/dist/
+/metafile.json
+/package-lock.json
+/pkg/
+/runtime-npm-modules.txt
+/tmp/
+/tools/*
+!/tools/make-debs
+
+# subdirs (/subdir/...)
+/packaging/arch/PKGBUILD
+/packaging/debian/changelog
+/packaging/debian/copyright
+/po/*.pot
+/po/LINGUAS
+/test/common/
+/test/images/
+/test/static-code

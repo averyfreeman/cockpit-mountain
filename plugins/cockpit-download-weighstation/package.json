@@ -1,0 +1,23 @@
+{
+  "name": "cockpit-download-superstation",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "node build.js",
+    "watch": "node build.js --watch",
+    "lint": "oxlint src/"
+  },
+  "dependencies": {
+    "@patternfly/react-core": "catalog:",
+    "@patternfly/react-icons": "catalog:",
+    "react": "catalog:",
+    "react-dom": "catalog:"
+  },
+  "devDependencies": {
+    "esbuild": "catalog:",
+    "oxlint": "catalog:"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

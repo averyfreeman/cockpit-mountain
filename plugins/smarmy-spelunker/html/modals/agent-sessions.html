@@ -1,0 +1,67 @@
+<!-- Resume AI session browser — partial injected by js/boot.js. Do not add a wrapper element. -->
+<div class="modal fade" id="agentSessionsModal" tabindex="-1" x-data x-init="agentSessionsModalEl = $el">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable modal-fullscreen-sm-down">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Resume an AI session</h5>
+        <div class="ms-auto d-flex align-items-center gap-2">
+          <input type="search" class="form-control form-control-sm" style="width:14rem" placeholder="Search path or title…" x-model="agentBrowser.q">
+          <select class="form-select form-select-sm" style="width:auto" x-model="agentBrowser.filter">
+            <option value="all">All</option>
+            <option value="claude">Claude</option>
+            <option value="codex">Codex</option>
+          </select>
+          <button class="btn btn-sm btn-outline-secondary" @click="openAgentSessions()" :disabled="agentBrowser.loading">
+            <span x-show="!agentBrowser.loading">Refresh</span><span x-show="agentBrowser.loading">Loading…</span>
+          </button>
+          <button type="button" class="btn-close" @click="bootstrap.Modal.getOrCreateInstance(agentSessionsModalEl).hide()" aria-label="Close"></button>
+        </div>
+      </div>
+      <div class="modal-body">
+        <div class="agent-loading text-center text-muted py-5" x-show="agentBrowser.loading" x-cloak>
+          <div class="spinner-border text-primary mb-2" role="status" aria-hidden="true"></div>
+          <div>Scanning your Claude &amp; Codex sessions…</div>
+        </div>
+        <div class="text-muted small mb-2" x-show="!agentBrowser.loading">
+          Sessions read from <code x-text="settings.aiClaudeSessionsDir || '~/.claude/projects'"></code> and
+          <code x-text="settings.aiCodexSessionsDir || '~/.codex/sessions'"></code> (change these in Settings). Pick one to open a tab that resumes it.
+        </div>
+        <!-- Grouped by project folder. Each project is a disclosure panel: the
+             header resumes the LATEST session in that folder; expanding it lists
+             every session so you can resume a specific one. -->
+        <div class="agent-proj-list" x-show="!agentBrowser.loading">
+          <template x-for="g in aiGroupedSessions()" :key="g.cwd">
+            <div class="agent-proj">
+              <div class="agent-proj-head">
+                <button class="agent-proj-toggle" @click="agentBrowser.expanded[g.cwd] = !agentBrowser.expanded[g.cwd]" :title="(agentBrowser.expanded[g.cwd] || agentBrowser.q) ? 'Collapse' : 'Show all ' + g.count + ' sessions'">
+                  <span class="agent-proj-chev" x-text="(agentBrowser.expanded[g.cwd] || agentBrowser.q) ? '▾' : '▸'"></span>
+                  <code class="agent-proj-cwd" x-text="g.cwd"></code>
+                  <span class="badge bg-secondary" x-text="g.count"></span>
+                </button>
+                <div class="agent-proj-latest">
+                  <span class="badge" :class="g.latest.tool === 'codex' ? 'bg-info text-dark' : 'bg-primary'" x-text="g.latest.tool"></span>
+                  <span class="agent-proj-title text-muted small" x-text="g.latest.title || '—'"></span>
+                  <span class="text-muted small text-nowrap" x-text="aiRelTime(g.latest.mtime)"></span>
+                  <button class="btn btn-sm btn-primary text-nowrap" @click="aiResume(g.latest)" :disabled="!ai.have[g.latest.tool]" :title="ai.have[g.latest.tool] ? 'Resume the most recent session in this folder' : (g.latest.tool + ' is not installed')">Resume latest</button>
+                  <button class="btn btn-sm btn-outline-danger" @click="aiDeleteGroup(g)" :title="'Delete all ' + g.count + ' sessions in this folder'">🗑</button>
+                </div>
+              </div>
+              <div class="agent-proj-body" x-show="agentBrowser.expanded[g.cwd] || agentBrowser.q" x-cloak>
+                <template x-for="s in g.sessions" :key="s.tool + ':' + s.id + ':' + s.path">
+                  <div class="agent-sess-row">
+                    <span class="badge" :class="s.tool === 'codex' ? 'bg-info text-dark' : 'bg-primary'" x-text="s.tool"></span>
+                    <span class="agent-sess-title text-muted small" x-text="s.title || '—'"></span>
+                    <span class="text-muted small text-nowrap" x-text="aiRelTime(s.mtime)"></span>
+                    <button class="btn btn-sm btn-outline-primary text-nowrap" @click="aiResume(s)" :disabled="!ai.have[s.tool]" x-text="ai.have[s.tool] ? 'Resume' : 'Not installed'"></button>
+                    <button class="btn btn-sm btn-outline-danger" @click="aiDeleteSession(s)" title="Delete this session">🗑</button>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </template>
+          <div class="text-center text-muted py-3" x-show="!agentBrowser.loading && aiGroupedSessions().length === 0">No sessions found.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

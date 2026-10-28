@@ -1,0 +1,262 @@
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
+
+#
+# Copyright (C) 2013 Red Hat, Inc.
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
+
+import re
+
+import netlib
+import testlib
+
+
+@testlib.skipImage("No network checkpoint support", "ubuntu-*")
+@testlib.nondestructive
+class TestNetworkingCheckpoints(netlib.NetworkCase):
+    def testCheckpoint(self):
+        b = self.browser
+        m = self.machine
+
+        iface = self.get_iface("52:54:00:12:34:56")
+
+        if "debian" in m.image:
+            self.sed_file("s/managed=false/managed=true/", "/etc/NetworkManager/NetworkManager.conf",
+                          "systemctl restart NetworkManager")
+
+        if m.image == "arch":
+            self.sed_file("s/unmanaged-devices=interface-name:eth0//", "/etc/NetworkManager/conf.d/noauto.conf",
+                          "systemctl restart NetworkManager")
+
+        self.login_and_go("/network")
+        self.nm_checkpoints_enable()
+        self.wait_for_iface(iface, prefix="172.")
+        self.select_iface(iface)
+        b.wait_visible("#network-interface")
+
+        # Disconnect
+        self.wait_onoff("label[for='interface-switch']", val=True)
+        self.toggle_onoff("label[for='interface-switch']")
+
+        # Wait for dialog to appear and dismiss it
+        with b.wait_timeout(60):
+            b.click("#confirm-breaking-change-popup button:contains('Keep connection')")
+        b.wait_not_present("#confirm-breaking-change-popup")
+
+        # Change IP
+        self.configure_iface_setting('IPv4')
+        b.wait_visible("#network-ip-settings-dialog")
+        b.select_from_dropdown("#network-ip-settings-select-method", "manual")
+        b.set_input_text('#network-ip-settings-address-0', "1.2.3.4")
+        b.set_input_text('#network-ip-settings-netmask-0', "24")
+        b.click("#network-ip-settings-save")
+        with b.wait_timeout(60):
+            b.click("#confirm-breaking-change-popup button:contains('Keep connection')")
+        b.wait_not_present("#confirm-breaking-change-popup")
+
+    @testlib.skipImage("Main interface settings are read-only", "debian-*")
+    @testlib.skipImage("no dhclient on OS image", "arch", "centos-10*", "rhel-10*")
+    @testlib.skipOstree("not using dhclient")
+    def testCheckpointSlowRollback(self):
+        b = self.browser
+        m = self.machine
+
+        # A slow rollback would normally cause the global health check
+        # to fail during rollback and prevent showing the
+        # #confirm-breaking-change-popup.  We expect the global health
+        # check failure to be ignored.
+        #
+        # We test slow rollbacks by slowing down DHCP requests.
+        #
+        # We need at least 60 seconds of network disconnection to let
+        # the health check fail reliably.  A rollback is started 7
+        # seconds after disconnection, so we need to delay the DHCP
+        # request by at least 53 seconds.  However, NetworkManager has
+        # a default DHCP timeout of 45 seconds, so we need to increase
+        # that.
+        #
+        # Sometimes, NetworkManager extends the DHCP timeout by an
+        # additional 480 seconds grace period.  This doesn't always
+        # happen, so we don't rely on it.
+
+        dhcp_delay = 60
+        dhcp_timeout = 120
+
+        # There are a couple of considerations for ordering the
+        # following actions:
+        #
+        # - Changing the main.dhcp config value requires a restart of NM.
+        #
+        # - A restart of NM might run dhclient, and we don't want it
+        #   to be slowed down already at that point.
+        #
+        # - After restarting NM, we need to wait for it to settle
+        #   again before messing with dhclient.
+        #
+        # - Simply setting ipv4.dhcp_timeout is not enough if it
+        #   should be used immediately for a checkpoint rollback, see
+        #   https://bugzilla.redhat.com/show_bug.cgi?id=1690389.  A
+        #   additional restart is enough.
+        #
+        # So we set ipv4.dhcp_timeout and main.dhcp, do a restart, log
+        # into the UI and wait for the expected interface to appear
+        # and be active, and then slow down dhclient.
+
+        iface = self.get_iface("52:54:00:12:34:56")
+        con_id = self.iface_con_id(iface)
+        m.execute(f'nmcli con mod "{con_id}" ipv4.dhcp-timeout {dhcp_timeout}')
+
+        self.ensure_nm_uses_dhclient()
+
+        self.login_and_go("/network")
+        self.nm_checkpoints_enable()
+        self.wait_for_iface(iface, prefix="172.")
+        self.select_iface(iface)
+        b.wait_visible("#network-interface")
+
+        # checkpoints are realtime sensitive, avoid long NM operations
+        self.settle_cpu()
+
+        self.slow_down_dhclient(dhcp_delay)
+
+        # Disconnect and trigger a slow rollback
+        self.wait_onoff("label[for='interface-switch']", val=True)
+        self.toggle_onoff("label[for='interface-switch']")
+        with b.wait_timeout(120):
+            b.click("#confirm-breaking-change-popup button:contains('Keep connection')")
+            b.wait_not_present("#confirm-breaking-change-popup")
+
+    def testNoRollback(self):
+        b = self.browser
+        m = self.machine
+
+        self.login_and_go("/network")
+        self.nm_checkpoints_enable()
+        b.wait_visible("#networking")
+
+        iface = 'cockpit1'
+        self.add_veth(iface, dhcp_cidr="10.111.113.2/20")
+        self.nm_activate_eth(iface)
+        self.wait_for_iface(iface)
+
+        self.select_iface(iface)
+        b.wait_visible("#network-interface")
+
+        # Disconnect
+        self.wait_onoff("label[for='interface-switch']", val=True)
+        self.toggle_onoff("label[for='interface-switch']")
+
+        # The checkpoint should be destroyed before it is being rolled
+        # back.
+
+        def checkpoint_was_destroyed():
+            lines = m.execute("journalctl -u NetworkManager | grep op=").split("\n")
+            last_checkpoint = None
+            for line in lines:
+                match = re.search(r'op="checkpoint-create" arg="([^"]*)"', line)
+                if match:
+                    last_checkpoint = match[1]
+            if last_checkpoint:
+                for line in lines:
+                    if f'op="checkpoint-destroy" arg="{last_checkpoint}"' in line:
+                        return True
+            return False
+
+        testlib.wait(checkpoint_was_destroyed)
+
+    def testCheckpointSessionStorageEventSuccess(self):
+        b = self.browser
+
+        self.login_and_go("/network")
+        self.nm_checkpoints_enable()
+        b.wait_visible("#networking")
+
+        iface = 'cockpit1'
+        self.add_veth(iface, dhcp_cidr="10.111.114.2/20")
+        self.nm_activate_eth(iface)
+        self.wait_for_iface(iface)
+
+        self.select_iface(iface)
+        b.wait_visible("#network-interface")
+
+        # Verify sessionStorage is initially false or not set
+        initial_value = b.call_js_func("window.sessionStorage.getItem", "cockpit_has_checkpoint")
+        self.assertIn(initial_value, [None, "false"])
+
+        # Change IP settings which will trigger a checkpoint
+        self.configure_iface_setting('IPv4')
+        b.wait_visible("#network-ip-settings-dialog")
+        b.select_from_dropdown("#network-ip-settings-select-method", "manual")
+        b.set_input_text('#network-ip-settings-address-0', "10.111.114.100")
+        b.set_input_text('#network-ip-settings-netmask-0', "20")
+
+        # Click save, which triggers checkpoint creation
+        b.click("#network-ip-settings-save")
+
+        # Verify sessionStorage becomes true during checkpoint operation
+        def checkpoint_active():
+            value = b.call_js_func("window.sessionStorage.getItem", "cockpit_has_checkpoint")
+            return value == "true"
+
+        testlib.wait(checkpoint_active)
+
+        # Wait for operation to complete and sessionStorage to be cleared
+        def checkpoint_cleared():
+            value = b.call_js_func("window.sessionStorage.getItem", "cockpit_has_checkpoint")
+            return value == "false"
+
+        testlib.wait(checkpoint_cleared)
+
+    def testCheckpointSessionStorageEventRollback(self):
+        b = self.browser
+        m = self.machine
+
+        self.login_and_go("/network")
+        self.nm_checkpoints_enable()
+        b.wait_visible("#networking")
+
+        iface = self.get_iface("52:54:00:12:34:56")
+
+        if "debian" in m.image:
+            self.sed_file("s/managed=false/managed=true/", "/etc/NetworkManager/NetworkManager.conf",
+                          "systemctl restart NetworkManager")
+
+        if m.image == "arch":
+            self.sed_file("s/unmanaged-devices=interface-name:eth0//", "/etc/NetworkManager/conf.d/noauto.conf",
+                          "systemctl restart NetworkManager")
+
+        self.wait_for_iface(iface, prefix="172.")
+        self.select_iface(iface)
+        b.wait_visible("#network-interface")
+
+        # Verify sessionStorage is initially false or not set
+        initial_value = b.call_js_func("window.sessionStorage.getItem", "cockpit_has_checkpoint")
+        self.assertIn(initial_value, [None, "false"])
+
+        # Disconnect interface which will trigger checkpoint and should cause rollback dialog
+        self.wait_onoff("label[for='interface-switch']", val=True)
+        self.toggle_onoff("label[for='interface-switch']")
+
+        # Verify sessionStorage becomes true during checkpoint operation
+        def checkpoint_active():
+            value = b.call_js_func("window.sessionStorage.getItem", "cockpit_has_checkpoint")
+            return value == "true"
+
+        testlib.wait(checkpoint_active)
+
+        # Wait for dialog to appear (this happens when checkpoint_destroy fails)
+        with b.wait_timeout(60):
+            b.wait_visible("#confirm-breaking-change-popup")
+
+            # By the time dialog is visible, sessionStorage should already be cleared
+            checkpoint_cleared_value = b.call_js_func("window.sessionStorage.getItem", "cockpit_has_checkpoint")
+            self.assertEqual(checkpoint_cleared_value, "false")
+
+            # Keep the connection (rollback)
+            b.click("#confirm-breaking-change-popup button:contains('Keep connection')")
+
+        b.wait_not_present("#confirm-breaking-change-popup")
+
+
+if __name__ == '__main__':
+    testlib.test_main()

@@ -1,0 +1,32 @@
+Source: cockpit-machines
+Section: admin
+Priority: optional
+Maintainer: Utopia Maintenance Team <pkg-utopia-maintainers@lists.alioth.debian.org>
+Uploaders: Michael Biebl <biebl@debian.org>,
+           Martin Pitt <mpitt@debian.org>,
+Build-Depends: debhelper-compat (= 13),
+               esbuild,
+               nodejs,
+               gettext (>= 0.19.7),
+               gettext (>= 0.21) | appstream,
+Standards-Version: 4.7.3
+Rules-Requires-Root: no
+Homepage: https://github.com/cockpit-project/cockpit-machines
+Vcs-Git: https://salsa.debian.org/debian/cockpit-machines.git
+Vcs-Browser: https://salsa.debian.org/debian/cockpit-machines
+
+Package: cockpit-machines
+Architecture: all
+Multi-Arch: foreign
+Depends: ${misc:Depends},
+         cockpit-bridge (>= 215),
+         libvirt-daemon-system,
+         libvirt-clients | libvirt-bin,
+         libvirt-dbus,
+         virt-install (>= 3.0.0) | virtinst (>= 3.0.0),
+Recommends: python3-gi, gir1.2-libosinfo-1.0, qemu-block-extra
+Description: Cockpit user interface for virtual machines
+ The Cockpit Web Console enables users to administer GNU/Linux servers using a
+ web browser.
+ .
+ This package adds an user interface for managing libvirt virtual machines.

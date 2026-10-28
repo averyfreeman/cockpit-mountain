@@ -1,0 +1,95 @@
+/* Both the toggle and the panel sit at --z-index--md (300): above ordinary page
+   content, but below PatternFly's modal backdrop (--z-index--lg, 400) and modal box
+   (--z-index--xl, 500).
+
+   They used to be at --z-index--xl themselves — the *same* tier as the modal box — so
+   stacking fell through to DOM order and the drawer painted over any modal it
+   overlapped. With the Background Tasks drawer open, its header swallowed real mouse
+   clicks aimed at the task log modal's Close button (#283). Sitting below the backdrop
+   is also the correct behaviour on its own terms: while a modal is up, the backdrop is
+   supposed to cover and block the drawer, not sit behind it. */
+/* Brand-blue and slightly larger than a plain icon button, so it reads as an entry
+   point rather than blending into the page corner. */
+.btd-toggle.pf-v6-c-button {
+  --pf-v6-c-button--m-plain--BackgroundColor: var(--pf-t--global--color--brand--default);
+  --pf-v6-c-button--m-plain--Color: var(--pf-t--global--text--color--on-brand--default, #fff);
+  --pf-v6-c-button--m-plain--hover--BackgroundColor: var(--pf-t--global--color--brand--hover);
+  --pf-v6-c-button--m-plain--hover--Color: var(--pf-t--global--text--color--on-brand--hover, #fff);
+  position: fixed;
+  bottom: 1rem;
+  right: 1rem;
+  z-index: var(--pf-t--global--z-index--md, 300);
+  width: 2.75rem;
+  height: 2.75rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.125rem;
+  border-radius: 999px;
+  box-shadow: var(--pf-t--global--box-shadow--md);
+}
+
+.btd-toggle-badge {
+  position: absolute;
+  top: 0;
+  right: 0;
+  transform: translate(35%, -35%);
+}
+
+.btd-panel {
+  position: fixed;
+  bottom: 4.25rem;
+  right: 1rem;
+  width: min(380px, calc(100vw - 2rem));
+  max-height: 50vh;
+  z-index: var(--pf-t--global--z-index--md, 300);
+  box-shadow: var(--pf-t--global--box-shadow--lg);
+  border-radius: var(--pf-t--global--border--radius--200, 8px);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* NotificationDrawer defaults to height:100%, which only resolves against a
+   parent with a definite height. Our parent (.btd-panel) only has max-height,
+   so without these overrides the drawer just grows past it and gets clipped
+   by .btd-panel's overflow:hidden instead of scrolling internally. */
+.btd-panel .pf-v6-c-notification-drawer {
+  height: auto;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.btd-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.btd-item-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.btd-item-status {
+  font-size: 0.8125rem;
+  color: var(--pf-t--global--text--color--subtle);
+  text-transform: capitalize;
+}
+
+.btd-item-error {
+  font-size: 0.8125rem;
+  color: var(--pf-t--global--text--color--status--danger--default, #f85149);
+}
+
+.btd-item-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.btd-log-footer {
+  margin-top: 1rem;
+  display: flex;
+  justify-content: flex-end;
+}

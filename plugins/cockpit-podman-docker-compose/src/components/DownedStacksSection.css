@@ -1,0 +1,718 @@
+.dss-import-bar {
+  margin-top: 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.dss-prune-btn {
+  margin-left: auto;
+}
+
+.dss-bulk-bar {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.4rem 0.75rem;
+  margin: 0.5rem 0;
+  background: var(--pf-t--global--background--color--secondary--default);
+  border: 1px solid var(--pf-t--global--border--color--default);
+  border-radius: var(--pf-t--global--border--radius--200);
+}
+
+.dss-mini-select {
+  margin-right: 0.25rem;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.dss-mini-select--visible,
+.dss-mini-card:hover .dss-mini-select,
+.dss-mini-select:checked {
+  opacity: 1;
+}
+
+.dss-check {
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.dss-check--visible,
+.pf-v6-c-data-list__item-row:hover .dss-check,
+.pf-v6-c-data-list__item-row:focus-within .dss-check {
+  opacity: 1;
+}
+
+.dss-row--selected {
+  box-shadow: inset 0 0 0 2px var(--pf-t--global--color--brand--default, #06c), 0 0 14px rgba(0, 102, 204, 0.22);
+  background: rgba(0, 102, 204, 0.06);
+}
+
+
+.dss-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+/* Unified search bar: dir input + depth stepper + scan button share one border */
+.dss-search-bar {
+  flex: 0 1 44rem;
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--pf-t--global--border--color--default, #8a8d90);
+  border-radius: 0 var(--pf-t--global--border--radius--medium, 6px) var(--pf-t--global--border--radius--medium, 6px) 0;
+  overflow: hidden;
+  background: var(--pf-t--global--background--color--primary--default, #fff);
+  min-width: 0;
+}
+
+.dss-search-bar:focus-within:not(:has(.dss-scan-btn:focus-visible)) {
+  outline: 2px solid var(--pf-t--global--color--brand--default, #0066cc);
+  outline-offset: 2px;
+}
+
+/* Strip PF's own border / shadow / radius from the TextInput span wrapper */
+.dss-search-dir.pf-v6-c-form-control {
+  flex: 1;
+  min-width: 0;
+  border: none !important;
+  box-shadow: none !important;
+  border-radius: 0 !important;
+  background: transparent;
+}
+
+.dss-search-dir.pf-v6-c-form-control > input {
+  border: none !important;
+  border-radius: 0 !important;
+  background: transparent;
+}
+
+/* PF renders the input border via ::before/::after — kill those too */
+.dss-search-dir.pf-v6-c-form-control::before,
+.dss-search-dir.pf-v6-c-form-control::after {
+  border: none !important;
+  border-radius: 0 !important;
+}
+
+/* Depth stepper: label + − value + */
+.dss-stepper {
+  display: flex;
+  align-items: stretch;
+  flex-shrink: 0;
+  border-left: 1px solid var(--pf-t--global--border--color--default, #8a8d90);
+}
+
+.dss-stepper-label {
+  display: flex;
+  align-items: center;
+  padding: 0 0.5rem;
+  font-size: var(--pf-t--global--font--size--sm, 0.8125rem);
+  color: var(--pf-t--global--text--color--subtle, #6a6e73);
+  white-space: nowrap;
+  border-right: 1px solid var(--pf-t--global--border--color--default, #8a8d90);
+  user-select: none;
+}
+
+.dss-stepper-btn {
+  width: 1.875rem;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 1rem;
+  color: var(--pf-t--global--text--color--regular, #151515);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.1s ease;
+}
+
+.dss-stepper-btn:hover:not(:disabled) {
+  background: var(--pf-t--global--background--color--secondary--default, #f0f0f0);
+}
+
+.dss-stepper-btn:focus-visible {
+  outline: 2px solid var(--pf-t--global--color--brand--default, #0066cc);
+  outline-offset: -2px;
+}
+
+.dss-stepper-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.dss-stepper-value {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.75rem;
+  font-size: var(--pf-t--global--font--size--body--default, 0.875rem);
+  font-weight: 600;
+  color: var(--pf-t--global--text--color--regular, #151515);
+  border-left: 1px solid var(--pf-t--global--border--color--default, #8a8d90);
+  border-right: 1px solid var(--pf-t--global--border--color--default, #8a8d90);
+  user-select: none;
+}
+
+/* Find best match: left cap of the bar */
+.dss-find-btn.pf-v6-c-button {
+  border-radius: 0 !important;
+  border: none !important;
+  border-right: 1px solid var(--pf-t--global--border--color--default, #8a8d90) !important;
+  align-self: stretch;
+  height: auto;
+  padding-inline: 0.75rem;
+  white-space: nowrap;
+}
+
+/* PatternFly draws a secondary button's outline with ::after, which `border: none`
+   above does not reach. Inside the bar it doubled up with the bar's own border and
+   rendered unevenly (the bottom edge blended into the grey line at 1x zoom). The bar
+   is the frame here; the button is a flush segment like the depth stepper. */
+.dss-find-btn.pf-v6-c-button::after {
+  display: none;
+}
+
+.dss-find-btn.pf-v6-c-button:hover:not(:disabled) {
+  background: var(--pf-t--global--background--color--action--plain--hover);
+}
+
+/* Scan button: flush against the right edge */
+.dss-scan-btn.pf-v6-c-button {
+  border-radius: 0 !important;
+  border: none !important;
+  border-left: 1px solid var(--pf-t--global--border--color--default, #8a8d90) !important;
+  align-self: stretch;
+  height: auto;
+  padding-inline: 1.25rem;
+}
+
+.dss-separator {
+  position: relative;
+  display: flex;
+  align-items: center;
+  margin-top: 0.75rem;
+  margin-bottom: -1px;
+}
+
+.dss-separator::before,
+.dss-separator::after {
+  content: "";
+  flex: 1;
+  border-top: 1px dashed var(--pf-t--global--border--color--default, #d2d2d2);
+}
+
+.dss-separator-label {
+  padding: 0 0.75rem;
+  font-size: var(--pf-t--global--font--size--sm, 0.75rem);
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--pf-t--global--text--color--subtle, #6a6e73);
+  white-space: nowrap;
+}
+
+/* Outer frame shared by all dss content states */
+.dss-list-wrapper {
+  border: 1px solid var(--pf-t--global--border--color--default, #d2d2d2);
+  border-radius: var(--pf-t--global--border--radius--medium, 4px);
+  overflow: hidden;
+}
+
+.dss-scanning {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem;
+  color: var(--pf-t--global--text--color--subtle, #6a6e73);
+  font-size: var(--pf-t--global--font--size--sm, 0.875rem);
+}
+
+.dss-alert {
+  border-radius: 0;
+}
+
+/* Strip PatternFly's own border/shadow so our wrapper is the only frame */
+.dss-list {
+  border: none !important;
+  box-shadow: none !important;
+  border-radius: 0 !important;
+}
+
+.dss-stack-name {
+  font-weight: 600;
+  font-family: var(--pf-t--global--font--family--mono);
+  letter-spacing: 0.01em;
+}
+
+.dss-path-dir {
+  display: block;
+  font-family: var(--pf-t--global--font--family--mono);
+  font-size: var(--pf-t--global--font--size--sm, 0.8125rem);
+  color: var(--pf-t--global--text--color--subtle, #6a6e73);
+  word-break: break-all;
+}
+
+.dss-path-files {
+  display: block;
+  font-family: var(--pf-t--global--font--family--mono);
+  font-size: var(--pf-t--global--font--size--xs, 0.75rem);
+  color: var(--pf-t--global--text--color--subtle, #6a6e73);
+  opacity: 0.75;
+  margin-top: 2px;
+  word-break: break-all;
+}
+
+.dss-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  justify-content: flex-end;
+}
+
+.dss-delete-btn {
+  color: var(--pf-t--global--color--status--danger--default, #c9190b);
+}
+
+.dss-icon-group {
+  display: flex;
+  align-items: center;
+  gap: 0.1rem;
+  border-left: 1px solid var(--pf-t--global--border--color--default);
+  padding-left: 0.4rem;
+  margin-left: 0.1rem;
+}
+
+.dss-icon-group button:hover {
+  background: rgba(255, 255, 255, 0.08) !important;
+  border-radius: 4px;
+  transition: background 120ms ease;
+}
+
+/* Down status: left accent border + hover, matching StackRow conventions */
+[data-status="down"] {
+  border-left: 3px solid var(--pf-t--global--border--color--default) !important;
+  box-sizing: border-box;
+  transition: background 150ms ease, border-left-color 150ms ease;
+}
+
+[data-status="down"]:hover {
+  background: rgba(255, 255, 255, 0.028);
+}
+
+.dss-scan-warning {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: var(--pf-t--global--font--size--sm, 0.8125rem);
+  color: var(--pf-t--global--color--status--warning--default, #f0ab00);
+  white-space: nowrap;
+  cursor: default;
+}
+
+/* ── Minimal import bar — icon-only ────────────────────────────────── */
+.dss-minimal-bar {
+  margin-top: 0.75rem;
+  display: flex;
+  align-items: center;
+  gap: 0.125rem;
+}
+
+/* ── Minimal scan bar ────────────────────────────────────────────────── */
+.dss-minimal-scan {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin-top: 0.375rem;
+  padding: 0.25rem 0;
+}
+
+.dss-minimal-scan-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  border-bottom: 1px solid var(--pf-t--global--border--color--default, #c7c7c7);
+  background: transparent;
+  font-size: 0.8125rem;
+  color: var(--pf-t--global--text--color--regular, #151515);
+  padding: 0.2rem 0.25rem;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.dss-minimal-scan-input:focus {
+  border-bottom-color: var(--pf-t--global--color--brand--default, #0066cc);
+}
+
+.dss-minimal-scan-input::placeholder {
+  color: var(--pf-t--global--text--color--subtle, #6a6e73);
+  font-size: 0.75rem;
+}
+
+.dss-minimal-scan-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border: none;
+  background: transparent;
+  border-radius: var(--pf-t--global--border--radius--base, 4px);
+  cursor: pointer;
+  font-size: 0.8125rem;
+  color: var(--pf-t--global--text--color--subtle, #6a6e73);
+  transition: background 0.12s, color 0.12s;
+  flex-shrink: 0;
+}
+
+.dss-minimal-scan-btn:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.06);
+  color: var(--pf-t--global--text--color--regular, #151515);
+}
+
+.dss-minimal-scan-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.dss-minimal-scan-btn--depth {
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
+
+.dss-minimal-scan-btn--go {
+  color: var(--pf-t--global--color--brand--default, #0066cc);
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.dss-minimal-scan-btn--go:hover:not(:disabled) {
+  background: rgba(0, 102, 204, 0.08);
+  color: var(--pf-t--global--color--brand--default, #0066cc);
+}
+
+.dss-minimal-scan-depth {
+  font-size: 0.75rem;
+  font-weight: 600;
+  min-width: 0.875rem;
+  text-align: center;
+  color: var(--pf-t--global--text--color--subtle, #6a6e73);
+}
+
+.dss-minimal-scan-warn {
+  color: #f0ab00;
+  cursor: help;
+  font-size: 0.75rem;
+}
+
+/* ── Pretty import bar ──────────────────────────────────────────────── */
+.dss-pretty-import-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  background: linear-gradient(135deg, #0984e3, #74b9ff);
+  color: #fff;
+  border: none;
+  border-radius: 100px;
+  padding: 0.3rem 0.75rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter 0.15s ease;
+}
+
+.dss-pretty-import-btn:hover {
+  filter: brightness(1.08);
+}
+
+.dss-pretty-import-btn--secondary {
+  background: linear-gradient(135deg, #636e72, #b2bec3);
+}
+
+/* ── Unix scan input row ─────────────────────────────────────────────── */
+.dss-unix-scan {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.375rem 0.5rem;
+  font-family: "JetBrains Mono", "Fira Code", "Courier New", monospace;
+  font-size: 0.8125rem;
+  border: 1px solid var(--pf-t--global--border--color--default, #d2d2d2);
+  border-radius: var(--pf-t--global--border--radius--md, 6px);
+  background: rgba(0, 0, 0, 0.02);
+  flex-wrap: wrap;
+}
+
+.dss-unix-prompt {
+  color: #3e8635;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.dss-unix-input {
+  flex: 1;
+  min-width: 140px;
+  border: none;
+  background: transparent;
+  font-family: inherit;
+  font-size: inherit;
+  color: var(--pf-t--global--text--color--regular, #151515);
+  outline: none;
+  padding: 0.1rem 0.2rem;
+  border-bottom: 1px solid var(--pf-t--global--border--color--default, #d2d2d2);
+}
+
+.dss-unix-input::placeholder {
+  color: var(--pf-t--global--text--color--subtle, #6a6e73);
+  font-style: italic;
+}
+
+.dss-unix-label {
+  color: var(--pf-t--global--text--color--subtle, #6a6e73);
+  flex-shrink: 0;
+  font-size: 0.75rem;
+}
+
+.dss-unix-depth {
+  min-width: 1.25rem;
+  text-align: center;
+  font-weight: 600;
+}
+
+.dss-unix-warn {
+  color: #f0ab00;
+  cursor: help;
+}
+
+/* ── Pretty downed section ─────────────────────────────────────────── */
+.dss-pretty-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 0.625rem;
+  padding: 0.5rem 0;
+}
+
+.dss-pretty-card {
+  border-radius: 10px;
+  border: 1.5px solid #b2bec3;
+  background: var(--pf-t--global--background--color--primary--default, #fff);
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.07);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  transition: box-shadow 0.15s ease, transform 0.12s ease;
+}
+
+.dss-pretty-card:hover {
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
+  transform: translateY(-1px);
+}
+
+.dss-pretty-card--selected,
+.dss-pretty-card--selected:hover {
+  box-shadow: 0 0 0 2px var(--pf-t--global--color--brand--default, #06c), 0 6px 20px rgba(0, 102, 204, 0.30);
+}
+
+.dss-pretty-body {
+  padding: 0.625rem 0.75rem 0.375rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+  flex: 1;
+}
+
+.dss-pretty-name {
+  font-weight: 700;
+  font-size: 0.9rem;
+  word-break: break-word;
+}
+
+.dss-pretty-path {
+  font-size: 0.7rem;
+  color: var(--pf-t--global--text--color--subtle, #6a6e73);
+  font-family: var(--pf-t--global--font--family--mono, monospace);
+  word-break: break-all;
+}
+
+.dss-pretty-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.375rem 0.5rem 0.5rem 0.75rem;
+  border-top: 1px solid var(--pf-t--global--border--color--default, #e8e8e8);
+  gap: 0.5rem;
+}
+
+.dss-pretty-up {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  background: var(--pf-t--global--color--brand--default, #0066cc);
+  color: var(--pf-t--global--text--color--on-brand--default, #fff);
+  border: none;
+  border-radius: 100px;
+  padding: 0.3rem 0.7rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter 0.15s ease;
+}
+
+.dss-pretty-up:hover {
+  background: var(--pf-t--global--color--brand--hover, #004a99);
+}
+
+.dss-pretty-icons {
+  display: flex;
+  align-items: center;
+  gap: 0.1rem;
+}
+
+/* ── Unix downed section ───────────────────────────────────────────── */
+.dss-unix-bar {
+  margin-top: 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  font-family: "JetBrains Mono", "Fira Code", "Courier New", monospace;
+}
+
+.dss-unix-list {
+  border: 1px solid var(--pf-t--global--border--color--default, #d2d2d2);
+  border-radius: var(--pf-t--global--border--radius--md, 6px);
+  overflow: hidden;
+  font-family: "JetBrains Mono", "Fira Code", "Courier New", monospace;
+  font-size: 0.8125rem;
+}
+
+.dss-unix-row {
+  display: grid;
+  grid-template-columns: 1fr 2fr auto;
+  align-items: center;
+  gap: 0;
+  padding: 0.2rem 0.5rem;
+  border-bottom: 1px solid var(--pf-t--global--border--color--default, #d2d2d2);
+  min-height: 1.75rem;
+  transition: background 0.1s;
+}
+
+.dss-unix-row:last-child {
+  border-bottom: none;
+}
+
+.dss-unix-row:hover {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.dss-unix-name {
+  font-weight: 600;
+  padding: 0 0.375rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dss-unix-path {
+  padding: 0 0.375rem;
+  font-size: 0.75rem;
+  color: var(--pf-t--global--text--color--subtle, #6a6e73);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dss-unix-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.125rem;
+  padding: 0 0.25rem;
+}
+
+/* ── Minimal floating context menu ─────────────────────────────────── */
+.dss-mini-menu {
+  position: fixed;
+  z-index: 9999;
+  background: var(--pf-t--global--background--color--primary--default, #fff);
+  border: 1px solid var(--pf-t--global--border--color--default, #d2d2d2);
+  border-radius: var(--pf-t--global--border--radius--md, 6px);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+  min-width: 140px;
+  overflow: hidden;
+}
+
+.dss-mini-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  width: 100%;
+  background: transparent;
+  border: none;
+  padding: 0.45rem 0.75rem;
+  font-size: 0.8125rem;
+  cursor: pointer;
+  color: var(--pf-t--global--text--color--regular, #151515);
+  text-align: left;
+  transition: background 0.1s;
+}
+
+.dss-mini-menu-item:hover {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.dss-mini-menu-item--danger {
+  color: #c9190b;
+}
+
+.dss-mini-menu-item--danger:hover {
+  background: rgba(201, 25, 11, 0.06);
+}
+
+/* Minimal layout — compact downed stack cards */
+.dss-mini-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+  padding: 0.5rem;
+  background: var(--pf-t--global--background--color--primary--default, #fff);
+}
+
+.dss-mini-card {
+  display: flex;
+  align-items: center;
+  border: 1px solid var(--pf-t--global--border--color--default, #c7c7c7);
+  border-radius: var(--pf-t--global--border--radius--md, 6px);
+  padding: 0.2rem 0.1rem 0.2rem 0.5rem;
+  background: rgba(0, 0, 0, 0.03);
+  font-size: 0.75rem;
+  max-width: 220px;
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s;
+  user-select: none;
+}
+
+.dss-mini-card:hover {
+  background: rgba(0, 0, 0, 0.06);
+  border-color: var(--pf-t--global--border--color--default, #aaa);
+}
+
+.dss-mini-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.dss-mini-btn.pf-v6-c-button {
+  padding: 0.1rem 0.35rem;
+  min-width: unset;
+  height: 1.4rem;
+  font-size: 0.75rem;
+  flex-shrink: 0;
+}
+
+.dss-mini-btn--up { color: #3e8635 !important; }
+

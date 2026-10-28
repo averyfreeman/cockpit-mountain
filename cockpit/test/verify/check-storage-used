@@ -1,0 +1,186 @@
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
+
+#
+# Copyright (C) 2015 Red Hat, Inc.
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
+
+import storagelib
+import testlib
+
+
+@testlib.nondestructive
+class TestStorageUsed(storagelib.StorageCase):
+
+    def testUsed(self):
+        m = self.machine
+        b = self.browser
+
+        self.login_and_go("/storage")
+
+        disk = self.add_ram_disk()
+        b.wait_visible(self.card_row("Storage", name=disk))
+        m.execute(f"parted -s {disk} mktable msdos")
+        m.execute(f"parted -s {disk} mkpart primary ext2 1M 25")
+        m.execute("udevadm settle")
+        m.execute(f"until udevadm info --query=all {disk} | grep -q ID_PART_TABLE_TYPE=dos; do sleep 0.1; done")
+        m.execute(f"echo einszweidrei | cryptsetup luksFormat --pbkdf-memory 32768 {disk}1")
+        m.execute(f"echo einszweidrei | cryptsetup luksOpen {disk}1 dm-test")
+        m.execute("udevadm settle")
+        m.execute("until [ -b /dev/mapper/dm-test ]; do sleep 0.1; done")
+        m.execute("until udevadm info --query=all /dev/mapper/dm-test | grep -q DM_NAME=dm-test; do sleep 0.1; done")
+        m.execute("mke2fs -q -L TEST /dev/mapper/dm-test")
+        m.execute(f"mount /dev/mapper/dm-test {self.mnt_dir}")
+
+        # Keep the mount point busy.  The extra "true" is here to
+        # prevent bash from applying tail call optimization to the
+        # "sleep" invocation.
+        sleep_pid = m.spawn(f"cd {self.mnt_dir}; sleep infinity; true", "sleep")
+        self.write_file("/etc/systemd/system/keep-mnt-busy.service",
+                        f"""
+[Unit]
+Description=Test Service
+
+[Service]
+WorkingDirectory={self.mnt_dir}
+ExecStart=/usr/bin/sleep infinity
+""")
+        m.execute("systemctl start keep-mnt-busy")
+
+        # Now all of /dev/mapper/dm-test, /dev/sda1, and /dev/sda
+        # should be 'in use' but Cockpit can clean them all up anyway.
+
+        self.click_card_row("Storage", name=disk)
+        b.wait_visible(self.card("Solid State Drive"))
+
+        self.click_card_row("DOS partitions", 1)
+        self.click_card_dropdown("ext2 filesystem", "Format")
+        self.dialog_wait_open()
+        self.dialog_set_val("type", "ext4")
+        b.click("#dialog button:contains('Currently in use')")
+        b.wait_in_text(".pf-v6-c-popover", str(sleep_pid))
+        b.wait_in_text(".pf-v6-c-popover", "keep-mnt-busy")
+        b.assert_pixels(".pf-v6-c-popover", "popover",
+                        mock={".pf-v6-c-popover__body ul:nth-of-type(2) li": "process (user: root, pid: 1234)"},
+                        scroll_into_view="#dialog button:contains('Currently in use')")
+        b.click(".pf-v6-c-popover button")
+        b.assert_pixels('#dialog', "format", wait_after_layout_change=True, chrome_hack_double_shots=True)
+        self.dialog_cancel()
+        self.dialog_wait_close()
+
+        self.click_card_dropdown("Partition", "Delete")
+        self.dialog_wait_open()
+        b.wait_visible("#dialog button:contains('Currently in use')")
+        b.assert_pixels('#dialog', "delete")
+        self.dialog_cancel()
+        self.dialog_wait_close()
+
+        # Now go ahead and let the automatic teardown take care of the mount
+
+        b.click(self.card_parent_link())
+
+        # Sometimes /dev/sda1 is still held open by something
+        # immediately after locking it. This prevents the
+        # kernel from reading the new partition table. Let's
+        # just retry.
+
+        def first_setup():
+            self.dialog_set_val("type", "empty")
+            b.wait_visible("#dialog tbody:first-of-type button:contains('Currently in use')")
+            b.assert_pixels('#dialog', "format-disk")
+
+        def retry_setup():
+            self.dialog_set_val("type", "empty")
+
+        self.dialog_with_error_retry(trigger=lambda: self.click_card_dropdown("Solid State Drive",
+                                                                              "Create partition table"),
+                                     first_setup=first_setup,
+                                     retry_setup=retry_setup,
+                                     errors=["Timed out waiting for object"])
+
+        m.execute("! systemctl --quiet is-active keep-mnt-busy")
+
+        b.wait_visible(self.card("Unformatted data"))
+
+    def testUsedAsPV(self):
+        m = self.machine
+        b = self.browser
+
+        self.login_and_go("/storage")
+
+        dev_1 = self.add_ram_disk()
+        dev_2 = self.add_loopback_disk()
+        b.wait_visible(self.card_row("Storage", name=dev_1))
+        b.wait_visible(self.card_row("Storage", name=dev_2))
+
+        # Create a volume group out of two disks
+        m.execute(f"vgcreate TEST1 {dev_1} {dev_2}")
+        self.addCleanupVG("TEST1")
+        b.wait_visible(self.card_row("Storage", name="TEST1"))
+
+        # Formatting dev_1 should cleanly remove it from the volume
+        # group.
+
+        self.click_card_row("Storage", name=dev_1)
+        self.click_card_dropdown("Solid State Drive", "Create partition table")
+        b.wait_in_text('#dialog', "remove from LVM2, initialize")
+        self.dialog_apply()
+        self.dialog_wait_close()
+        self.assertEqual(int(m.execute("vgs TEST1 -o pv_count --noheadings")), 1)
+
+        # Formatting dev_2 should now cleanly remove the whole volume
+        # group.
+
+        b.go("#/")
+        self.click_card_row("Storage", name=dev_2)
+        self.click_card_dropdown("Block device", "Create partition table")
+        b.wait_in_text('#dialog', "remove from LVM2, initialize")
+        self.dialog_apply()
+        self.dialog_wait_close()
+
+        self.assertEqual(m.execute("vgs TEST1 || echo GONE").strip(), "GONE")
+
+    def testTeardownRetry(self):
+        m = self.machine
+        b = self.browser
+
+        self.login_and_go("/storage")
+
+        disk = self.add_ram_disk()
+        b.wait_visible(self.card_row("Storage", name=disk))
+        m.execute(f"mke2fs -q -L TEST {disk}")
+        m.execute(f"mount {disk} {self.mnt_dir}")
+
+        self.click_card_row("Storage", name=disk)
+        b.wait_in_text(self.card("ext2 filesystem"), f"The filesystem is currently mounted on {self.mnt_dir}")
+
+        # Start formatting, and while the dialog is open, make the
+        # filesystem unmountable.
+        #
+        # We have two processes that keep the filesystem busy: one
+        # that is supposed to be picked up by the dialog, and one that
+        # is not. The first is only used to figure out when the dialog
+        # is done initializing.
+
+        m.spawn(f"cd {self.mnt_dir}; sleep infinity; true", "sleep")
+
+        self.click_card_dropdown("Solid State Drive", "Create partition table")
+        self.dialog_wait_open()
+        b.wait_visible("#dialog tbody:first-of-type button:contains('Currently in use')")
+        self.dialog_wait_apply_enabled()
+        m.spawn(f"cd {self.mnt_dir}; sleep infinity; true", "sleep")
+        self.dialog_apply()
+        b.wait_in_text("#dialog", f"umount: {self.mnt_dir}: target is busy")
+        self.dialog_wait_apply_disabled()
+        self.dialog_cancel()
+        self.dialog_wait_close()
+
+        self.click_card_dropdown("Solid State Drive", "Create partition table")
+        self.dialog_wait_open()
+        b.wait_visible("#dialog button:contains('Currently in use')")
+        self.dialog_apply()
+        self.dialog_wait_close()
+
+
+if __name__ == '__main__':
+    testlib.test_main()

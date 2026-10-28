@@ -1,0 +1,106 @@
+.sim-section {
+  margin-bottom: 1.5rem;
+}
+
+.sim-section-label {
+  font-weight: 600;
+  font-size: var(--pf-t--global--font--size--sm);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--pf-t--global--text--color--subtle);
+  margin-bottom: 0.5rem;
+}
+
+.sim-config-file {
+  font-size: var(--pf-t--global--font--size--sm);
+  word-break: break-all;
+}
+
+.sim-no-containers {
+  color: var(--pf-t--global--text--color--subtle);
+  font-size: var(--pf-t--global--font--size--sm);
+}
+
+.sim-container-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.sim-container-card {
+  padding: 0.75rem 1rem;
+  background: var(--pf-t--global--background--color--secondary--default);
+  border-radius: var(--pf-t--global--border--radius--200);
+  border: 1px solid var(--pf-t--global--border--color--default);
+}
+
+.sim-card-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.sim-card-service {
+  font-weight: 600;
+}
+
+.sim-card-grid {
+  display: grid;
+  grid-template-columns: 6rem 1fr;
+  gap: 0.2rem 0.5rem;
+  font-size: var(--pf-t--global--font--size--sm);
+  color: var(--pf-t--global--text--color--subtle);
+}
+
+.sim-card-code {
+  word-break: break-all;
+  color: inherit;
+}
+
+.sim-card-ports {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-top: 0.6rem;
+}
+
+.sim-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--pf-t--global--font--size--sm);
+}
+
+.sim-table th {
+  text-align: left;
+  padding: 0.3rem 0.5rem;
+  color: var(--pf-t--global--text--color--subtle);
+  font-weight: 600;
+  border-bottom: 1px solid var(--pf-t--global--border--color--default);
+}
+
+.sim-table td {
+  padding: 0.3rem 0.5rem;
+  border-bottom: 1px solid var(--pf-t--global--border--color--default);
+  word-break: break-all;
+}
+
+.sim-mountpoint {
+  font-size: 0.75rem;
+  color: var(--pf-t--global--text--color--subtle);
+}
+
+.sim-job-list {
+  margin: 0;
+  padding-left: 1.25rem;
+  font-size: 0.875rem;
+}
+
+.sim-job-list li {
+  margin-bottom: 0.25rem;
+}
+
+.sim-job-profiles {
+  margin-left: 0.5rem;
+  color: var(--pf-t--global--text--color--subtle);
+}

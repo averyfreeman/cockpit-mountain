@@ -1,0 +1,72 @@
+'use strict';
+(function (root) {
+    const UNITS = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
+    function humanSize(bytes) {
+        bytes = Number(bytes) || 0;
+        if (bytes < 1024) return bytes + ' B';
+        let u = 0, v = bytes;
+        while (v >= 1024 && u < UNITS.length - 1) { v /= 1024; u++; }
+        return v.toFixed(1) + ' ' + UNITS[u];
+    }
+    function humanSpeed(bps) { return humanSize(bps) + '/s'; }
+    function pad2(n) { return (n < 10 ? '0' : '') + n; }
+    function eta(rem, sp) {
+        rem = Number(rem) || 0; sp = Number(sp) || 0;
+        if (sp <= 0 || rem <= 0) return '∞';
+        let s = Math.round(rem / sp);
+        const h = Math.floor(s / 3600); s -= h * 3600;
+        const m = Math.floor(s / 60); s -= m * 60;
+        if (h > 0) return h + 'h ' + pad2(m) + 'm';
+        if (m > 0) return m + 'm ' + pad2(s) + 's';
+        return s + 's';
+    }
+    function percent(done, total) {
+        total = Number(total) || 0; done = Number(done) || 0;
+        if (total <= 0) return 0;
+        const p = Math.floor(done / total * 100);
+        return p < 0 ? 0 : (p > 100 ? 100 : p);   // clamp to [0, 100]
+    }
+    function shq(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
+    function joinPath(base, name) { return (base.endsWith('/') ? base : base + '/') + name; }
+    function dirname(p) {
+        const i = p.replace(/\/+$/, '').lastIndexOf('/');
+        return i <= 0 ? '/' : p.slice(0, i);
+    }
+    function basename(p) { return p.replace(/\/+$/, '').split('/').pop(); }
+    // Bridge Lesson #2 helper: FileReader.readAsDataURL() yields
+    // "data:<mime>;base64,<payload>" — aria2.addTorrent/addMetalink want the
+    // bare base64 payload. Already-bare input passes through unchanged.
+    function stripDataUrl(dataUrl) { return String(dataUrl).replace(/^data:[^,]*,/, ''); }
+    // Builds the aria2 `select-file` option value from a set of 1-based file
+    // indices (aria2's own numbering — see getFiles()[i].index). Sorted
+    // ascending for a stable/readable CSV; empty Set → '' (caller must guard
+    // against submitting a select-file with zero files selected — aria2
+    // rejects that).
+    // Numeric-segment semver compare (self-update version check): 'v' prefix
+    // tolerated, missing segments treated as 0 (e.g. '1.2' vs '1.2.0'), each
+    // dot-segment compared numerically so '1.10.0' > '1.2.0' (plain string
+    // compare would get that backwards).
+    function semverGt(a, b) {
+        const clean = (s) => String(s || '').replace(/^v/i, '').split(/[-+]/)[0].split('.').map((n) => parseInt(n, 10) || 0);
+        const pa = clean(a), pb = clean(b);
+        const len = Math.max(pa.length, pb.length);
+        for (let i = 0; i < len; i++) {
+            const na = pa[i] || 0, nb = pb[i] || 0;
+            if (na > nb) return true;
+            if (na < nb) return false;
+        }
+        return false;
+    }
+    function selectFileCsv(selectedIndexSet, total) {
+        // A finite total (incl. 0) is a strict upper bound; an absent/NaN total is
+        // treated leniently (no upper bound). total=0 → no valid indices → ''.
+        const t = Number(total);
+        const upper = Number.isFinite(t) ? t : Infinity;
+        const indices = Array.from(selectedIndexSet || []).filter((n) => Number.isInteger(n) && n >= 1 && n <= upper);
+        indices.sort((a, b) => a - b);
+        return indices.join(',');
+    }
+    const ManifestUtil = { humanSize, humanSpeed, eta, percent, shq, joinPath, dirname, basename, stripDataUrl, selectFileCsv, semverGt };
+    root.ManifestUtil = ManifestUtil;
+    if (typeof module !== 'undefined' && module.exports) module.exports = ManifestUtil;
+})(typeof window !== 'undefined' ? window : globalThis);

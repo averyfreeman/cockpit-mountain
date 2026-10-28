@@ -1,0 +1,32 @@
+{
+  "name": "cockpit-nspawn",
+  "type": "module",
+  "version": "0.1.0",
+  "description": "Cockpit UI for systemd-nspawn containers",
+  "license": "LGPL-2.1",
+  "scripts": {
+    "build": "node build.js",
+    "watch": "node build.js --watch",
+    "lint": "oxlint src/"
+  },
+  "dependencies": {
+    "@patternfly/patternfly": "catalog:",
+    "@patternfly/react-core": "catalog:",
+    "@patternfly/react-icons": "catalog:",
+    "@patternfly/react-table": "catalog:",
+    "@xterm/addon-webgl": "0.19.0",
+    "@xterm/xterm": "6.0.0",
+    "argparse": "2.0.1",
+    "esbuild": "catalog:",
+    "esbuild-sass-plugin": "3.6.0",
+    "gettext-parser": "catalog:",
+    "react": "catalog:",
+    "react-dom": "catalog:"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "devDependencies": {
+    "oxlint": "catalog:"
+  }
+}

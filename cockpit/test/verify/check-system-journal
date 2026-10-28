@@ -1,0 +1,565 @@
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
+
+#
+# Copyright (C) 2013 Red Hat, Inc.
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
+
+import time
+
+import testlib
+
+
+class TestJournal(testlib.MachineCase):
+    def setUp(self):
+        super().setUp()
+        self.test_start_time = self.machine.execute("date +%s").strip()
+
+    def injectExtras(self):
+        self.browser.eval_js("""
+        ph_get_log_lines = function () {
+            var lines = [ ];
+            var panels = ph_find('.cockpit-log-panel').childNodes;
+            for (var i = 0; i < panels.length; ++i) {
+                var e = panels[i];
+                if (e.className === 'panel-heading') {
+                    lines.push (e.textContent);
+                } else {
+                    var msg = e.querySelector('.cockpit-log-message');
+                    msg = msg ? msg.textContent : "";
+                    var ident = '';
+                    var count = '';
+                    if (e.querySelectorAll('.cockpit-log-service-container').length > 0) {
+                        ident = e.querySelector('.cockpit-log-service-reduced').textContent;
+                        count = e.querySelector('.pf-v6-c-badge').textContent;
+                    } else {
+                        ident = e.querySelector('.cockpit-log-service');
+                        ident = ident ? ident.textContent : "";
+                    }
+                    lines.push ([ ident, msg, count ]);
+                }
+            }
+            var journal_start_text = ph_find('.journal-start').textContent;
+            if (journal_start_text !== "")
+                lines.push(journal_start_text);
+            // console.log(JSON.stringify(lines));
+            return lines;
+        }
+        """)
+
+    def testBasic(self):
+        b = self.browser
+
+        m = self.machine
+
+        # Certain versions of journald won't set _SYSTEMD_UNIT
+        # correctly for entries that are processed after the
+        # originating process has already exited.  So we keep the
+        # process around for a bit longer after the last line has been
+        # output.
+        #
+        self.write_file("/etc/systemd/system/log123.service",
+                        """
+[Unit]
+Description=123 different log lines
+
+[Service]
+ExecStart=/bin/sh -c '/usr/bin/seq 123; sleep 10'
+""")
+
+        self.write_file("/etc/systemd/system/slow10.service",
+                        """
+[Unit]
+Description=Slowly log 10 identical lines
+
+[Service]
+ExecStart=/bin/sh -c 'sleep 5; for s in $(seq 10); do echo SLOW; sleep 0.1; done; sleep 10'
+""")
+        self.addCleanup(m.execute, "systemctl daemon-reload")
+
+        self.login_and_go("/system/logs")
+        self.injectExtras()
+
+        def wait_log_lines(expected):
+            b.wait_visible(".cockpit-log-panel")
+            b.wait_js_func("""(function (expected) {
+          var lines = ph_get_log_lines ();
+
+          // Ignore date
+          if (lines.length > 1)
+              lines.shift();
+
+          if (expected.length != lines.length)
+            return false;
+          for (i = 0; i < expected.length; i++)
+            if (!new RegExp(JSON.stringify(expected[i])).test(JSON.stringify(lines[i])))
+              return false;
+          return true;
+        })""", expected)
+
+        def wait_journal_empty():
+            b.wait_in_text(".pf-v6-c-empty-state__body", "Can not find any logs using the current combination of filters.")
+
+        b.go("#/?priority=debug&service=log123.service")
+        wait_journal_empty()
+
+        def wait_log123():
+            b.wait_visible(".cockpit-log-panel")
+            b.wait_js_func("""(function () {
+          var lines = ph_get_log_lines();
+
+          var seq = 123;
+          var seen_day = false;
+
+          for (i = 1; i < lines.length; i++) {
+            l = lines[i];
+            if (l[2] != "") {
+              // console.log("repeat", l[2], "?");
+              return false;
+            }
+            if (l[0] == "systemd") {
+              // console.log(l[1], "?");
+              i++;
+            } else if (l[0] == "sh") {
+              if (l[1] != seq.toString()) {
+                // console.log(l[1], "?");
+                return false;
+              }
+              seq = seq - 1;
+            } else {
+              // console.log(l[0], "?");
+              return false;
+            }
+          }
+
+          if (seq != 0) {
+            // console.log("Didn't see all 'seq' lines.")
+            return false;
+          }
+
+          return true;
+        })""")
+
+        m.execute("systemctl start log123")
+
+        wait_log123()
+
+        b.go("#/?priority=debug&service=nonexisting.service")
+        wait_journal_empty()
+
+        b.go("#/?priority=debug&service=log123")
+        wait_log123()
+
+        b.go("#/?priority=debug&service=slow10.service")
+        wait_journal_empty()
+
+        def wait_slow10():
+            with b.wait_timeout(30):
+                wait_log_lines([["systemd", "slow10.service: Deactivated successfully.", ""], ["sh", "SLOW", "10"],
+                                ["systemd", "Started.*Slowly log 10 identical lines.", ""]])
+
+        def wait_log_present(message):
+            b.wait_visible(f"#journal-box .cockpit-logline .cockpit-log-message:contains('{message}')")
+
+        def wait_log_not_present(message):
+            b.wait_not_present(f"#journal-box .cockpit-logline .cockpit-log-message:contains('{message}')")
+
+        m.execute("systemctl start slow10")
+
+        wait_slow10()
+
+        b.go("#/?priority=debug&service=nonexisting.service")
+        wait_journal_empty()
+        b.go("#/?priority=debug&service=slow10.service")
+        wait_slow10()
+
+        b.go("#/?priority=debug")
+
+        m.execute("logger -p user.err --tag check-journal JUST ERROR")
+        m.execute("logger -p 5 --tag just-a-service THE SERVICE")
+        wait_log_present("THE SERVICE")
+        wait_log_present("JUST ERROR")
+
+        # We cannot open this select with tests but we need to wait until it gets loaded
+        b.select_PF("#journal-identifier-menu .pf-v6-c-menu-toggle__button", "just-a-service")
+        wait_log_not_present("JUST ERROR")
+        wait_log_present("THE SERVICE")
+        b.select_PF("#journal-identifier-menu .pf-v6-c-menu-toggle__button", "All")
+        wait_log_present("JUST ERROR")
+        wait_log_present("THE SERVICE")
+
+        b.select_PF("#journal-prio-menu", "Error and above")
+        wait_log_not_present("THE SERVICE")
+        wait_log_present("JUST ERROR")
+        b.select_PF("#journal-identifier-menu .pf-v6-c-menu-toggle__button", "check-journal")
+        b.wait_not_present("#journal-identifier-menu + ul button:contains('just-a-service')")
+
+        b.go("#/?tag=test-stream&priority=notice")
+        wait_journal_empty()
+
+        # Verify the filter panel
+        b.assert_pixels("#journal", "journal-filters-panel", skip_layouts=["mobile"])
+
+        # Test inline help
+        b.click("#journal-grep button[aria-label='Open advanced search']")
+        b.wait_val("#journal-cmd-copy input", "journalctl --no-tail --since=-24hours --priority=notice --reverse -- SYSLOG_IDENTIFIER=test-stream")
+        b.click("#journal-grep button[aria-label='Open advanced search']")
+        b.wait_not_present("#journal-cmd-copy")
+
+        # Test popover in advanced search
+        b.click("#journal-grep button[aria-label='Open advanced search']")
+        b.assert_pixels(".pf-v6-c-panel", "logs-filter-panel", skip_layouts=["mobile"])
+
+        b.click("label[for='since_0'] button.log-text-filter-popover-button")
+        b.wait_text(".pf-v6-c-popover__title-text", "Start showing entries on or newer than the specified date.")
+        # FIXME: Closing the popover with the X button also closes the whole search form (just not with ph_mouse)
+        # b.click(".pf-v6-c-popover__close button")
+        # Thus close the popover the same way as we opened it, with the (i) icon
+        b.click("label[for='since_0'] button.log-text-filter-popover-button")
+        b.wait_not_present(".pf-v6-c-popover")
+        b.click("#journal-grep button[aria-label='Open advanced search']")
+        b.wait_not_present("#journal-cmd-copy")
+
+        # Test following
+        m.execute("logger --tag test-stream Message 1")
+        m.execute("logger --tag test-stream Message 2")
+        b.wait_visible("#journal-box .cockpit-logline .cockpit-log-message:contains('Message 1')")
+        b.wait_visible("#journal-box .cockpit-logline .cockpit-log-message:contains('Message 2')")
+
+        b.click("#journal-follow:contains('Pause')")
+        b.wait_in_text("#journal-follow", "Resume")
+        m.execute("logger --tag test-stream Message 3")
+        time.sleep(3)
+        b.wait_not_present("#journal-box .cockpit-logline .cockpit-log-message:contains('Message 3')")
+
+        b.click("#journal-follow:contains('Resume')")
+        b.wait_in_text("#journal-follow", "Pause")
+        b.wait_visible("#journal-box .cockpit-logline .cockpit-log-message:contains('Message 3')")
+        # This fails if all logs are reloaded
+        b.wait_visible("#journal-box .cockpit-logline .cockpit-log-message:contains('Message 1')")
+        m.execute("logger --tag test-stream Message 4")
+        b.wait_visible("#journal-box .cockpit-logline .cockpit-log-message:contains('Message 4')")
+
+        # Test message filtering
+
+        b.focus("#journal-grep input")
+
+        b.input_text("1")
+        b.click("#journal-grep button[aria-label=Search]")
+
+        b.wait_js_cond('window.location.hash === "#/?grep=1&priority=notice&tag=test-stream"')
+        b.wait_not_present("#journal-box .cockpit-logline .cockpit-log-message:contains('Message 2')")
+        b.wait_not_present("#journal-box .cockpit-logline .cockpit-log-message:contains('Message 3')")
+        b.wait_visible("#journal-box .cockpit-logline .cockpit-log-message:contains('Message 1')")
+
+        b.focus("#journal-grep input")
+        b.key("Backspace")
+        b.input_text("m.*[2-5]")
+        b.click("#journal-grep button[aria-label=Search]")
+        b.wait_not_present("#journal-box .cockpit-logline .cockpit-log-message:contains('Message 1')")
+        b.wait_visible("#journal-box .cockpit-logline .cockpit-log-message:contains('Message 2')")
+        b.wait_visible("#journal-box .cockpit-logline .cockpit-log-message:contains('Message 3')")
+
+        m.execute(r"printf 'MESSAGE=Message 4\nPRIORITY=3\nFOO=bar\n' | logger --journald")
+        m.execute(r"printf 'MESSAGE=Message 5\nPRIORITY=3\nFOO=bar\n' | logger --journald")
+        m.execute(r"printf 'MESSAGE=Message 6\nPRIORITY=3\nBAR=foo\n' | logger --journald")
+
+        b.go("#/?tag=logger")
+
+        b.wait_visible("#journal-box .cockpit-logline .cockpit-log-message:contains('Message 4')")
+        b.wait_visible("#journal-box .cockpit-logline .cockpit-log-message:contains('Message 5')")
+        b.wait_visible("#journal-box .cockpit-logline .cockpit-log-message:contains('Message 6')")
+
+        b.focus("#journal-grep input")
+        b.input_text("FOO=bar [5-6]")
+        b.click("#journal-grep button[aria-label=Search]")
+        b.wait_val("#journal-grep input", "priority:err identifier:logger FOO=bar [5-6]")
+
+        b.wait_not_present("#journal-box .cockpit-logline .cockpit-log-message:contains('Message 4')")
+        b.wait_not_present("#journal-box .cockpit-logline .cockpit-log-message:contains('Message 6')")
+        b.wait_visible("#journal-box .cockpit-logline .cockpit-log-message:contains('Message 5')")
+
+        b.focus("#journal-grep input")
+        b.key("Backspace", 13)
+        b.input_text("[5-6]")
+        b.click("#journal-grep button[aria-label=Search]")
+        b.wait_not_present("#journal-box .cockpit-logline .cockpit-log-message:contains('Message 4')")
+        b.wait_visible("#journal-box .cockpit-logline .cockpit-log-message:contains('Message 6')")
+        b.wait_visible("#journal-box .cockpit-logline .cockpit-log-message:contains('Message 5')")
+
+        # Test filters
+        b.select_PF("#logs-predefined-filters", "Current boot")
+        b.wait_val("#journal-grep input", "priority:err identifier:logger boot:0 [5-6]")
+
+        b.select_PF("#logs-predefined-filters", "Previous boot")
+        b.wait_val("#journal-grep input", "priority:err identifier:logger boot:-1 [5-6]")
+
+        b.select_PF("#logs-predefined-filters", "Last 24 hours")
+        b.wait_val("#journal-grep input", "priority:err identifier:logger since:-24hours [5-6]")
+
+        b.select_PF("#logs-predefined-filters", "Last 7 days")
+        b.wait_val("#journal-grep input", "priority:err identifier:logger since:-7days [5-6]")
+
+        # Check that 'until' qualifier keeps streaming until given time
+        b.focus("#journal-grep input")
+        b.key("Backspace", 4)
+        b.input_text("6-9] until:+15s")
+        b.click("#journal-grep button[aria-label=Search]")
+        b.wait_not_present("#journal-box .cockpit-logline .cockpit-log-message:contains('Message 5')")
+        b.wait_visible("#journal-box .cockpit-logline .cockpit-log-message:contains('Message 6')")
+        m.execute(r"printf 'MESSAGE=Message 7\nPRIORITY=3\nBAR=foo\n' | logger --journald")
+        b.wait_visible("#journal-box .cockpit-logline .cockpit-log-message:contains('Message 7')")
+        time.sleep(20)
+        m.execute(r"printf 'MESSAGE=Message 8\nPRIORITY=3\nBAR=foo\n' | logger --journald")
+        time.sleep(5)
+        b.wait_not_present("#journal-box .cockpit-logline .cockpit-log-message:contains('Message 8')")
+
+        # CVE-2026-4802
+        b.go("/system/logs#/?boot=0;touch${IFS}/tmp/pwned;&priority=err")
+        b.wait_in_text("#journal-box", "No logs found")
+        failed_to_parse = False
+        for log in self.browser.get_js_log():
+            if "Failed to parse boot descriptor" in log:
+                failed_to_parse = True
+
+        self.assertTrue(failed_to_parse)
+        m.execute("! test -f /tmp/pwned")
+
+        self.allow_journal_messages(".*Data from the specified boot .* is not available: No such boot ID in journal.*")
+
+    @testlib.nondestructive
+    def testIdentifierReloading(self):
+        """
+        Test verifies https://github.com/cockpit-project/cockpit/issues/20123
+        Updating Identifiers when changing priorities
+        """
+        b = self.browser
+        m = self.machine
+        tag_error = "check-error-inside"
+        tag_info = "check-info-inside"
+        m.execute(f"logger -p user.err --tag {tag_error} {tag_error.upper()}")
+        m.execute(f"logger -p 5 --tag {tag_info} {tag_info.upper()}")
+        self.login_and_go("/system/logs")
+
+        b.go(f"#/?priority=err&since=@{self.test_start_time}")
+        b.wait_visible(f"#journal-box .cockpit-logline .cockpit-log-message:contains('{tag_error.upper()}')")
+        b.wait_not_present(f"#journal-box .cockpit-logline .cockpit-log-message:contains('{tag_info.upper()}')")
+        b.select_PF("#journal-identifier-menu .pf-v6-c-menu-toggle__button", tag_error)
+        b.wait_not_present(f"#journal-identifier-menu + ul button:contains('{tag_info}')")
+
+        b.select_PF("#journal-prio-menu", "Debug and above")
+        b.select_PF("#journal-identifier-menu .pf-v6-c-menu-toggle__button", "All")
+        b.wait_visible(f"#journal-box .cockpit-logline .cockpit-log-message:contains('{tag_error.upper()}')")
+        b.wait_visible(f"#journal-box .cockpit-logline .cockpit-log-message:contains('{tag_info.upper()}')")
+        b.select_PF("#journal-identifier-menu .pf-v6-c-menu-toggle__button", tag_error)
+        b.select_PF("#journal-identifier-menu .pf-v6-c-menu-toggle__button", tag_info)
+
+        b.select_PF("#journal-prio-menu", "Error and above")
+        b.select_PF("#journal-identifier-menu .pf-v6-c-menu-toggle__button", "All")
+        b.wait_visible(f"#journal-box .cockpit-logline .cockpit-log-message:contains('{tag_error.upper()}')")
+        b.wait_not_present(f"#journal-box .cockpit-logline .cockpit-log-message:contains('{tag_info.upper()}')")
+        b.select_PF("#journal-identifier-menu .pf-v6-c-menu-toggle__button", tag_error)
+        b.wait_not_present(f"#journal-identifier-menu + ul button:contains('{tag_info}')")
+
+    def testRebootAndTime(self):
+        b = self.browser
+        m = self.machine
+
+        self.allow_journal_messages(".*Failed to get realtime timestamp: Cannot assign requested address.*")
+
+        # HACK: pmie and pmlogger take a looooong time to shutdown (https://bugzilla.redhat.com/show_bug.cgi?id=1703348)
+        # so disable them for this test, we don't test PCP here
+        m.execute("systemctl disable --now pmie pmlogger || true")
+
+        m.execute("""ntp=`timedatectl show --property NTP --value`
+                     if [ $ntp == "yes" ]; then
+                         timedatectl set-ntp off
+                     fi""")
+        # this is asynchronous; must wait until timesyncd stops before the time can be set
+        m.execute("while systemctl is-active systemd-timesyncd; do sleep 1; done")
+        m.execute("timedatectl set-time 2037-01-01")
+
+        def wait_log_lines(expected):
+            b.wait_visible(".cockpit-log-panel")
+            b.wait_js_func("""(function (expected) {
+          var lines = ph_get_log_lines ();
+
+          if (expected.length != lines.length)
+            return false;
+          for (i = 0; i < expected.length; i++)
+            if (JSON.stringify(expected[i]) != JSON.stringify(lines[i]))
+              return false;
+          return true;
+        })""", expected)
+
+        self.login_and_go("/system/logs")
+
+        self.injectExtras()
+        b.eval_js("""
+            localTime = function(time) {
+                var month_names = [
+                    'January',
+                    'February',
+                    'March',
+                    'April',
+                    'May',
+                    'June',
+                    'July',
+                    'August',
+                    'September',
+                    'October',
+                    'November',
+                    'December'
+                ];
+                var d = new Date(time);
+                return month_names[d.getMonth()] + ' ' + d.getDate().toFixed() + ', ' + d.getFullYear().toFixed();
+            }
+        """)
+        # January 1, 2037 00:00:00Z in browser time
+        expected_date = b.eval_js("localTime(2114380800000)")
+
+        # insert messages as errors because we know these will be shown by default
+        m.execute("systemctl start systemd-journald.service")
+        m.execute("logger -p user.err --tag check-journal BEFORE BOOT")
+        b.go("#/?tag=check-journal")
+        wait_log_lines([expected_date, ["check-journal", "BEFORE BOOT", ""]])
+        m.execute("systemctl stop systemd-journald.service")
+
+        # Now reboot things
+        self.reboot()
+        m.execute("timedatectl set-time '2037-01-01 00:05:00'")
+        m.execute("logger -p user.err --tag check-journal AFTER BOOT")
+
+        m.start_cockpit()
+        b.switch_to_top()
+        b.relogin('/system/logs')
+        self.injectExtras()
+
+        b.go("#/?tag=check-journal")
+        wait_log_lines([expected_date,
+                        ["check-journal", "AFTER BOOT", ""],
+                        ["", "Reboot", ""],
+                        ["check-journal", "BEFORE BOOT", ""]
+                        ])
+
+        b.go("#/?boot=0&tag=check-journal")
+        wait_log_lines([expected_date,
+                        ["check-journal", "AFTER BOOT", ""],
+                        "Load earlier entries",
+                        ])
+
+        b.click('#start-box button:contains("Load earlier entries")')
+
+        wait_log_lines([expected_date,
+                        ["check-journal", "AFTER BOOT", ""],
+                        ["", "Reboot", ""],
+                        ["check-journal", "BEFORE BOOT", ""]
+                        ])
+
+        # Check selecting of services
+        b.go("#/?boot=-1&tag=check-journal")
+        wait_log_lines([expected_date,
+                        ["check-journal", "BEFORE BOOT", ""],
+                        "Load earlier entries"
+                        ])
+
+        b.go("#/?boot=0&tag=check-journal")
+        wait_log_lines([expected_date,
+                        ["check-journal", "AFTER BOOT", ""],
+                        "Load earlier entries"
+                        ])
+
+        # Check that 'until' qualifier shows only until some date
+        b.go("#/?tag=check-journal")
+        wait_log_lines([expected_date,
+                        ["check-journal", "AFTER BOOT", ""],
+                        ["", "Reboot", ""],
+                        ["check-journal", "BEFORE BOOT", ""]
+                        ])
+
+        b.focus("#journal-grep input")
+        b.input_text("until:2037-01-01\\ 00:03")
+        b.click("#journal-grep button[aria-label=Search]")
+        wait_log_lines([expected_date,
+                        ["check-journal", "BEFORE BOOT", ""],
+                        "Load earlier entries"
+                        ])
+
+        b.click("#journal-identifier-menu .pf-v6-c-menu-toggle__button")
+        b.wait_visible(".pf-v6-c-menu ul button:contains('check-journal')")
+
+        # New messages are not streamed when 'until' is in the past
+        m.execute("logger -p user.err --tag check-journal RIGHT NOW")
+        time.sleep(5)
+        wait_log_lines([expected_date,
+                        ["check-journal", "BEFORE BOOT", ""],
+                        "Load earlier entries"
+                        ])
+
+    @testlib.nondestructive
+    def testBinary(self):
+        b = self.browser
+        m = self.machine
+        bin_data_long = {"MSG": (r"Hel\01" * 250) + "a", "BIN": (r"Hel\01" * 250) + "a"}
+        bin_data_short = {"MSG": "Hello \01 World", "BIN": "a\01b\02c\03"}
+
+        def wait_field(name, value):
+            b.wait_text(f"#log-details dd[data-label='{name}']", value)
+
+        def check_entry(msg, bin_msg):
+            b.click(f"#journal-box .cockpit-logline .cockpit-log-message:contains('{msg}')")
+            b.wait_text(".pf-v6-c-card__title", msg)
+            wait_field("FOO", "bar")
+            wait_field("BIN", bin_msg)
+            b.click('.pf-v6-c-breadcrumb li:first-of-type')
+            b.wait_visible(f"#journal-box .cockpit-logline .cockpit-log-message:contains('{msg}')")
+
+        m.execute(fr"printf 'MESSAGE={bin_data_short['MSG']}\nPRIORITY=3\nFOO=bar\nBIN={bin_data_short['BIN']}\n' | logger --journald")
+        self.login_and_go("/system/logs#/?tag=logger&since=@" + self.test_start_time)
+        check_entry(bin_data_short["MSG"], "[binary data]")  # Test when binary msg is <= 1000 bytes
+        m.execute(fr"printf 'MESSAGE={bin_data_long['MSG']}\nPRIORITY=3\nFOO=bar\nBIN={bin_data_long['BIN']}\n' | logger --journald")
+        b.go("/system/logs#/?tag=logger&since=@" + self.test_start_time)
+        check_entry("[binary data]", "[binary data]")  # Test when binary msg is > 1000 bytes
+
+    @testlib.nondestructive
+    def testNoMessage(self):
+        b = self.browser
+        m = self.machine
+
+        m.execute(r"printf 'PRIORITY=3\nFOO=bar\n' | logger --journald")
+        self.login_and_go("/system/logs#/?tag=logger&since=@" + self.test_start_time)
+        b.click("#journal-box .cockpit-logline .cockpit-log-message:contains('[no data]')")
+        b.wait_text(".pf-v6-c-card__title", "[no data]")
+
+    @testlib.nondestructive
+    def testLogLevel(self):
+
+        b = self.browser
+        m = self.machine
+
+        m.execute("logger -p user.info --tag check-journal INFO_MESSAGE")
+        m.execute("logger -p user.warn --tag check-journal WARNING_MESSAGE")
+        m.execute("logger -p user.emerg --tag check-journal EMERGENCY_MESSAGE")
+
+        self.login_and_go("/system/logs#/?tag=check-journal&since=@" + self.test_start_time)
+
+        journal_line_selector = "#journal-box .cockpit-logline:has(span:contains('{0}'))"
+
+        b.select_PF("#journal-prio-menu", "Only emergency")
+        b.wait_visible(journal_line_selector.format("EMERGENCY_MESSAGE"))
+        b.wait_not_present(journal_line_selector.format("WARNING_MESSAGE"))
+        b.wait_not_present(journal_line_selector.format("INFO_MESSAGE"))
+
+        b.select_PF("#journal-prio-menu", "Warning and above")
+        b.wait_visible(journal_line_selector.format("EMERGENCY_MESSAGE"))
+        b.wait_visible(journal_line_selector.format("WARNING_MESSAGE"))
+        b.wait_not_present(journal_line_selector.format("INFO_MESSAGE"))
+
+        b.select_PF("#journal-prio-menu", "Info and above")
+        b.wait_visible(journal_line_selector.format("EMERGENCY_MESSAGE"))
+        b.wait_visible(journal_line_selector.format("WARNING_MESSAGE"))
+        b.wait_visible(journal_line_selector.format("INFO_MESSAGE"))
+
+
+if __name__ == '__main__':
+    testlib.test_main()
