@@ -22,7 +22,6 @@
 # Local checkouts and source archives used to assemble this repository
 /forks/*
 !/forks/guidance-focused/
-/must-change-remote-origin/
 /transfer-finished-code-to-newly-forked-folders/
 /PLAN.md
 /PR_DRAFT.md
